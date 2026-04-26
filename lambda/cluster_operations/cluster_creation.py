@@ -502,7 +502,7 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
                 },
                 size="SMALL",
                 networking={
-                    "subnetIds": private_subnet_ids,
+                    "subnetIds": private_subnet_ids[:1],
                     "securityGroupIds": [compute_sg],
                 },
                 slurmConfiguration={

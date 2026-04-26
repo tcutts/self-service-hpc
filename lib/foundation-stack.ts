@@ -742,6 +742,7 @@ export class FoundationStack extends cdk.Stack {
       actions: [
         'ec2:DescribeSubnets',
         'ec2:DescribeSecurityGroups',
+        'ec2:GetSecurityGroupsForVpc',
         'ec2:DescribeVpcs',
         'ec2:CreateNetworkInterface',
         'ec2:DescribeNetworkInterfaces',
