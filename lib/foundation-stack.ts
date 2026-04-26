@@ -514,8 +514,8 @@ export class FoundationStack extends cdk.Stack {
     this.projectManagementLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'budgets:CreateBudget',
-        'budgets:UpdateBudget',
-        'budgets:DescribeBudget',
+        'budgets:ModifyBudget',
+        'budgets:ViewBudget',
         'budgets:CreateNotification',
         'budgets:UpdateNotification',
         'budgets:DeleteNotification',
