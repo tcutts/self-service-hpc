@@ -205,7 +205,7 @@ def start_cdk_destroy(event: dict[str, Any]) -> dict[str, Any]:
                 },
                 {
                     "name": "CDK_COMMAND",
-                    "value": f"npx cdk destroy HpcProject-{project_id} --force",
+                    "value": f"npx cdk destroy HpcProject-{project_id} --exclusively --force",
                     "type": "PLAINTEXT",
                 },
             ],

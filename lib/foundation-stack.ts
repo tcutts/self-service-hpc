@@ -1171,6 +1171,10 @@ export class FoundationStack extends cdk.Stack {
           },
           build: {
             commands: [
+              // cdk.json may contain a "profile" key for local development.
+              // In CodeBuild the service role credentials are used directly,
+              // so we strip the profile to avoid "no credentials" errors.
+              'node -e "const f=\'cdk.json\';const c=JSON.parse(require(\'fs\').readFileSync(f));delete c.profile;require(\'fs\').writeFileSync(f,JSON.stringify(c,null,2))"',
               '$CDK_COMMAND',
             ],
           },

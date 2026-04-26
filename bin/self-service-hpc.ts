@@ -100,7 +100,8 @@ if (dynamicProjectId && dynamicProjectId !== 'sample-project') {
       trustedCidrRanges,
     },
   );
-  dynamicProject.addDependency(foundation);
+  // No addDependency on foundation — the --exclusively flag ensures
+  // only this stack is deployed, and the foundation already exists.
 }
 
 // -----------------------------------------------------------------------

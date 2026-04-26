@@ -180,7 +180,7 @@ def start_cdk_deploy(event: dict[str, Any]) -> dict[str, Any]:
                 },
                 {
                     "name": "CDK_COMMAND",
-                    "value": f"npx cdk deploy HpcProject-{project_id} --require-approval never",
+                    "value": f"npx cdk deploy HpcProject-{project_id} --exclusively --require-approval never",
                     "type": "PLAINTEXT",
                 },
             ],
