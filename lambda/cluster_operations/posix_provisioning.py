@@ -1,0 +1,538 @@
+"""POSIX user provisioning for HPC cluster nodes.
+
+Provides utilities for:
+- Generating EC2 launch template user data scripts that create POSIX
+  user accounts on cluster nodes at boot time.
+- Propagating new users to active cluster nodes via SSM Run Command.
+- Generating bash commands for individual user creation and generic
+  account disabling.
+
+Environment variables
+---------------------
+USERS_TABLE_NAME       DynamoDB PlatformUsers table name
+PROJECTS_TABLE_NAME    DynamoDB Projects table name
+CLUSTERS_TABLE_NAME    DynamoDB Clusters table name
+
+DynamoDB key schemas
+--------------------
+Projects table membership records:
+    PK = PROJECT#{projectId}, SK = MEMBER#{userId}
+
+PlatformUsers table user profiles:
+    PK = USER#{userId}, SK = PROFILE  (contains posixUid, posixGid)
+
+Clusters table:
+    PK = PROJECT#{projectId}, SK = CLUSTER#{clusterName}
+    (contains status, loginNodeIp)
+"""
+
+import logging
+import time
+from typing import Any
+
+import boto3
+from botocore.exceptions import ClientError
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
+
+# ---------------------------------------------------------------------------
+# AWS clients
+# ---------------------------------------------------------------------------
+dynamodb = boto3.resource("dynamodb")
+ssm_client = boto3.client("ssm")
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+GENERIC_ACCOUNTS = ["ec2-user", "centos", "ubuntu"]
+
+_SSM_MAX_RETRIES = 3
+_SSM_BASE_DELAY_SECONDS = 1
+
+# Propagation status constants
+PROPAGATION_SUCCESS = "SUCCESS"
+PROPAGATION_PENDING = "PENDING_PROPAGATION"
+
+
+# ===================================================================
+# User data script generation
+# ===================================================================
+
+def generate_user_creation_commands(user_id: str, uid: int, gid: int) -> list[str]:
+    """Generate bash commands to create a single POSIX user account.
+
+    Creates the user with the specified UID/GID, a home directory,
+    and sets ownership on the home directory.
+
+    Parameters
+    ----------
+    user_id : str
+        The platform user identifier (used as the Linux username).
+    uid : int
+        The POSIX UID to assign.
+    gid : int
+        The POSIX GID to assign.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    if not user_id:
+        return []
+    commands = [
+        f"groupadd -g {gid} {user_id} 2>/dev/null || true",
+        f"useradd -u {uid} -g {gid} -m -d /home/{user_id} {user_id} 2>/dev/null || true",
+        f"chown {uid}:{gid} /home/{user_id}",
+    ]
+    return commands
+
+
+def generate_disable_generic_accounts_commands() -> list[str]:
+    """Generate bash commands to disable interactive login for generic accounts.
+
+    Disables ec2-user, centos, and ubuntu accounts by locking the
+    password and setting the shell to /sbin/nologin.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    commands = []
+    for account in GENERIC_ACCOUNTS:
+        commands.append(
+            f"if id {account} &>/dev/null; then "
+            f"usermod -L -s /sbin/nologin {account}; "
+            f"fi"
+        )
+    return commands
+
+
+def generate_pam_exec_logging_commands(log_file: str = "/var/log/hpc-access.log") -> list[str]:
+    """Generate bash commands to configure pam_exec for SSH/DCV login event logging.
+
+    Creates a pam_exec hook script that logs user login events
+    (user, remote host, timestamp) to a dedicated log file, then
+    configures PAM to invoke the script on session open.
+
+    Parameters
+    ----------
+    log_file : str
+        Path to the access log file. Defaults to ``/var/log/hpc-access.log``.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    hook_script = "/usr/local/bin/hpc-access-log.sh"
+    commands = [
+        f"# --- Configure pam_exec for SSH/DCV login event logging ---",
+        f"cat > {hook_script} << 'PAMEOF'",
+        "#!/bin/bash",
+        f'echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) user=$PAM_USER remote_host=$PAM_RHOST service=$PAM_SERVICE type=$PAM_TYPE" >> {log_file}',
+        "PAMEOF",
+        f"chmod 755 {hook_script}",
+        f"touch {log_file}",
+        f"chmod 644 {log_file}",
+        # Add pam_exec to sshd PAM config (idempotent — only if not already present)
+        f"if ! grep -q '{hook_script}' /etc/pam.d/sshd 2>/dev/null; then",
+        f"  echo 'session optional pam_exec.so {hook_script}' >> /etc/pam.d/sshd",
+        "fi",
+        # Add pam_exec to DCV PAM config if it exists
+        f"if [ -f /etc/pam.d/dcv ] && ! grep -q '{hook_script}' /etc/pam.d/dcv 2>/dev/null; then",
+        f"  echo 'session optional pam_exec.so {hook_script}' >> /etc/pam.d/dcv",
+        "fi",
+    ]
+    return commands
+
+
+def generate_cloudwatch_agent_commands(
+    project_id: str,
+    log_file: str = "/var/log/hpc-access.log",
+) -> list[str]:
+    """Generate bash commands to configure the CloudWatch agent for access log forwarding.
+
+    Writes a CloudWatch agent configuration that ships the access log
+    file to the project's CloudWatch Log Group, then starts (or
+    restarts) the agent.
+
+    Parameters
+    ----------
+    project_id : str
+        The project identifier, used to construct the log group name.
+    log_file : str
+        Path to the access log file. Defaults to ``/var/log/hpc-access.log``.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    log_group = f"/hpc-platform/clusters/{project_id}/access-logs"
+    config_path = "/opt/aws/amazon-cloudwatch-agent/etc/hpc-access-log.json"
+    commands = [
+        "# --- Configure CloudWatch agent for access log forwarding ---",
+        f"cat > {config_path} << 'CWEOF'",
+        "{",
+        '  "logs": {',
+        '    "logs_collected": {',
+        '      "files": {',
+        '        "collect_list": [',
+        "          {",
+        f'            "file_path": "{log_file}",',
+        f'            "log_group_name": "{log_group}",',
+        '            "log_stream_name": "{instance_id}/access-log",',
+        '            "timezone": "UTC"',
+        "          }",
+        "        ]",
+        "      }",
+        "    }",
+        "  }",
+        "}",
+        "CWEOF",
+        # Start or restart the CloudWatch agent with the new config
+        f"if command -v amazon-cloudwatch-agent-ctl &>/dev/null; then",
+        f"  amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:{config_path}",
+        "fi",
+    ]
+    return commands
+
+
+def generate_user_data_script(
+    project_id: str,
+    users_table_name: str,
+    projects_table_name: str,
+) -> str:
+    """Generate a bash user data script for EC2 launch templates.
+
+    The script:
+    1. Fetches project members from the Projects DynamoDB table.
+    2. Looks up each member's POSIX UID/GID from the PlatformUsers table.
+    3. Creates POSIX user accounts with the correct UID/GID.
+    4. Sets home directory ownership.
+    5. Disables interactive login for generic accounts.
+
+    Parameters
+    ----------
+    project_id : str
+        The project identifier to fetch members for.
+    users_table_name : str
+        The DynamoDB PlatformUsers table name.
+    projects_table_name : str
+        The DynamoDB Projects table name.
+
+    Returns
+    -------
+    str
+        A complete bash script suitable for EC2 user data.
+    """
+    members = _fetch_project_members(projects_table_name, project_id)
+    users = _fetch_user_posix_identities(users_table_name, members)
+
+    lines = [
+        "#!/bin/bash",
+        "set -euo pipefail",
+        "",
+        f"# POSIX user provisioning for project: {project_id}",
+        f"# Generated for {len(users)} user(s)",
+        "",
+        "# --- Create project user accounts ---",
+    ]
+
+    for user in users:
+        user_id = user["userId"]
+        uid = user["posixUid"]
+        gid = user["posixGid"]
+        lines.append(f"# User: {user_id}")
+        for cmd in generate_user_creation_commands(user_id, uid, gid):
+            lines.append(cmd)
+        lines.append("")
+
+    lines.append("# --- Disable generic accounts ---")
+    for cmd in generate_disable_generic_accounts_commands():
+        lines.append(cmd)
+
+    lines.append("")
+    lines.append("# --- Configure access logging ---")
+    for cmd in generate_pam_exec_logging_commands():
+        lines.append(cmd)
+
+    lines.append("")
+    for cmd in generate_cloudwatch_agent_commands(project_id):
+        lines.append(cmd)
+
+    lines.append("")
+    lines.append("echo 'POSIX user provisioning complete.'")
+
+    return "\n".join(lines)
+
+
+# ===================================================================
+# SSM Run Command propagation
+# ===================================================================
+
+def propagate_user_to_clusters(
+    user_id: str,
+    uid: int,
+    gid: int,
+    project_id: str,
+    clusters_table_name: str,
+) -> str:
+    """Propagate a new POSIX user to all active cluster nodes via SSM.
+
+    Queries the Clusters DynamoDB table for active clusters in the
+    project, then sends an SSM Run Command to each cluster's login
+    node to create the user account.
+
+    Retries up to 3 times with exponential backoff on SSM failures.
+
+    Parameters
+    ----------
+    user_id : str
+        The platform user identifier.
+    uid : int
+        The POSIX UID to assign.
+    gid : int
+        The POSIX GID to assign.
+    project_id : str
+        The project identifier.
+    clusters_table_name : str
+        The DynamoDB Clusters table name.
+
+    Returns
+    -------
+    str
+        PROPAGATION_SUCCESS if all clusters were updated, or
+        PROPAGATION_PENDING if any cluster failed after retries.
+    """
+    active_clusters = _fetch_active_clusters(clusters_table_name, project_id)
+
+    if not active_clusters:
+        logger.info(
+            "No active clusters for project '%s' — skipping propagation.",
+            project_id,
+        )
+        return PROPAGATION_SUCCESS
+
+    commands = generate_user_creation_commands(user_id, uid, gid)
+    if not commands:
+        return PROPAGATION_SUCCESS
+
+    script = "\n".join(commands)
+    all_succeeded = True
+
+    for cluster in active_clusters:
+        cluster_name = cluster.get("clusterName", "")
+        instance_id = cluster.get("loginNodeInstanceId", "")
+
+        if not instance_id:
+            logger.warning(
+                "Cluster '%s' has no loginNodeInstanceId — skipping.",
+                cluster_name,
+            )
+            all_succeeded = False
+            continue
+
+        success = _send_ssm_command_with_retry(
+            instance_id=instance_id,
+            script=script,
+            cluster_name=cluster_name,
+            user_id=user_id,
+        )
+        if not success:
+            all_succeeded = False
+
+    status = PROPAGATION_SUCCESS if all_succeeded else PROPAGATION_PENDING
+    logger.info(
+        "User '%s' propagation to project '%s' clusters: %s",
+        user_id,
+        project_id,
+        status,
+    )
+    return status
+
+
+# ===================================================================
+# Internal helpers
+# ===================================================================
+
+def _fetch_project_members(
+    projects_table_name: str,
+    project_id: str,
+) -> list[str]:
+    """Fetch the list of user IDs that are members of a project.
+
+    Queries the Projects table for items with
+    PK=PROJECT#{projectId} and SK begins_with MEMBER#.
+
+    Returns a list of user ID strings.
+    """
+    table = dynamodb.Table(projects_table_name)
+    try:
+        response = table.query(
+            KeyConditionExpression=(
+                boto3.dynamodb.conditions.Key("PK").eq(f"PROJECT#{project_id}")
+                & boto3.dynamodb.conditions.Key("SK").begins_with("MEMBER#")
+            ),
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed to fetch members for project '%s': %s",
+            project_id,
+            exc,
+        )
+        return []
+
+    members = []
+    for item in response.get("Items", []):
+        user_id = item.get("userId", "")
+        if user_id:
+            members.append(user_id)
+
+    return members
+
+
+def _fetch_user_posix_identities(
+    users_table_name: str,
+    user_ids: list[str],
+) -> list[dict[str, Any]]:
+    """Look up POSIX UID/GID for a list of user IDs.
+
+    Queries the PlatformUsers table for each user's profile record
+    (PK=USER#{userId}, SK=PROFILE) and extracts posixUid and posixGid.
+
+    Returns a list of dicts with userId, posixUid, posixGid.
+    """
+    table = dynamodb.Table(users_table_name)
+    users = []
+
+    for user_id in user_ids:
+        try:
+            response = table.get_item(
+                Key={"PK": f"USER#{user_id}", "SK": "PROFILE"},
+            )
+        except ClientError as exc:
+            logger.warning(
+                "Failed to fetch POSIX identity for user '%s': %s",
+                user_id,
+                exc,
+            )
+            continue
+
+        item = response.get("Item")
+        if item and "posixUid" in item and "posixGid" in item:
+            users.append({
+                "userId": user_id,
+                "posixUid": int(item["posixUid"]),
+                "posixGid": int(item["posixGid"]),
+            })
+        else:
+            logger.warning(
+                "User '%s' has no POSIX identity — skipping.",
+                user_id,
+            )
+
+    return users
+
+
+def _fetch_active_clusters(
+    clusters_table_name: str,
+    project_id: str,
+) -> list[dict[str, Any]]:
+    """Fetch active clusters for a project from DynamoDB.
+
+    Queries for items with PK=PROJECT#{projectId} and
+    SK begins_with CLUSTER#, then filters for status=ACTIVE.
+
+    Returns a list of cluster record dicts.
+    """
+    table = dynamodb.Table(clusters_table_name)
+    try:
+        response = table.query(
+            KeyConditionExpression=(
+                boto3.dynamodb.conditions.Key("PK").eq(f"PROJECT#{project_id}")
+                & boto3.dynamodb.conditions.Key("SK").begins_with("CLUSTER#")
+            ),
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed to fetch clusters for project '%s': %s",
+            project_id,
+            exc,
+        )
+        return []
+
+    return [
+        item for item in response.get("Items", [])
+        if item.get("status") == "ACTIVE"
+    ]
+
+
+def _send_ssm_command_with_retry(
+    instance_id: str,
+    script: str,
+    cluster_name: str,
+    user_id: str,
+) -> bool:
+    """Send an SSM Run Command with retry logic.
+
+    Retries up to _SSM_MAX_RETRIES times with exponential backoff.
+
+    Parameters
+    ----------
+    instance_id : str
+        The EC2 instance ID to target.
+    script : str
+        The bash script to execute.
+    cluster_name : str
+        The cluster name (for logging).
+    user_id : str
+        The user being provisioned (for logging).
+
+    Returns
+    -------
+    bool
+        True if the command was sent successfully, False otherwise.
+    """
+    for attempt in range(_SSM_MAX_RETRIES):
+        try:
+            ssm_client.send_command(
+                InstanceIds=[instance_id],
+                DocumentName="AWS-RunShellScript",
+                Parameters={"commands": [script]},
+                Comment=f"Provision POSIX user '{user_id}' on cluster '{cluster_name}'",
+            )
+            logger.info(
+                "SSM command sent to instance '%s' for user '%s' on cluster '%s'",
+                instance_id,
+                user_id,
+                cluster_name,
+            )
+            return True
+
+        except ClientError as exc:
+            delay = _SSM_BASE_DELAY_SECONDS * (2 ** attempt)
+            logger.warning(
+                "SSM command failed for instance '%s' (attempt %d/%d): %s — "
+                "retrying in %ds",
+                instance_id,
+                attempt + 1,
+                _SSM_MAX_RETRIES,
+                exc,
+                delay,
+            )
+            if attempt < _SSM_MAX_RETRIES - 1:
+                time.sleep(delay)
+
+    logger.error(
+        "SSM command failed after %d retries for instance '%s' "
+        "(user '%s', cluster '%s')",
+        _SSM_MAX_RETRIES,
+        instance_id,
+        user_id,
+        cluster_name,
+    )
+    return False

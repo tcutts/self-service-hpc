@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HPC Platform Documentation</title>
+  <style>
+    :root {
+      --sidebar-width: 260px;
+      --color-bg: #ffffff;
+      --color-sidebar-bg: #f5f7fa;
+      --color-border: #e1e4e8;
+      --color-text: #24292e;
+      --color-text-secondary: #586069;
+      --color-link: #0366d6;
+      --color-heading: #1b1f23;
+      --color-code-bg: #f6f8fa;
+      --color-active: #e8f0fe;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif;
+      color: var(--color-text);
+      line-height: 1.6;
+      display: flex;
+      min-height: 100vh;
+    }
+
+    /* Sidebar */
+    .sidebar {
+      width: var(--sidebar-width);
+      min-width: var(--sidebar-width);
+      background: var(--color-sidebar-bg);
+      border-right: 1px solid var(--color-border);
+      padding: 1.5rem 0;
+      overflow-y: auto;
+      position: fixed;
+      top: 0;
+      left: 0;
+      bottom: 0;
+    }
+
+    .sidebar-header {
+      padding: 0 1.25rem 1rem;
+      border-bottom: 1px solid var(--color-border);
+      margin-bottom: 1rem;
+    }
+
+    .sidebar-header h1 {
+      font-size: 1.1rem;
+      color: var(--color-heading);
+      font-weight: 600;
+    }
+
+    .sidebar-header p {
+      font-size: 0.8rem;
+      color: var(--color-text-secondary);
+      margin-top: 0.25rem;
+    }
+
+    .nav-section {
+      margin-bottom: 1.25rem;
+    }
+
+    .nav-section-title {
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      color: var(--color-text-secondary);
+      padding: 0 1.25rem;
+      margin-bottom: 0.4rem;
+    }
+
+    .nav-link {
+      display: block;
+      padding: 0.3rem 1.25rem;
+      font-size: 0.875rem;
+      color: var(--color-text);
+      text-decoration: none;
+      cursor: pointer;
+      transition: background 0.15s;
+    }
+
+    .nav-link:hover {
+      background: var(--color-border);
+    }
+
+    .nav-link.active {
+      background: var(--color-active);
+      color: var(--color-link);
+      font-weight: 500;
+    }
+
+    /* Main content */
+    .main {
+      margin-left: var(--sidebar-width);
+      flex: 1;
+      padding: 2rem 3rem;
+      max-width: 900px;
+    }
+
+    .main h1 { font-size: 2rem; margin-bottom: 0.5rem; color: var(--color-heading); border-bottom: 1px solid var(--color-border); padding-bottom: 0.4rem; }
+    .main h2 { font-size: 1.5rem; margin-top: 2rem; margin-bottom: 0.5rem; color: var(--color-heading); border-bottom: 1px solid var(--color-border); padding-bottom: 0.3rem; }
+    .main h3 { font-size: 1.25rem; margin-top: 1.5rem; margin-bottom: 0.4rem; color: var(--color-heading); }
+    .main h4 { font-size: 1rem; margin-top: 1.25rem; margin-bottom: 0.3rem; color: var(--color-heading); }
+    .main p { margin-bottom: 1rem; }
+    .main ul, .main ol { margin-bottom: 1rem; padding-left: 1.5rem; }
+    .main li { margin-bottom: 0.3rem; }
+    .main code { background: var(--color-code-bg); padding: 0.15em 0.4em; border-radius: 3px; font-size: 0.9em; }
+    .main pre { background: var(--color-code-bg); padding: 1rem; border-radius: 6px; overflow-x: auto; margin-bottom: 1rem; }
+    .main pre code { background: none; padding: 0; }
+    .main table { border-collapse: collapse; width: 100%; margin-bottom: 1rem; }
+    .main th, .main td { border: 1px solid var(--color-border); padding: 0.5rem 0.75rem; text-align: left; }
+    .main th { background: var(--color-code-bg); font-weight: 600; }
+    .main blockquote { border-left: 4px solid var(--color-border); padding: 0.5rem 1rem; margin-bottom: 1rem; color: var(--color-text-secondary); }
+
+    .welcome { color: var(--color-text-secondary); font-size: 1.1rem; margin-bottom: 2rem; }
+
+    .loading { text-align: center; padding: 3rem; color: var(--color-text-secondary); }
+
+    @media (max-width: 768px) {
+      .sidebar { position: relative; width: 100%; min-width: 100%; border-right: none; border-bottom: 1px solid var(--color-border); }
+      body { flex-direction: column; }
+      .main { margin-left: 0; padding: 1.5rem; }
+    }
+  </style>
+</head>
+<body>
+  <nav class="sidebar">
+    <div class="sidebar-header">
+      <h1>HPC Platform Docs</h1>
+      <p>Self-Service HPC Documentation</p>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Administrator Guides</div>
+      <a class="nav-link" data-doc="admin/deploying-foundation.md">Deploying the Foundation</a>
+      <a class="nav-link" data-doc="admin/user-management.md">User Management</a>
+      <a class="nav-link" data-doc="admin/project-management.md">Project Management</a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Project Administrator Guides</div>
+      <a class="nav-link" data-doc="project-admin/project-management.md">Project Membership &amp; Budgets</a>
+      <a class="nav-link" data-doc="project-admin/cluster-management.md">Cluster Management</a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">User Guides</div>
+      <a class="nav-link" data-doc="user/accessing-clusters.md">Accessing Clusters</a>
+      <a class="nav-link" data-doc="user/data-management.md">Data Management</a>
+    </div>
+
+    <div class="nav-section">
+      <div class="nav-section-title">Reference</div>
+      <a class="nav-link" data-doc="api/reference.md">API Reference</a>
+    </div>
+  </nav>
+
+  <main class="main" id="content">
+    <h1>HPC Platform Documentation</h1>
+    <p class="welcome">Welcome to the Self-Service HPC Platform documentation. Select a topic from the sidebar to get started.</p>
+
+    <h2>Getting Started</h2>
+    <p>This documentation is organised by audience:</p>
+    <ul>
+      <li><strong>Administrator Guides</strong> — deploying the platform, managing users and projects at the platform level.</li>
+      <li><strong>Project Administrator Guides</strong> — managing project membership, budgets, and clusters.</li>
+      <li><strong>User Guides</strong> — accessing clusters, submitting jobs, and managing data.</li>
+      <li><strong>API Reference</strong> — complete reference for all REST API endpoints.</li>
+    </ul>
+  </main>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script>
+    (function () {
+      const contentEl = document.getElementById('content');
+      const navLinks = document.querySelectorAll('.nav-link[data-doc]');
+
+      function setActive(docPath) {
+        navLinks.forEach(function (link) {
+          link.classList.toggle('active', link.getAttribute('data-doc') === docPath);
+        });
+      }
+
+      function loadDoc(docPath) {
+        setActive(docPath);
+        contentEl.innerHTML = '<div class="loading">Loading…</div>';
+
+        fetch(docPath)
+          .then(function (res) {
+            if (!res.ok) throw new Error('Failed to load ' + docPath);
+            return res.text();
+          })
+          .then(function (md) {
+            contentEl.innerHTML = marked.parse(md);
+            window.location.hash = docPath;
+            window.scrollTo(0, 0);
+          })
+          .catch(function (err) {
+            contentEl.innerHTML = '<p style="color:red;">Error loading document: ' + err.message + '</p>';
+          });
+      }
+
+      navLinks.forEach(function (link) {
+        link.addEventListener('click', function (e) {
+          e.preventDefault();
+          loadDoc(link.getAttribute('data-doc'));
+        });
+      });
+
+      // Load document from URL hash on page load
+      if (window.location.hash) {
+        var docPath = window.location.hash.substring(1);
+        loadDoc(docPath);
+      }
+    })();
+  </script>
+</body>
+</html>

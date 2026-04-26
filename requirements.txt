@@ -1,0 +1,7 @@
+# Lambda runtime dependencies
+boto3==1.39.3
+
+# Testing dependencies
+moto[dynamodb,cognitoidp]==5.1.8
+pytest==8.4.1
+hypothesis==6.135.1
