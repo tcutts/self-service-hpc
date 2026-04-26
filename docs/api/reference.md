@@ -787,6 +787,77 @@ Get a single template's details.
 
 ---
 
+### PUT /templates/{templateId}
+
+Update an existing cluster template's editable fields. Only affects future cluster creations — clusters already created from this template retain their original configuration values.
+
+**Required role:** Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `templateId` | string | The template identifier |
+
+**Request body:**
+
+```json
+{
+  "templateName": "string (required)",
+  "description": "string (optional, defaults to empty)",
+  "instanceTypes": ["string"],
+  "loginInstanceType": "string (required)",
+  "minNodes": 0,
+  "maxNodes": 10,
+  "amiId": "string (required)",
+  "softwareStack": {}
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `templateId` | string | No | If present, must match the path parameter. |
+| `templateName` | string | Yes | Human-readable template name. Must be non-empty. |
+| `description` | string | No | Template description. Defaults to empty string if omitted. |
+| `instanceTypes` | list[string] | Yes | Compute instance types. Must be a non-empty list of strings. |
+| `loginInstanceType` | string | Yes | Login node instance type. Must be a non-empty string. |
+| `minNodes` | number | Yes | Minimum compute nodes. Non-negative integer, must not exceed `maxNodes`. |
+| `maxNodes` | number | Yes | Maximum compute nodes. Positive integer. |
+| `amiId` | string | Yes | AMI identifier. Must be non-empty. |
+| `softwareStack` | object | Yes | Scheduler configuration (e.g., scheduler type and version). |
+
+**Response (200 OK):**
+
+Returns the full updated template record, including the `updatedAt` timestamp:
+
+```json
+{
+  "templateId": "cpu-general",
+  "templateName": "Updated Name",
+  "description": "Updated description",
+  "instanceTypes": ["c7g.large"],
+  "loginInstanceType": "c7g.medium",
+  "minNodes": 0,
+  "maxNodes": 20,
+  "amiId": "ami-newid123",
+  "softwareStack": {"scheduler": "slurm", "schedulerVersion": "24.11"},
+  "createdAt": "2025-01-15T10:00:00Z",
+  "updatedAt": "2025-06-20T14:30:00Z"
+}
+```
+
+The `updatedAt` field contains the UTC timestamp (ISO 8601) of when the template was last updated. The `createdAt` field is preserved from the original template creation and is never modified.
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `VALIDATION_ERROR` | 400 | Missing or invalid editable fields, empty request body, or body `templateId` does not match path parameter |
+| `AUTHORISATION_ERROR` | 403 | Caller is not an Administrator |
+| `NOT_FOUND` | 404 | Template does not exist |
+
+---
+
 ### DELETE /templates/{templateId}
 
 Delete a cluster template.

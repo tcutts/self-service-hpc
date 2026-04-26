@@ -618,6 +618,8 @@ export class FoundationStack extends cdk.Stack {
     templateIdResource.addMethod('GET', templateManagementIntegration, cognitoMethodOptions);
     // DELETE /templates/{templateId} — delete template (admin only in handler)
     templateIdResource.addMethod('DELETE', templateManagementIntegration, cognitoMethodOptions);
+    // PUT /templates/{templateId} — update template (admin only in handler)
+    templateIdResource.addMethod('PUT', templateManagementIntegration, cognitoMethodOptions);
 
     // ---------------------------------------------------------------
     // Cluster Operations Lambda Function
@@ -760,6 +762,20 @@ export class FoundationStack extends cdk.Stack {
         'iam:GetRole',
       ],
       resources: ['*'],
+    }));
+
+    // FSx for Lustre requires a service-linked role (AWSServiceRoleForAmazonFSx)
+    // to access S3 buckets for data repository associations.  If the role does
+    // not already exist in the account, CreateFileSystem will attempt to create
+    // it automatically — but only if the caller has iam:CreateServiceLinkedRole.
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:CreateServiceLinkedRole'],
+      resources: ['arn:aws:iam::*:role/aws-service-role/fsx.amazonaws.com/*'],
+      conditions: {
+        'StringLike': {
+          'iam:AWSServiceName': 'fsx.amazonaws.com',
+        },
+      },
     }));
 
     // Lambda function for cluster destruction workflow steps

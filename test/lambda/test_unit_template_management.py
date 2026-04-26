@@ -427,3 +427,180 @@ class TestTemplateAuthorisation:
         assert response["statusCode"] == 403
         body = json.loads(response["body"])
         assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Template update
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("template_mgmt_env")
+class TestTemplateUpdate:
+    """Validates: Requirements 1.1, 1.4, 1.5, 2.1, 2.2, 3.1, 3.2, 3.3"""
+
+    def _create_template(self, handler_mod, template_id="tpl-upd-base"):
+        """Create a template to be used as the update target."""
+        handler_mod.handler(
+            build_admin_event(
+                "POST", "/templates",
+                body=_valid_template_body(template_id, f"Original {template_id}"),
+            ),
+            None,
+        )
+
+    def _update_body(self, **overrides):
+        """Return a valid update payload with optional field overrides."""
+        body = {
+            "templateName": "Updated Template",
+            "description": "Updated description",
+            "instanceTypes": ["c7g.large"],
+            "loginInstanceType": "c7g.large",
+            "minNodes": 2,
+            "maxNodes": 20,
+            "amiId": "ami-updated123",
+            "softwareStack": {"scheduler": "slurm", "schedulerVersion": "25.01"},
+        }
+        body.update(overrides)
+        return body
+
+    # --- Happy path (Req 1.1, 2.2) ---
+
+    def test_update_template_returns_200_with_updated_fields(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-200")
+
+        update_payload = self._update_body()
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=update_payload,
+            path_parameters={"templateId": "tpl-upd-200"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["templateId"] == "tpl-upd-200"
+        assert body["templateName"] == "Updated Template"
+        assert body["description"] == "Updated description"
+        assert body["instanceTypes"] == ["c7g.large"]
+        assert body["loginInstanceType"] == "c7g.large"
+        assert int(body["minNodes"]) == 2
+        assert int(body["maxNodes"]) == 20
+        assert body["amiId"] == "ami-updated123"
+        assert body["softwareStack"] == {"scheduler": "slurm", "schedulerVersion": "25.01"}
+        assert "updatedAt" in body
+
+    def test_admin_can_update_template(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-admin")
+
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=self._update_body(),
+            path_parameters={"templateId": "tpl-upd-admin"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+
+    # --- Not found (Req 1.4) ---
+
+    def test_update_nonexistent_template_returns_404(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=self._update_body(),
+            path_parameters={"templateId": "tpl-does-not-exist"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 404
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "NOT_FOUND"
+
+    # --- Mismatched templateId (Req 1.5) ---
+
+    def test_mismatched_body_template_id_returns_400(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-mismatch")
+
+        payload = self._update_body(templateId="tpl-different-id")
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=payload,
+            path_parameters={"templateId": "tpl-upd-mismatch"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert body["error"]["details"]["field"] == "templateId"
+
+    # --- Authorisation (Req 2.1) ---
+
+    def test_non_admin_cannot_update_template(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-noauth")
+
+        event = build_non_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=self._update_body(),
+            path_parameters={"templateId": "tpl-upd-noauth"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+    # --- Empty body (Req 3.3) ---
+
+    def test_update_with_empty_body_returns_400(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            path_parameters={"templateId": "tpl-upd-empty"},
+        )
+        event["body"] = None
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+
+    # --- Invalid fields (Req 3.1, 3.2) ---
+
+    def test_update_with_empty_template_name_returns_400(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-badname")
+
+        payload = self._update_body(templateName="")
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=payload,
+            path_parameters={"templateId": "tpl-upd-badname"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert body["error"]["details"]["field"] == "templateName"
+
+    def test_update_with_min_nodes_exceeding_max_returns_400(self, template_mgmt_env):
+        handler_mod, _, _ = template_mgmt_env["modules"]
+        self._create_template(handler_mod, "tpl-upd-badnodes")
+
+        payload = self._update_body(minNodes=50, maxNodes=5)
+        event = build_admin_event(
+            "PUT", "/templates/{templateId}",
+            body=payload,
+            path_parameters={"templateId": "tpl-upd-badnodes"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"

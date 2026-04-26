@@ -1001,12 +1001,184 @@ async function loadTemplates() {
         <td>${esc((t.instanceTypes || []).join(', '))}</td>
         <td>${esc(t.loginInstanceType || '—')}</td>
         <td>${t.minNodes || 0} – ${t.maxNodes || '∞'}</td>
-        <td><button class="btn btn-danger btn-sm" onclick="deleteTemplate('${esc(t.templateId)}')">Delete</button></td>
+        <td><button class="btn btn-primary btn-sm" onclick="editTemplate('${esc(t.templateId)}')">Edit</button> <button class="btn btn-danger btn-sm" onclick="deleteTemplate('${esc(t.templateId)}')">Delete</button></td>
       </tr>`).join('')}</tbody>
     </table>`;
   } catch (e) {
     document.getElementById('templates-list').innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
+}
+
+async function editTemplate(templateId) {
+  try {
+    const template = await apiCall('GET', `/templates/${encodeURIComponent(templateId)}`);
+    showEditTemplateDialog(template);
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+function showEditTemplateDialog(template) {
+  // Remove any existing modal
+  const existing = document.getElementById('edit-template-modal');
+  if (existing) existing.remove();
+
+  const sw = template.softwareStack || {};
+
+  const modal = document.createElement('div');
+  modal.id = 'edit-template-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-content" style="max-width:520px">
+      <h3>Edit Template</h3>
+      <div class="form-group">
+        <label for="edit-tpl-id">Template ID</label>
+        <input type="text" id="edit-tpl-id" value="${esc(template.templateId || '')}" disabled class="input-disabled" />
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-name">Template Name</label>
+        <input type="text" id="edit-tpl-name" value="${esc(template.templateName || '')}" />
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-desc">Description</label>
+        <input type="text" id="edit-tpl-desc" value="${esc(template.description || '')}" />
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-instance">Compute Instance Types (comma-separated)</label>
+        <input type="text" id="edit-tpl-instance" value="${esc((template.instanceTypes || []).join(', '))}" />
+        <small class="form-hint">PCS-supported families: c5–c7i, m5–m7i, r5–r7i, g4dn–g6, p3–p5, hpc6a–hpc7g, t3–t4g, trn1, inf1–inf2, etc.</small>
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-login-instance">Login Node Instance Type</label>
+        <input type="text" id="edit-tpl-login-instance" value="${esc(template.loginInstanceType || '')}" />
+        <small class="form-hint">Instance type for the login/head node. Typically a small general-purpose instance.</small>
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-min">Min Nodes</label>
+        <input type="number" id="edit-tpl-min" value="${template.minNodes != null ? template.minNodes : 0}" min="0" />
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-max">Max Nodes</label>
+        <input type="number" id="edit-tpl-max" value="${template.maxNodes != null ? template.maxNodes : 4}" min="1" />
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-ami">AMI ID</label>
+        <div style="display:flex;gap:0.5rem">
+          <input type="text" id="edit-tpl-ami" value="${esc(template.amiId || '')}" style="flex:1" />
+          <button class="btn" type="button" id="btn-edit-detect-ami">Detect</button>
+        </div>
+        <small class="form-hint" id="edit-ami-hint">Click Detect to find the latest PCS sample AMI for the current instance types.</small>
+      </div>
+      <fieldset class="form-fieldset">
+        <legend>Software Stack</legend>
+        <div class="form-group">
+          <label for="edit-tpl-scheduler">Scheduler</label>
+          <select id="edit-tpl-scheduler">
+            <option value="slurm" ${(sw.scheduler || 'slurm') === 'slurm' ? 'selected' : ''}>Slurm</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label for="edit-tpl-scheduler-ver">Scheduler Version</label>
+          <input type="text" id="edit-tpl-scheduler-ver" value="${esc(sw.schedulerVersion || '')}" />
+        </div>
+        <div class="form-group">
+          <label for="edit-tpl-cuda">CUDA Version (optional, for GPU templates)</label>
+          <input type="text" id="edit-tpl-cuda" value="${esc(sw.cudaVersion || '')}" />
+        </div>
+      </fieldset>
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+        <button class="btn" id="edit-tpl-cancel-btn">Cancel</button>
+        <button class="btn btn-primary" id="edit-tpl-save-btn">Save</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  document.getElementById('edit-tpl-cancel-btn').addEventListener('click', () => {
+    modal.remove();
+  });
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  // Handle Escape key to close modal
+  function onKeyDown(e) {
+    if (e.key === 'Escape') {
+      modal.remove();
+      document.removeEventListener('keydown', onKeyDown);
+    }
+  }
+  document.addEventListener('keydown', onKeyDown);
+
+  document.getElementById('btn-edit-detect-ami').addEventListener('click', async () => {
+    const instanceInput = document.getElementById('edit-tpl-instance').value;
+    const types = instanceInput.split(',').map(s => s.trim()).filter(Boolean);
+    if (!types.length) return;
+    const arch = inferArchitecture(types);
+    if (!arch) return;
+    const hint = document.getElementById('edit-ami-hint');
+    const amiInput = document.getElementById('edit-tpl-ami');
+    hint.textContent = `Looking up latest PCS sample AMI for ${arch}…`;
+    const result = await fetchDefaultAmi(arch);
+    if (result && result.amiId) {
+      amiInput.value = result.amiId;
+      hint.textContent = `${result.name || result.amiId} (${arch})`;
+    } else {
+      hint.textContent = `Could not find a PCS sample AMI for ${arch}. Enter an AMI ID manually.`;
+    }
+  });
+
+  document.getElementById('edit-tpl-save-btn').addEventListener('click', async () => {
+    const templateName = document.getElementById('edit-tpl-name').value.trim();
+    const description = document.getElementById('edit-tpl-desc').value.trim();
+    const instanceTypes = document.getElementById('edit-tpl-instance').value.split(',').map(s => s.trim()).filter(Boolean);
+    const loginInstanceType = document.getElementById('edit-tpl-login-instance').value.trim();
+    const minNodes = parseInt(document.getElementById('edit-tpl-min').value, 10) || 0;
+    const maxNodes = parseInt(document.getElementById('edit-tpl-max').value, 10) || 4;
+    const amiId = document.getElementById('edit-tpl-ami').value.trim();
+    const scheduler = document.getElementById('edit-tpl-scheduler').value;
+    const schedulerVersion = document.getElementById('edit-tpl-scheduler-ver').value.trim();
+    const cudaVersion = document.getElementById('edit-tpl-cuda').value.trim();
+
+    // Client-side validation
+    if (!templateName) return showToast('Template Name is required', 'error');
+    if (!instanceTypes.length) return showToast('At least one compute instance type is required', 'error');
+    if (!loginInstanceType) return showToast('Login node instance type is required', 'error');
+    if (!amiId) return showToast('AMI ID is required', 'error');
+    if (minNodes > maxNodes) return showToast('Min nodes cannot exceed max nodes', 'error');
+
+    // Validate all instance types against PCS-supported families
+    const allTypes = [...instanceTypes, loginInstanceType];
+    for (const it of allTypes) {
+      if (!validateInstanceType(it)) {
+        return showToast(`Instance type '${it}' is not a PCS-supported family. Supported: c5–c7i, m5–m7i, r5–r7i, g4dn–g6, p3–p5, hpc6a–hpc7g, t3–t4g, trn1, inf1–inf2, dl1, x2idn, x2iedn.`, 'error');
+      }
+    }
+
+    const softwareStack = { scheduler, schedulerVersion };
+    if (cudaVersion) softwareStack.cudaVersion = cudaVersion;
+
+    const saveBtn = document.getElementById('edit-tpl-save-btn');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Saving…';
+
+    try {
+      await apiCall('PUT', `/templates/${encodeURIComponent(template.templateId)}`, {
+        templateName, description, instanceTypes,
+        loginInstanceType, minNodes, maxNodes, amiId, softwareStack,
+      });
+      showToast(`Template '${template.templateId}' updated`);
+      document.removeEventListener('keydown', onKeyDown);
+      modal.remove();
+      loadTemplates();
+    } catch (e) {
+      showToast(e.message, 'error');
+      saveBtn.disabled = false;
+      saveBtn.textContent = 'Save';
+    }
+  });
+
+  // Focus the first editable field
+  document.getElementById('edit-tpl-name').focus();
 }
 
 async function deleteTemplate(templateId) {

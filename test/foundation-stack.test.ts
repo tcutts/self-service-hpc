@@ -484,6 +484,24 @@ describe('FoundationStack', () => {
       });
     });
 
+    it('creation step Lambda has iam:CreateServiceLinkedRole for FSx', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'iam:CreateServiceLinkedRole',
+              Effect: 'Allow',
+              Condition: {
+                StringLike: {
+                  'iam:AWSServiceName': 'fsx.amazonaws.com',
+                },
+              },
+            }),
+          ]),
+        },
+      });
+    });
+
     it('creation state machine execution role has EC2 permissions', () => {
       template.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {

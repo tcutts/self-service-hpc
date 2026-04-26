@@ -28,7 +28,7 @@ from errors import (
     ValidationError,
     build_error_response,
 )
-from templates import create_template, delete_template, get_template, list_templates
+from templates import create_template, delete_template, get_template, list_templates, update_template
 from ami_lookup import get_latest_pcs_ami
 
 logger = logging.getLogger()
@@ -61,6 +61,9 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/templates/{templateId}" and http_method == "DELETE":
             template_id = path_parameters.get("templateId", "")
             response = _handle_delete_template(event, template_id)
+        elif resource == "/templates/{templateId}" and http_method == "PUT":
+            template_id = path_parameters.get("templateId", "")
+            response = _handle_update_template(event, template_id)
         elif resource == "/templates/default-ami" and http_method == "GET":
             response = _handle_default_ami(event)
         else:
@@ -155,6 +158,46 @@ def _handle_delete_template(event: dict[str, Any], template_id: str) -> dict[str
     delete_template(table_name=TEMPLATES_TABLE_NAME, template_id=template_id)
     logger.info("Template deleted: %s by %s", template_id, caller)
     return _response(200, {"message": f"Template '{template_id}' has been deleted."})
+
+
+def _handle_update_template(event: dict[str, Any], template_id: str) -> dict[str, Any]:
+    """Handle PUT /templates/{templateId} — update a cluster template."""
+    caller = get_caller_identity(event)
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can update cluster templates.")
+
+    body = _parse_body(event)
+
+    body_template_id = body.get("templateId")
+    if body_template_id is not None and body_template_id != template_id:
+        raise ValidationError(
+            "Body templateId does not match path parameter.",
+            {"field": "templateId"},
+        )
+
+    template_name = body.get("templateName", "").strip() if isinstance(body.get("templateName"), str) else ""
+    description = body.get("description", "").strip() if isinstance(body.get("description"), str) else ""
+    instance_types = body.get("instanceTypes", [])
+    login_instance_type = body.get("loginInstanceType", "").strip() if isinstance(body.get("loginInstanceType"), str) else ""
+    min_nodes = body.get("minNodes", 0)
+    max_nodes = body.get("maxNodes", 0)
+    ami_id = body.get("amiId", "").strip() if isinstance(body.get("amiId"), str) else ""
+    software_stack = body.get("softwareStack", {})
+
+    updated_record = update_template(
+        table_name=TEMPLATES_TABLE_NAME,
+        template_id=template_id,
+        template_name=template_name,
+        description=description,
+        instance_types=instance_types,
+        login_instance_type=login_instance_type,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        ami_id=ami_id,
+        software_stack=software_stack,
+    )
+    logger.info("Template updated: %s by %s", template_id, caller)
+    return _response(200, updated_record)
 
 
 def _handle_default_ami(event: dict[str, Any]) -> dict[str, Any]:

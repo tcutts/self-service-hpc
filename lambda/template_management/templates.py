@@ -90,6 +90,72 @@ def create_template(
     return _sanitise_record(template_record)
 
 
+def update_template(
+    table_name: str,
+    template_id: str,
+    template_name: str,
+    description: str,
+    instance_types: list[str],
+    login_instance_type: str,
+    min_nodes: int,
+    max_nodes: int,
+    ami_id: str,
+    software_stack: dict[str, Any],
+) -> dict[str, Any]:
+    """Update an existing cluster template in DynamoDB.
+
+    Validates all editable fields, then atomically updates the record
+    using a condition expression to ensure the template exists.
+
+    Raises NotFoundError if the template does not exist.
+    """
+    _validate_template_fields(
+        template_id=template_id,
+        template_name=template_name,
+        instance_types=instance_types,
+        login_instance_type=login_instance_type,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        ami_id=ami_id,
+    )
+
+    now = datetime.now(timezone.utc).isoformat()
+    table = dynamodb.Table(table_name)
+
+    try:
+        response = table.update_item(
+            Key={"PK": f"TEMPLATE#{template_id}", "SK": "METADATA"},
+            UpdateExpression=(
+                "SET templateName = :tn, description = :desc, "
+                "instanceTypes = :it, loginInstanceType = :lit, "
+                "minNodes = :minN, maxNodes = :maxN, "
+                "amiId = :ami, softwareStack = :ss, updatedAt = :ua"
+            ),
+            ExpressionAttributeValues={
+                ":tn": template_name,
+                ":desc": description,
+                ":it": instance_types,
+                ":lit": login_instance_type,
+                ":minN": min_nodes,
+                ":maxN": max_nodes,
+                ":ami": ami_id,
+                ":ss": software_stack,
+                ":ua": now,
+            },
+            ConditionExpression="attribute_exists(PK)",
+            ReturnValues="ALL_NEW",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise NotFoundError(
+                f"Template '{template_id}' not found.",
+                {"templateId": template_id},
+            )
+        raise InternalError(f"Failed to update template record: {exc}")
+
+    return _sanitise_record(response["Attributes"])
+
+
 def get_template(table_name: str, template_id: str) -> dict[str, Any]:
     """Retrieve a single cluster template by templateId."""
     table = dynamodb.Table(table_name)

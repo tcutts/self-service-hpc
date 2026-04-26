@@ -489,6 +489,8 @@ tr:last-child td {
   padding: 1.5rem;
   width: 100%;
   max-width: 480px;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
   box-shadow: 0 4px 24px rgba(0,0,0,0.2);
 }
 
