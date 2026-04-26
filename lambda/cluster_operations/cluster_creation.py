@@ -60,6 +60,7 @@ CLUSTER_NAME_REGISTRY_TABLE_NAME = os.environ.get(
 )
 PROJECTS_TABLE_NAME = os.environ.get("PROJECTS_TABLE_NAME", "Projects")
 USERS_TABLE_NAME = os.environ.get("USERS_TABLE_NAME", "PlatformUsers")
+TEMPLATES_TABLE_NAME = os.environ.get("TEMPLATES_TABLE_NAME", "ClusterTemplates")
 CLUSTER_LIFECYCLE_SNS_TOPIC_ARN = os.environ.get(
     "CLUSTER_LIFECYCLE_SNS_TOPIC_ARN", ""
 )
@@ -1073,12 +1074,75 @@ def _record_failed_cluster(
             exc,
         )
 
+# ===================================================================
+# Template resolution — resolve template fields before parallel state
+# ===================================================================
+
+def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
+    """Resolve cluster template fields from the ClusterTemplates table.
+
+    If ``templateId`` is present and non-empty, reads the template
+    record from DynamoDB and injects the template-driven fields into
+    the event payload.  If the template is not found, raises
+    ``ValidationError`` so the workflow fails fast with a clear error.
+
+    If ``templateId`` is empty or missing, sensible defaults are
+    applied so the workflow can proceed without a template.
+
+    Returns the augmented event dict.
+    """
+    template_id: str = event.get("templateId", "")
+
+    if template_id:
+        logger.info("Resolving template '%s' from ClusterTemplates table", template_id)
+
+        table = dynamodb.Table(TEMPLATES_TABLE_NAME)
+        try:
+            response = table.get_item(
+                Key={"PK": f"TEMPLATE#{template_id}", "SK": "METADATA"},
+            )
+        except ClientError as exc:
+            raise InternalError(
+                f"Failed to read template '{template_id}' from ClusterTemplates table: {exc}"
+            )
+
+        item = response.get("Item")
+        if not item:
+            raise ValidationError(
+                f"Cluster template '{template_id}' not found.",
+                {"templateId": template_id},
+            )
+
+        logger.info("Template '%s' resolved successfully", template_id)
+
+        return {
+            **event,
+            "loginInstanceType": item.get("loginInstanceType", "c7g.medium"),
+            "instanceTypes": item.get("instanceTypes", ["c7g.medium"]),
+            "maxNodes": item.get("maxNodes", 10),
+            "minNodes": item.get("minNodes", 0),
+            "purchaseOption": item.get("purchaseOption", "ONDEMAND"),
+        }
+
+    # No template — apply sensible defaults
+    logger.info("No templateId provided — using default template values")
+    return {
+        **event,
+        "loginInstanceType": "c7g.medium",
+        "instanceTypes": ["c7g.medium"],
+        "maxNodes": 10,
+        "minNodes": 0,
+        "purchaseOption": "ONDEMAND",
+    }
+
+
 # ---------------------------------------------------------------------------
 # Populate the step dispatch table now that all functions are defined.
 # ---------------------------------------------------------------------------
 _STEP_DISPATCH.update({
     "validate_and_register_name": validate_and_register_name,
     "check_budget_breach": check_budget_breach,
+    "resolve_template": resolve_template,
     "create_fsx_filesystem": create_fsx_filesystem,
     "check_fsx_status": check_fsx_status,
     "create_fsx_dra": create_fsx_dra,

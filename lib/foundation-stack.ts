@@ -681,6 +681,7 @@ export class FoundationStack extends cdk.Stack {
         CLUSTER_NAME_REGISTRY_TABLE_NAME: this.clusterNameRegistryTable.tableName,
         USERS_TABLE_NAME: this.platformUsersTable.tableName,
         CLUSTER_LIFECYCLE_SNS_TOPIC_ARN: this.clusterLifecycleNotificationTopic.topicArn,
+        TEMPLATES_TABLE_NAME: this.clusterTemplatesTable.tableName,
       },
       description: 'Executes individual steps of the cluster creation workflow',
     });
@@ -690,6 +691,7 @@ export class FoundationStack extends cdk.Stack {
     this.projectsTable.grantReadData(clusterCreationStepLambda);
     this.clusterNameRegistryTable.grantReadWriteData(clusterCreationStepLambda);
     this.platformUsersTable.grantReadData(clusterCreationStepLambda);
+    this.clusterTemplatesTable.grantReadData(clusterCreationStepLambda);
     this.clusterLifecycleNotificationTopic.grantPublish(clusterCreationStepLambda);
 
     // SNS subscribe permission for lifecycle notifications
@@ -863,6 +865,17 @@ export class FoundationStack extends cdk.Stack {
       resultPath: '$',
     });
 
+    // Step 2b: Resolve template fields from ClusterTemplates table
+    const resolveTemplate = new tasks.LambdaInvoke(this, 'ResolveTemplate', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'resolve_template',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Step 3: Create FSx filesystem
     const createFsxFilesystem = new tasks.LambdaInvoke(this, 'CreateFsxFilesystem', {
       lambdaFunction: clusterCreationStepLambda,
@@ -990,6 +1003,7 @@ export class FoundationStack extends cdk.Stack {
 
     validateAndRegisterName.addCatch(failureChain, catchConfig);
     checkBudgetBreach.addCatch(failureChain, catchConfig);
+    resolveTemplate.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
@@ -1058,9 +1072,10 @@ export class FoundationStack extends cdk.Stack {
     parallelFsxAndPcs.branch(fsxBranch, pcsBranch);
     parallelFsxAndPcs.addCatch(failureChain, catchConfig);
 
-    // Chain: validate → budget → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
+    // Chain: validate → budget → resolve template → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
     const creationDefinition = validateAndRegisterName
       .next(checkBudgetBreach)
+      .next(resolveTemplate)
       .next(parallelFsxAndPcs)
       .next(createLoginNodeGroup)
       .next(createComputeNodeGroup)
