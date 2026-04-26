@@ -1149,6 +1149,14 @@ export class FoundationStack extends cdk.Stack {
       environment: {
         buildImage: codebuild.LinuxBuildImage.STANDARD_7_0,
         computeType: codebuild.ComputeType.SMALL,
+        environmentVariables: {
+          CDK_DEFAULT_ACCOUNT: {
+            value: cdk.Aws.ACCOUNT_ID,
+          },
+          CDK_DEFAULT_REGION: {
+            value: cdk.Aws.REGION,
+          },
+        },
       },
       buildSpec: codebuild.BuildSpec.fromObject({
         version: '0.2',
