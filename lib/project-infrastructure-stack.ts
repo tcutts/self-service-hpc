@@ -89,7 +89,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     // Head Node (Login Node) SG: SSH (22) and DCV (8443) from trusted CIDRs
     this.headNodeSecurityGroup = new ec2.SecurityGroup(this, 'HeadNodeSG', {
       vpc: this.vpc,
-      securityGroupName: `hpc-${props.projectId}-head-node-sg`,
       description: 'Head Node: SSH and DCV from trusted CIDR ranges',
       allowAllOutbound: true,
     });
@@ -110,7 +109,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     // Compute Node SG: all traffic from Head Node SG and self
     this.computeNodeSecurityGroup = new ec2.SecurityGroup(this, 'ComputeNodeSG', {
       vpc: this.vpc,
-      securityGroupName: `hpc-${props.projectId}-compute-node-sg`,
       description: 'Compute Node: traffic from Head Node and other Compute Nodes',
       allowAllOutbound: true,
     });
@@ -129,7 +127,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     // EFS SG: NFS (2049) from Head Node and Compute Node SGs
     this.efsSecurityGroup = new ec2.SecurityGroup(this, 'EfsSecurityGroup', {
       vpc: this.vpc,
-      securityGroupName: `hpc-${props.projectId}-efs-sg`,
       description: 'EFS: NFS from Head Node and Compute Node SGs',
       allowAllOutbound: false,
     });
@@ -149,7 +146,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     // from Head Node SG, Compute Node SG, and self (FSx inter-node traffic).
     this.fsxSecurityGroup = new ec2.SecurityGroup(this, 'FsxSecurityGroup', {
       vpc: this.vpc,
-      securityGroupName: `hpc-${props.projectId}-fsx-sg`,
       description: 'FSx for Lustre: Lustre traffic from Head Node, Compute Node, and self',
       allowAllOutbound: false,
     });
