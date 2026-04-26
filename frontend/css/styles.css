@@ -581,3 +581,82 @@ tr:last-child td {
 .template-preview .detail-row .label {
   width: 140px;
 }
+
+/* ============================================================
+   Table UI Enhancements — Scroll, Sticky Header, Sort, Filter
+   ============================================================ */
+
+/* ---- Scroll Container ---- */
+
+.table-scroll-container {
+  overflow-y: auto;
+  position: relative;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+/* ---- Sticky Header (scoped to scroll containers) ---- */
+
+.table-scroll-container thead th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: var(--color-bg);
+}
+
+/* Remove duplicate border on table inside scroll container */
+.table-scroll-container table {
+  border: none;
+  margin: 0;
+}
+
+/* ---- Filter Input ---- */
+
+.table-filter-wrapper {
+  margin-bottom: 0.75rem;
+}
+
+.table-filter-input {
+  width: 100%;
+  max-width: 320px;
+  padding: 0.5rem 0.65rem;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  font-size: 0.875rem;
+  color: var(--color-text);
+  background: var(--color-surface);
+}
+
+.table-filter-input::placeholder {
+  color: var(--color-text-muted);
+}
+
+.table-filter-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(0, 115, 187, 0.15);
+}
+
+/* ---- Sortable Headers & Sort Indicator ---- */
+
+.sortable-header {
+  cursor: pointer;
+  user-select: none;
+}
+
+.sort-indicator {
+  display: inline-block;
+  margin-left: 0.25rem;
+  font-size: 0.7rem;
+  vertical-align: middle;
+  color: var(--color-text-muted);
+}
+
+/* ---- No Matching Results ---- */
+
+.table-no-match {
+  text-align: center;
+  padding: 2rem 1rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}

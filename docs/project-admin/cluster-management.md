@@ -297,3 +297,53 @@ Home directories (EFS) and project storage (S3) are **preserved** across destruc
 - **Monitor creation progress** — check the cluster status if creation takes longer than expected (typically 10–15 minutes).
 - **Export data before destruction** — the platform automatically exports FSx data to S3, but verify important results are saved.
 - **Recreate instead of creating new** — if you need the same cluster environment again, use the recreate action to reuse the cluster name and template configuration.
+
+## Table Sorting and Filtering
+
+The Clusters table in the web portal supports interactive sorting and filtering to help you locate clusters quickly.
+
+### Sorting
+
+Click any column header to sort the table by that column. The following columns are sortable:
+
+- **Cluster Name** — alphabetical sort
+- **Template** — alphabetical sort
+- **Status** — alphabetical sort
+
+Click a column header once to sort in ascending order. Click the same header again to sort in descending order. A sort indicator (▲ for ascending, ▼ for descending) appears next to the active column header. Clicking a different column header switches the sort to that column in ascending order.
+
+The Progress and Actions columns are not sortable.
+
+### Filtering
+
+A search input is displayed above the Clusters table. Type any text to filter the table rows — only rows where at least one column value contains the search term are shown. Filtering is case-insensitive and matches partial text. For example, typing "active" will show only clusters with an ACTIVE status, and typing "gpu" will match clusters whose name or template contains "gpu".
+
+Clear the search input to show all rows again. If no rows match the filter, a message is displayed indicating no matching results were found.
+
+### State Preservation
+
+Sort and filter settings are preserved during automatic data refreshes, so the table does not reset while you are monitoring cluster creation or destruction progress. Navigating to a different page resets the sort and filter to their defaults.
+
+## Table Features
+
+The Clusters table includes several features to improve usability when working with large numbers of rows.
+
+### Viewport-Constrained Scrolling
+
+The table is displayed within a scroll container that fits within the visible browser window. If the table has more rows than can fit on screen, a vertical scrollbar appears. The page header and navigation remain visible at all times — you do not need to scroll the entire page to reach the bottom of the table.
+
+### Sticky Headers
+
+Column headers remain fixed at the top of the table while you scroll through rows, so you can always see which column is which.
+
+### Sorting
+
+Click any sortable column header to sort the table. Click the same header again to reverse the sort direction. A sort indicator (▲/▼) shows the current direction. See [Table Sorting and Filtering](#table-sorting-and-filtering) above for the full list of sortable columns.
+
+### Filtering
+
+Type in the search input above the table to filter rows by any visible column value. Filtering is case-insensitive and matches partial text. The Actions and Progress columns are not included in filter matching.
+
+### State Preservation
+
+Sort and filter settings are maintained during automatic data refreshes but reset when navigating to a different page. State is held in memory only and is not persisted across browser sessions.

@@ -23,6 +23,149 @@ const state = {
 };
 
 /* ============================================================
+   Table Column Configurations
+   ============================================================ */
+
+const usersTableConfig = {
+  columns: [
+    { key: 'userId', label: 'User ID', type: 'text', sortable: true },
+    { key: 'displayName', label: 'Display Name', type: 'text', sortable: true },
+    { key: 'role', label: 'Role', type: 'text', sortable: true },
+    {
+      key: 'posixUid', label: 'POSIX UID', type: 'numeric', sortable: true,
+      value: (row) => row.posixUid || 0,
+      render: (row) => row.posixUid || '—',
+    },
+    {
+      key: 'status', label: 'Status', type: 'text', sortable: true,
+      render: (row) => `<span class="badge badge-${(row.status || '').toLowerCase()}">${esc(row.status || 'UNKNOWN')}</span>`,
+    },
+    {
+      key: '_actions', label: 'Actions', type: 'custom', sortable: false,
+      render: (row) => {
+        if (row.status === 'ACTIVE') return `<button class="btn btn-danger btn-sm" onclick="deleteUser('${esc(row.userId)}')">Deactivate</button>`;
+        if (row.status === 'INACTIVE') return `<button class="btn btn-primary btn-sm" onclick="reactivateUser('${esc(row.userId)}')">Reactivate</button>`;
+        return '';
+      },
+    },
+  ],
+  filterLabel: 'Filter users',
+  emptyMessage: 'No users found.',
+  noMatchMessage: 'No matching users found.',
+};
+
+const projectsTableConfig = {
+  columns: [
+    {
+      key: 'projectId', label: 'Project ID', type: 'text', sortable: true,
+      render: (row) => `<a href="#" onclick="setProjectContext('${esc(row.projectId)}');navigate('clusters',{projectId:'${esc(row.projectId)}'});return false">${esc(row.projectId)}</a>`,
+    },
+    { key: 'projectName', label: 'Name', type: 'text', sortable: true },
+    {
+      key: 'budgetLimit', label: 'Budget', type: 'numeric', sortable: true,
+      value: (row) => Number(row.budgetLimit) || 0,
+      render: (row) => {
+        const budgetDisplay = row.budgetLimit ? '$' + Number(row.budgetLimit).toLocaleString() : 'None';
+        const budgetBreach = row.budgetBreached ? ' <span class="badge badge-failed">BREACHED</span>' : '';
+        return budgetDisplay + budgetBreach;
+      },
+    },
+    {
+      key: 'status', label: 'Status', type: 'text', sortable: true,
+      render: (row) => {
+        const status = row.status || 'ACTIVE';
+        return `<span class="badge badge-${status.toLowerCase()}">${esc(status)}</span>`;
+      },
+    },
+    {
+      key: '_actions', label: 'Actions', type: 'custom', sortable: false,
+      render: (row) => {
+        const status = row.status || 'ACTIVE';
+        if (status === 'CREATED') {
+          return `<button class="btn btn-primary btn-sm" onclick="deployProject('${esc(row.projectId)}')">Deploy</button>`;
+        } else if (status === 'DEPLOYING') {
+          const cur = row.currentStep || 0;
+          const total = row.totalSteps || 5;
+          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+          const desc = row.stepDescription || 'Deploying…';
+          return `<div class="progress-container compact">
+            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+          </div>`;
+        } else if (status === 'UPDATING') {
+          const cur = row.currentStep || 0;
+          const total = row.totalSteps || 5;
+          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+          const desc = row.stepDescription || 'Updating…';
+          return `<div class="progress-container compact">
+            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+          </div>`;
+        } else if (status === 'ACTIVE') {
+          return `<button class="btn btn-primary btn-sm" onclick="editProject('${esc(row.projectId)}')">Edit</button>
+            <button class="btn btn-primary btn-sm" style="margin-left:0.25rem" onclick="updateProject('${esc(row.projectId)}')">Update</button>
+            <button class="btn btn-danger btn-sm" style="margin-left:0.25rem" onclick="showDestroyConfirmation('${esc(row.projectId)}')">Destroy</button>`;
+        } else if (status === 'DESTROYING') {
+          const cur = row.currentStep || 0;
+          const total = row.totalSteps || 5;
+          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+          const desc = row.stepDescription || 'Destroying…';
+          return `<div class="progress-container compact">
+            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+          </div>`;
+        }
+        return '';
+      },
+    },
+  ],
+  filterLabel: 'Filter projects',
+  emptyMessage: 'No projects found.',
+  noMatchMessage: 'No matching projects found.',
+};
+
+const templatesTableConfig = {
+  columns: [
+    { key: 'templateId', label: 'Template ID', type: 'text', sortable: true },
+    { key: 'templateName', label: 'Name', type: 'text', sortable: true },
+    {
+      key: 'instanceTypes', label: 'Instance Types', type: 'text', sortable: true,
+      value: (row) => (row.instanceTypes || []).join(', '),
+    },
+    {
+      key: 'loginInstanceType', label: 'Login Instance', type: 'text', sortable: true,
+      value: (row) => row.loginInstanceType || '—',
+    },
+    {
+      key: 'nodes', label: 'Nodes (min–max)', type: 'text', sortable: true,
+      value: (row) => (row.minNodes || 0) + ' – ' + (row.maxNodes || '∞'),
+    },
+    {
+      key: '_actions', label: 'Actions', type: 'custom', sortable: false,
+      render: (row) => `<button class="btn btn-primary btn-sm" onclick="editTemplate('${esc(row.templateId)}')">Edit</button> <button class="btn btn-danger btn-sm" onclick="deleteTemplate('${esc(row.templateId)}')">Delete</button>`,
+    },
+  ],
+  filterLabel: 'Filter templates',
+  emptyMessage: 'No templates found.',
+  noMatchMessage: 'No matching templates found.',
+};
+
+const accountingTableConfig = {
+  columns: [
+    { key: 'jobId', label: 'Job ID', type: 'text', sortable: true, value: (row) => row.jobId || row.JobID || '—' },
+    { key: 'user', label: 'User', type: 'text', sortable: true, value: (row) => row.user || row.User || '—' },
+    { key: 'cluster', label: 'Cluster', type: 'text', sortable: true, value: (row) => row.cluster || row.Cluster || '—' },
+    { key: 'partition', label: 'Partition', type: 'text', sortable: true, value: (row) => row.partition || row.Partition || '—' },
+    { key: 'state', label: 'State', type: 'text', sortable: true, value: (row) => row.state || row.State || '—' },
+    { key: 'start', label: 'Start', type: 'text', sortable: true, value: (row) => row.start || row.Start || '—' },
+    { key: 'end', label: 'End', type: 'text', sortable: true, value: (row) => row.end || row.End || '—' },
+  ],
+  filterLabel: 'Filter jobs',
+  emptyMessage: 'No job records found.',
+  noMatchMessage: 'No matching job records found.',
+};
+
+/* ============================================================
    Cognito Authentication (USER_PASSWORD_AUTH via InitiateAuth)
    ============================================================ */
 
@@ -300,6 +443,9 @@ function navigate(page, params = {}) {
   Object.values(state.pollTimers).forEach(clearInterval);
   state.pollTimers = {};
 
+  // Reset table sort/filter state when switching pages
+  TableModule.clearAllState();
+
   state.currentPage = page;
   document.querySelectorAll('nav a').forEach(a => {
     a.classList.toggle('active', a.dataset.page === page);
@@ -393,21 +539,7 @@ async function loadUsers() {
     const data = await apiCall('GET', '/users');
     const users = data.users || [];
     const el = document.getElementById('users-list');
-    if (!users.length) {
-      el.innerHTML = '<div class="empty-state">No users found.</div>';
-      return;
-    }
-    el.innerHTML = `<table>
-      <thead><tr><th>User ID</th><th>Display Name</th><th>Role</th><th>POSIX UID</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${users.map(u => `<tr>
-        <td>${esc(u.userId)}</td>
-        <td>${esc(u.displayName || '')}</td>
-        <td>${esc(u.role || 'User')}</td>
-        <td>${u.posixUid || '—'}</td>
-        <td><span class="badge badge-${(u.status || '').toLowerCase()}">${esc(u.status || 'UNKNOWN')}</span></td>
-        <td>${u.status === 'ACTIVE' ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${esc(u.userId)}')">Deactivate</button>` : ''}${u.status === 'INACTIVE' ? `<button class="btn btn-primary btn-sm" onclick="reactivateUser('${esc(u.userId)}')">Reactivate</button>` : ''}</td>
-      </tr>`).join('')}</tbody>
-    </table>`;
+    TableModule.render('users', usersTableConfig, users, el);
   } catch (e) {
     document.getElementById('users-list').innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
@@ -484,64 +616,8 @@ async function loadProjects() {
     const projects = data.projects || [];
     const el = document.getElementById('projects-list');
     if (!el) return;
-    if (!projects.length) {
-      el.innerHTML = '<div class="empty-state">No projects found.</div>';
-      return;
-    }
-    el.innerHTML = `<table>
-      <thead><tr><th>Project ID</th><th>Name</th><th>Budget</th><th>Status</th><th>Actions</th></tr></thead>
-      <tbody>${projects.map(p => {
-        const status = p.status || 'ACTIVE';
-        const statusClass = status.toLowerCase();
-        const budgetDisplay = p.budgetLimit ? '$' + Number(p.budgetLimit).toLocaleString() : 'None';
-        const budgetBreach = p.budgetBreached ? ' <span class="badge badge-failed">BREACHED</span>' : '';
 
-        let actionsHtml = '';
-        if (status === 'CREATED') {
-          actionsHtml = `<button class="btn btn-primary btn-sm" onclick="deployProject('${esc(p.projectId)}')">Deploy</button>`;
-        } else if (status === 'DEPLOYING') {
-          const cur = p.currentStep || 0;
-          const total = p.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = p.stepDescription || 'Deploying…';
-          actionsHtml = `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
-        } else if (status === 'UPDATING') {
-          const cur = p.currentStep || 0;
-          const total = p.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = p.stepDescription || 'Updating…';
-          actionsHtml = `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
-        } else if (status === 'ACTIVE') {
-          actionsHtml = `<button class="btn btn-primary btn-sm" onclick="editProject('${esc(p.projectId)}')">Edit</button>
-            <button class="btn btn-primary btn-sm" style="margin-left:0.25rem" onclick="updateProject('${esc(p.projectId)}')">Update</button>
-            <button class="btn btn-danger btn-sm" style="margin-left:0.25rem" onclick="showDestroyConfirmation('${esc(p.projectId)}')">Destroy</button>`;
-        } else if (status === 'DESTROYING') {
-          const cur = p.currentStep || 0;
-          const total = p.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = p.stepDescription || 'Destroying…';
-          actionsHtml = `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
-        }
-        // ARCHIVED: no actions
-
-        return `<tr>
-          <td><a href="#" onclick="setProjectContext('${esc(p.projectId)}');navigate('clusters',{projectId:'${esc(p.projectId)}'});return false">${esc(p.projectId)}</a></td>
-          <td>${esc(p.projectName || '')}</td>
-          <td>${budgetDisplay}${budgetBreach}</td>
-          <td><span class="badge badge-${statusClass}">${esc(status)}</span></td>
-          <td>${actionsHtml}</td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table>`;
+    TableModule.render('projects', projectsTableConfig, projects, el);
 
     // Start polling if any projects are in transitional states
     const transitional = projects.filter(p => ['DEPLOYING', 'DESTROYING', 'UPDATING'].includes(p.status));
@@ -989,21 +1065,7 @@ async function loadTemplates() {
     const data = await apiCall('GET', '/templates');
     const templates = data.templates || [];
     const el = document.getElementById('templates-list');
-    if (!templates.length) {
-      el.innerHTML = '<div class="empty-state">No templates found.</div>';
-      return;
-    }
-    el.innerHTML = `<table>
-      <thead><tr><th>Template ID</th><th>Name</th><th>Instance Types</th><th>Login Instance</th><th>Nodes (min–max)</th><th>Actions</th></tr></thead>
-      <tbody>${templates.map(t => `<tr>
-        <td>${esc(t.templateId)}</td>
-        <td>${esc(t.templateName || '')}</td>
-        <td>${esc((t.instanceTypes || []).join(', '))}</td>
-        <td>${esc(t.loginInstanceType || '—')}</td>
-        <td>${t.minNodes || 0} – ${t.maxNodes || '∞'}</td>
-        <td><button class="btn btn-primary btn-sm" onclick="editTemplate('${esc(t.templateId)}')">Edit</button> <button class="btn btn-danger btn-sm" onclick="deleteTemplate('${esc(t.templateId)}')">Delete</button></td>
-      </tr>`).join('')}</tbody>
-    </table>`;
+    TableModule.render('templates', templatesTableConfig, templates, el);
   } catch (e) {
     document.getElementById('templates-list').innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
   }
@@ -1330,46 +1392,54 @@ async function loadClusters(projectId) {
     ]);
     const budgetBreached = !!projectData.budgetBreached;
     const clusters = data.clusters || [];
-    if (!clusters.length) {
-      el.innerHTML = '<div class="empty-state">No clusters found for this project.</div>';
-      return;
-    }
 
-    el.innerHTML = `<table>
-      <thead><tr><th>Cluster Name</th><th>Template</th><th>Status</th><th>Progress</th><th>Actions</th></tr></thead>
-      <tbody>${clusters.map(c => {
-        const statusClass = (c.status || '').toLowerCase();
-        let progressHtml = '—';
-        if (c.status === 'CREATING') {
-          const cur = c.currentStep || 0;
-          const total = c.totalSteps || 10;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = c.stepDescription || 'Initialising…';
-          progressHtml = `
-            <div class="progress-container compact">
-              <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-              <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-            </div>`;
-        } else if (c.status === 'FAILED') {
-          progressHtml = `<span style="color:var(--color-danger);font-size:0.8rem">${esc(c.errorMessage || 'Unknown error')}</span>`;
-        }
+    const clustersTableConfig = {
+      columns: [
+        {
+          key: 'clusterName', label: 'Cluster Name', type: 'text', sortable: true,
+          render: (row) => `<a href="#" onclick="navigate('cluster-detail',{projectId:'${esc(projectId)}',clusterName:'${esc(row.clusterName)}'});return false">${esc(row.clusterName)}</a>`,
+        },
+        { key: 'templateId', label: 'Template', type: 'text', sortable: true },
+        {
+          key: 'status', label: 'Status', type: 'text', sortable: true,
+          render: (row) => `<span class="badge badge-${(row.status || '').toLowerCase()}">${esc(row.status)}</span>`,
+        },
+        {
+          key: '_progress', label: 'Progress', type: 'custom', sortable: false,
+          render: (row) => {
+            if (row.status === 'CREATING') {
+              const cur = row.currentStep || 0;
+              const total = row.totalSteps || 10;
+              const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+              const desc = row.stepDescription || 'Initialising…';
+              return `<div class="progress-container compact">
+                <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+                <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+              </div>`;
+            } else if (row.status === 'FAILED') {
+              return `<span style="color:var(--color-danger);font-size:0.8rem">${esc(row.errorMessage || 'Unknown error')}</span>`;
+            }
+            return '—';
+          },
+        },
+        {
+          key: '_actions', label: 'Actions', type: 'custom', sortable: false,
+          render: (row) => {
+            if (['ACTIVE', 'FAILED'].includes(row.status)) {
+              return `<button class="btn btn-danger btn-sm" onclick="destroyCluster('${esc(projectId)}','${esc(row.clusterName)}')">Destroy</button>`;
+            } else if (row.status === 'DESTROYED' && !budgetBreached) {
+              return `<button class="btn btn-primary btn-sm" onclick="recreateCluster('${esc(projectId)}','${esc(row.clusterName)}')">Recreate</button>`;
+            }
+            return '';
+          },
+        },
+      ],
+      filterLabel: 'Filter clusters',
+      emptyMessage: 'No clusters found for this project.',
+      noMatchMessage: 'No matching clusters found.',
+    };
 
-        let actionsHtml = '';
-        if (['ACTIVE', 'FAILED'].includes(c.status)) {
-          actionsHtml = `<button class="btn btn-danger btn-sm" onclick="destroyCluster('${esc(projectId)}','${esc(c.clusterName)}')">Destroy</button>`;
-        } else if (c.status === 'DESTROYED' && !budgetBreached) {
-          actionsHtml = `<button class="btn btn-primary btn-sm" onclick="recreateCluster('${esc(projectId)}','${esc(c.clusterName)}')">Recreate</button>`;
-        }
-
-        return `<tr>
-          <td><a href="#" onclick="navigate('cluster-detail',{projectId:'${esc(projectId)}',clusterName:'${esc(c.clusterName)}'});return false">${esc(c.clusterName)}</a></td>
-          <td>${esc(c.templateId || '—')}</td>
-          <td><span class="badge badge-${statusClass}">${esc(c.status)}</span></td>
-          <td>${progressHtml}</td>
-          <td>${actionsHtml}</td>
-        </tr>`;
-      }).join('')}</tbody>
-    </table>`;
+    TableModule.render('clusters', clustersTableConfig, clusters, el);
 
     // Start or stop polling based on transitional cluster states
     const transitionalClusters = clusters.filter(c => ['CREATING', 'DESTROYING'].includes(c.status));
@@ -1605,22 +1675,7 @@ function renderAccountingPage(container) {
       const path = projectId ? `/accounting/jobs?projectId=${encodeURIComponent(projectId)}` : '/accounting/jobs';
       const data = await apiCall('GET', path);
       const jobs = data.jobs || [];
-      if (!jobs.length) {
-        el.innerHTML = '<div class="empty-state">No job records found.</div>';
-        return;
-      }
-      el.innerHTML = `<table>
-        <thead><tr><th>Job ID</th><th>User</th><th>Cluster</th><th>Partition</th><th>State</th><th>Start</th><th>End</th></tr></thead>
-        <tbody>${jobs.map(j => `<tr>
-          <td>${esc(j.jobId || j.JobID || '—')}</td>
-          <td>${esc(j.user || j.User || '—')}</td>
-          <td>${esc(j.cluster || j.Cluster || '—')}</td>
-          <td>${esc(j.partition || j.Partition || '—')}</td>
-          <td>${esc(j.state || j.State || '—')}</td>
-          <td>${esc(j.start || j.Start || '—')}</td>
-          <td>${esc(j.end || j.End || '—')}</td>
-        </tr>`).join('')}</tbody>
-      </table>`;
+      TableModule.render('accounting', accountingTableConfig, jobs, el);
     } catch (e) {
       el.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
     }
