@@ -223,6 +223,7 @@ def reload_template_mgmt_modules():
     errors_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "errors")
     auth_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "auth")
     templates_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "templates")
+    ami_lookup_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "ami_lookup")
     handler_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "handler")
     return handler_mod, templates_mod, errors_mod
 

@@ -29,6 +29,7 @@ from errors import (
     build_error_response,
 )
 from templates import create_template, delete_template, get_template, list_templates
+from ami_lookup import get_latest_pcs_ami
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -60,6 +61,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/templates/{templateId}" and http_method == "DELETE":
             template_id = path_parameters.get("templateId", "")
             response = _handle_delete_template(event, template_id)
+        elif resource == "/templates/default-ami" and http_method == "GET":
+            response = _handle_default_ami(event)
         else:
             response = _response(
                 404,
@@ -152,6 +155,27 @@ def _handle_delete_template(event: dict[str, Any], template_id: str) -> dict[str
     delete_template(table_name=TEMPLATES_TABLE_NAME, template_id=template_id)
     logger.info("Template deleted: %s by %s", template_id, caller)
     return _response(200, {"message": f"Template '{template_id}' has been deleted."})
+
+
+def _handle_default_ami(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle GET /templates/default-ami — look up the latest PCS sample AMI.
+
+    Query parameters:
+        arch: CPU architecture — "x86_64" (default) or "arm64"
+    """
+    if not is_authenticated(event):
+        raise AuthorisationError("Authentication is required.")
+
+    params = event.get("queryStringParameters") or {}
+    arch = params.get("arch", "x86_64").strip().lower()
+    if arch not in ("x86_64", "arm64"):
+        raise ValidationError(
+            "arch must be 'x86_64' or 'arm64'.",
+            {"field": "arch", "validValues": ["x86_64", "arm64"]},
+        )
+
+    ami = get_latest_pcs_ami(arch)
+    return _response(200, ami)
 
 
 def _parse_body(event: dict[str, Any]) -> dict[str, Any]:

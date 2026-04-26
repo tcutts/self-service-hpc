@@ -588,10 +588,17 @@ export class FoundationStack extends cdk.Stack {
     // Grant DynamoDB read/write access to ClusterTemplates table
     this.clusterTemplatesTable.grantReadWriteData(this.templateManagementLambda);
 
+    // Grant EC2 DescribeImages for PCS sample AMI lookup
+    this.templateManagementLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeImages'],
+      resources: ['*'],
+    }));
+
     // ---------------------------------------------------------------
     // API Gateway — Template Management Resources
     // ---------------------------------------------------------------
     const templatesResource = this.api.root.addResource('templates');
+    const defaultAmiResource = templatesResource.addResource('default-ami');
     const templateIdResource = templatesResource.addResource('{templateId}');
 
     const templateManagementIntegration = new apigateway.LambdaIntegration(this.templateManagementLambda);
@@ -600,6 +607,8 @@ export class FoundationStack extends cdk.Stack {
     templatesResource.addMethod('POST', templateManagementIntegration, cognitoMethodOptions);
     // GET /templates — list templates (any authenticated user in handler)
     templatesResource.addMethod('GET', templateManagementIntegration, cognitoMethodOptions);
+    // GET /templates/default-ami — look up latest PCS sample AMI (any authenticated user)
+    defaultAmiResource.addMethod('GET', templateManagementIntegration, cognitoMethodOptions);
     // GET /templates/{templateId} — get template details (any authenticated user in handler)
     templateIdResource.addMethod('GET', templateManagementIntegration, cognitoMethodOptions);
     // DELETE /templates/{templateId} — delete template (admin only in handler)

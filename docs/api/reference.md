@@ -653,6 +653,8 @@ Create a new cluster template.
 }
 ```
 
+**Instance type restrictions:** Both `instanceTypes` and `loginInstanceType` must use PCS-supported EC2 instance families. Supported families include: c5–c7i, m5–m7i, r5–r7i, g4dn–g6, p3–p5, hpc6a–hpc7g, t3–t4g, x2idn, x2iedn, trn1, inf1–inf2, and dl1. The web portal validates this before submission; the backend also rejects unsupported families.
+
 **Response (201 Created):**
 
 ```json
