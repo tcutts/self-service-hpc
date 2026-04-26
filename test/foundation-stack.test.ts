@@ -502,6 +502,28 @@ describe('FoundationStack', () => {
       });
     });
 
+    it('creation step Lambda has SLR and policy permissions for FSx S3 data-source', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: [
+                'iam:CreateServiceLinkedRole',
+                'iam:AttachRolePolicy',
+                'iam:PutRolePolicy',
+              ],
+              Effect: 'Allow',
+              Condition: {
+                StringLike: {
+                  'iam:AWSServiceName': 's3.data-source.lustre.fsx.amazonaws.com',
+                },
+              },
+            }),
+          ]),
+        },
+      });
+    });
+
     it('creation state machine execution role has EC2 permissions', () => {
       template.hasResourceProperties('AWS::IAM::Policy', {
         PolicyDocument: {

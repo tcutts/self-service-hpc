@@ -764,16 +764,37 @@ export class FoundationStack extends cdk.Stack {
       resources: ['*'],
     }));
 
-    // FSx for Lustre requires a service-linked role (AWSServiceRoleForAmazonFSx)
-    // to access S3 buckets for data repository associations.  If the role does
-    // not already exist in the account, CreateFileSystem will attempt to create
-    // it automatically — but only if the caller has iam:CreateServiceLinkedRole.
+    // FSx for Lustre requires TWO service-linked roles:
+    //  1. AWSServiceRoleForAmazonFSx (fsx.amazonaws.com) — general FSx operations
+    //  2. AWSServiceRoleForFSxS3Access_fsx (s3.data-source.lustre.fsx.amazonaws.com)
+    //     — required for data repository associations that link FSx to S3
+    //
+    // If either role does not already exist in the account, CreateFileSystem
+    // will attempt to create it automatically — but only if the caller has
+    // iam:CreateServiceLinkedRole (and iam:AttachRolePolicy / iam:PutRolePolicy
+    // for the S3 data-source SLR).
+    //
+    // See: https://docs.aws.amazon.com/fsx/latest/LustreGuide/setting-up.html#fsx-adding-permissions-s3
     clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: ['iam:CreateServiceLinkedRole'],
       resources: ['arn:aws:iam::*:role/aws-service-role/fsx.amazonaws.com/*'],
       conditions: {
         'StringLike': {
           'iam:AWSServiceName': 'fsx.amazonaws.com',
+        },
+      },
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateServiceLinkedRole',
+        'iam:AttachRolePolicy',
+        'iam:PutRolePolicy',
+      ],
+      resources: ['arn:aws:iam::*:role/aws-service-role/s3.data-source.lustre.fsx.amazonaws.com/*'],
+      conditions: {
+        'StringLike': {
+          'iam:AWSServiceName': 's3.data-source.lustre.fsx.amazonaws.com',
         },
       },
     }));
