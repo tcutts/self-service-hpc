@@ -12,6 +12,7 @@ Environment variables:
     BUDGET_SNS_TOPIC_ARN: SNS topic ARN for budget notifications
     PROJECT_DEPLOY_STATE_MACHINE_ARN: Step Functions state machine ARN for project deployment
     PROJECT_DESTROY_STATE_MACHINE_ARN: Step Functions state machine ARN for project destruction
+    PROJECT_UPDATE_STATE_MACHINE_ARN: Step Functions state machine ARN for project update
 """
 
 import json
@@ -54,6 +55,7 @@ USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 BUDGET_SNS_TOPIC_ARN = os.environ.get("BUDGET_SNS_TOPIC_ARN", "")
 PROJECT_DEPLOY_STATE_MACHINE_ARN = os.environ.get("PROJECT_DEPLOY_STATE_MACHINE_ARN", "")
 PROJECT_DESTROY_STATE_MACHINE_ARN = os.environ.get("PROJECT_DESTROY_STATE_MACHINE_ARN", "")
+PROJECT_UPDATE_STATE_MACHINE_ARN = os.environ.get("PROJECT_UPDATE_STATE_MACHINE_ARN", "")
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -107,6 +109,11 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/projects/{projectId}/destroy" and http_method == "POST":
             project_id = path_parameters.get("projectId", "")
             response = _handle_destroy_project_infra(event, project_id)
+
+        # Update route
+        elif resource == "/projects/{projectId}/update" and http_method == "POST":
+            project_id = path_parameters.get("projectId", "")
+            response = _handle_update_project(event, project_id)
 
         # Edit route
         elif resource == "/projects/{projectId}" and http_method == "PUT":
@@ -178,7 +185,7 @@ def _handle_get_project(event: dict[str, Any], project_id: str) -> dict[str, Any
     project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=project_id)
 
     # Include progress fields for transitional statuses
-    if project_record.get("status") in ("DEPLOYING", "DESTROYING"):
+    if project_record.get("status") in ("DEPLOYING", "DESTROYING", "UPDATING"):
         project_record["progress"] = {
             "currentStep": int(project_record.get("currentStep", 0)),
             "totalSteps": int(project_record.get("totalSteps", 0)),
@@ -433,6 +440,77 @@ def _handle_destroy_project_infra(event: dict[str, Any], project_id: str) -> dic
         "message": f"Project '{project_id}' destruction started.",
         "projectId": project_id,
         "status": "DESTROYING",
+    })
+
+
+def _handle_update_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
+    """Handle POST /projects/{projectId}/update — start infrastructure update."""
+    caller = get_caller_identity(event)
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can update project infrastructure.")
+
+    # Verify project exists and status is ACTIVE
+    project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=project_id)
+    if project_record.get("status") != "ACTIVE":
+        raise ConflictError(
+            f"Cannot update project '{project_id}': project status is "
+            f"'{project_record.get('status')}', expected 'ACTIVE'.",
+            {
+                "projectId": project_id,
+                "currentStatus": project_record.get("status"),
+                "requiredStatus": "ACTIVE",
+            },
+        )
+
+    # Transition to UPDATING
+    lifecycle.transition_project(
+        table_name=PROJECTS_TABLE_NAME,
+        project_id=project_id,
+        target_status="UPDATING",
+    )
+
+    # Set initial progress tracking
+    dynamodb = boto3.resource("dynamodb")
+    table = dynamodb.Table(PROJECTS_TABLE_NAME)
+    table.update_item(
+        Key={"PK": f"PROJECT#{project_id}", "SK": "METADATA"},
+        UpdateExpression="SET currentStep = :step, totalSteps = :total",
+        ExpressionAttributeValues={
+            ":step": 0,
+            ":total": 5,
+        },
+    )
+
+    # Start Step Functions execution
+    if PROJECT_UPDATE_STATE_MACHINE_ARN:
+        try:
+            sfn_client.start_execution(
+                stateMachineArn=PROJECT_UPDATE_STATE_MACHINE_ARN,
+                input=json.dumps({"projectId": project_id}),
+            )
+            logger.info(
+                "Started update execution for project '%s' by %s",
+                project_id,
+                caller,
+            )
+        except Exception:
+            logger.warning(
+                "Failed to start update Step Functions execution for project '%s'. "
+                "The state machine may not exist yet.",
+                project_id,
+                exc_info=True,
+            )
+    else:
+        logger.warning(
+            "PROJECT_UPDATE_STATE_MACHINE_ARN is not set. "
+            "Skipping Step Functions execution for project '%s'.",
+            project_id,
+        )
+
+    return _response(202, {
+        "message": f"Project '{project_id}' update started.",
+        "projectId": project_id,
+        "status": "UPDATING",
     })
 
 

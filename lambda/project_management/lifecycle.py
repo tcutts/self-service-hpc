@@ -8,6 +8,8 @@ Valid transitions:
     DEPLOYING → ACTIVE      (deployment succeeds)
     DEPLOYING → CREATED     (deployment fails)
     ACTIVE    → DESTROYING
+    ACTIVE    → UPDATING
+    UPDATING  → ACTIVE      (update succeeds or fails)
     DESTROYING → ARCHIVED   (destruction succeeds)
     DESTROYING → ACTIVE     (destruction fails)
 """
@@ -28,7 +30,8 @@ dynamodb = boto3.resource("dynamodb")
 VALID_TRANSITIONS: dict[str, list[str]] = {
     "CREATED": ["DEPLOYING"],
     "DEPLOYING": ["ACTIVE", "CREATED"],
-    "ACTIVE": ["DESTROYING"],
+    "ACTIVE": ["DESTROYING", "UPDATING"],
+    "UPDATING": ["ACTIVE"],
     "DESTROYING": ["ARCHIVED", "ACTIVE"],
     "ARCHIVED": [],
 }

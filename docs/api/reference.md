@@ -282,7 +282,7 @@ List all projects.
 
 ### GET /projects/{projectId}
 
-Get a single project's details. When the project is in `DEPLOYING` or `DESTROYING` status, the response includes a `progress` object with the current step information.
+Get a single project's details. When the project is in `DEPLOYING`, `DESTROYING`, or `UPDATING` status, the response includes a `progress` object with the current step information.
 
 **Required role:** Administrator
 
@@ -310,7 +310,7 @@ Get a single project's details. When the project is in `DEPLOYING` or `DESTROYIN
 }
 ```
 
-**Response (200 OK) — DEPLOYING or DESTROYING project:**
+**Response (200 OK) — DEPLOYING, DESTROYING, or UPDATING project:**
 
 ```json
 {
@@ -338,7 +338,7 @@ Get a single project's details. When the project is in `DEPLOYING` or `DESTROYIN
 | `progress.totalSteps` | number | Total number of steps in the operation |
 | `progress.stepDescription` | string | Human-readable description of the current step |
 
-The `progress` object is only included when the project status is `DEPLOYING` or `DESTROYING`.
+The `progress` object is only included when the project status is `DEPLOYING`, `DESTROYING`, or `UPDATING`.
 
 **Errors:**
 
@@ -414,6 +414,40 @@ Initiate infrastructure destruction for a project. The project must be in `ACTIV
 | `AUTHORISATION_ERROR` | 403 | Caller is not an Administrator |
 | `NOT_FOUND` | 404 | Project does not exist |
 | `CONFLICT` | 409 | Project is not in ACTIVE status, or project has active clusters |
+
+---
+
+### POST /projects/{projectId}/update
+
+Initiate an infrastructure update for a project. The project must be in `ACTIVE` status. The update runs `cdk deploy` against the existing CloudFormation stack to apply infrastructure changes without destroying and recreating the project. Running clusters are not disrupted because CloudFormation preserves resources with stable logical IDs. The update runs asynchronously via a Step Functions state machine.
+
+**Required role:** Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectId` | string | The project identifier |
+
+**Request body:** None required.
+
+**Response (202 Accepted):**
+
+```json
+{
+  "message": "Project 'genomics-team' update started.",
+  "projectId": "genomics-team",
+  "status": "UPDATING"
+}
+```
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `AUTHORISATION_ERROR` | 403 | Caller is not an Administrator |
+| `NOT_FOUND` | 404 | Project does not exist |
+| `CONFLICT` | 409 | Project is not in ACTIVE status |
 
 ---
 

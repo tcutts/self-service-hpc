@@ -859,7 +859,7 @@ class TestLifecycleValidateTransition:
             validate_transition("ACTIVE", "CREATED")
         assert exc_info.value.details["currentStatus"] == "ACTIVE"
         assert exc_info.value.details["targetStatus"] == "CREATED"
-        assert exc_info.value.details["validTransitions"] == ["DESTROYING"]
+        assert exc_info.value.details["validTransitions"] == ["DESTROYING", "UPDATING"]
 
 
 # ---------------------------------------------------------------------------
@@ -1631,3 +1631,174 @@ class TestGetProjectProgress:
         body = json.loads(response["body"])
         assert body["status"] == "CREATED"
         assert "progress" not in body
+
+
+# ---------------------------------------------------------------------------
+# Update route — POST /projects/{projectId}/update
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestUpdateRoute:
+    """Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.5, 2.6"""
+
+    def test_update_active_project_returns_202(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-ok", "ACTIVE")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-ok"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 202
+        body = json.loads(response["body"])
+        assert body["projectId"] == "proj-update-ok"
+        assert body["status"] == "UPDATING"
+        assert "update started" in body["message"].lower()
+
+    def test_update_transitions_project_to_updating(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-check", "ACTIVE")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-check"},
+        )
+        handler_mod.handler(event, None)
+
+        # Verify the project status was updated in DynamoDB
+        item = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-update-check", "SK": "METADATA"}
+        )["Item"]
+        assert item["status"] == "UPDATING"
+        assert int(item["currentStep"]) == 0
+        assert int(item["totalSteps"]) == 5
+
+    def test_update_non_admin_returns_403(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = build_non_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "some-proj"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+    def test_update_created_project_returns_409(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-created", "CREATED")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-created"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+        assert "CREATED" in body["error"]["message"]
+        assert "ACTIVE" in body["error"]["message"]
+
+    def test_update_deploying_project_returns_409(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-deploying", "DEPLOYING")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-deploying"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+
+    def test_update_destroying_project_returns_409(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-destroying", "DESTROYING")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-destroying"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+
+    def test_update_archived_project_returns_409(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-update-archived", "ARCHIVED")
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-archived"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+
+    def test_update_nonexistent_project_returns_404(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = build_admin_event(
+            "POST", "/projects/{projectId}/update",
+            path_parameters={"projectId": "proj-update-ghost"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 404
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "NOT_FOUND"
+
+
+# ---------------------------------------------------------------------------
+# GET project — progress fields for UPDATING status
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestGetProjectUpdateProgress:
+    """Validates: Requirements 5.1"""
+
+    def test_get_updating_project_includes_progress(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(
+            projects_table, "proj-progress-update", "UPDATING",
+            currentStep=3, totalSteps=5, stepDescription="Extracting stack outputs",
+        )
+
+        event = build_admin_event(
+            "GET", "/projects/{projectId}",
+            path_parameters={"projectId": "proj-progress-update"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["status"] == "UPDATING"
+        assert "progress" in body
+        assert body["progress"]["currentStep"] == 3
+        assert body["progress"]["totalSteps"] == 5
+        assert body["progress"]["stepDescription"] == "Extracting stack outputs"

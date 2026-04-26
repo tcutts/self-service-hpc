@@ -508,8 +508,18 @@ async function loadProjects() {
             <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
             <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
           </div>`;
+        } else if (status === 'UPDATING') {
+          const cur = p.currentStep || 0;
+          const total = p.totalSteps || 5;
+          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+          const desc = p.stepDescription || 'Updating…';
+          actionsHtml = `<div class="progress-container compact">
+            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+          </div>`;
         } else if (status === 'ACTIVE') {
           actionsHtml = `<button class="btn btn-primary btn-sm" onclick="editProject('${esc(p.projectId)}')">Edit</button>
+            <button class="btn btn-primary btn-sm" style="margin-left:0.25rem" onclick="updateProject('${esc(p.projectId)}')">Update</button>
             <button class="btn btn-danger btn-sm" style="margin-left:0.25rem" onclick="showDestroyConfirmation('${esc(p.projectId)}')">Destroy</button>`;
         } else if (status === 'DESTROYING') {
           const cur = p.currentStep || 0;
@@ -534,7 +544,7 @@ async function loadProjects() {
     </table>`;
 
     // Start polling if any projects are in transitional states
-    const transitional = projects.filter(p => ['DEPLOYING', 'DESTROYING'].includes(p.status));
+    const transitional = projects.filter(p => ['DEPLOYING', 'DESTROYING', 'UPDATING'].includes(p.status));
     if (transitional.length > 0) {
       startProjectListPolling();
     } else {
@@ -551,6 +561,12 @@ async function loadProjects() {
         showToast(`Project '${p.projectId}' deployment failed`, 'error');
       } else if (prev === 'DESTROYING' && cur === 'ARCHIVED') {
         showToast(`Project '${p.projectId}' has been archived`, 'success');
+      } else if (prev === 'UPDATING' && cur === 'ACTIVE') {
+        if (p.errorMessage) {
+          showToast(`Project '${p.projectId}' update failed: ${p.errorMessage}`, 'error');
+        } else {
+          showToast(`Project '${p.projectId}' update completed`, 'success');
+        }
       }
       state.projectStatusCache[p.projectId] = cur;
     });
@@ -571,6 +587,14 @@ async function deployProject(projectId) {
   try {
     await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/deploy`);
     showToast(`Project '${projectId}' deployment started`);
+    loadProjects();
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+async function updateProject(projectId) {
+  try {
+    await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/update`);
+    showToast(`Project '${projectId}' update started`);
     loadProjects();
   } catch (e) { showToast(e.message, 'error'); }
 }

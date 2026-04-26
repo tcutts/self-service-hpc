@@ -74,6 +74,8 @@ export class FoundationStack extends cdk.Stack {
   public readonly projectDeployStateMachine: sfn.StateMachine;
   /** Step Functions state machine: Project Destroy workflow. */
   public readonly projectDestroyStateMachine: sfn.StateMachine;
+  /** Step Functions state machine: Project Update workflow. */
+  public readonly projectUpdateStateMachine: sfn.StateMachine;
   /** Lambda function: Accounting Query. */
   public readonly accountingQueryLambda: lambda.Function;
   /** Lambda function: Budget Notification handler. */
@@ -567,6 +569,9 @@ export class FoundationStack extends cdk.Stack {
     // POST /projects/{projectId}/destroy — destroy project infrastructure
     const destroyResource = projectIdResource.addResource('destroy');
     destroyResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/update — update project infrastructure
+    const updateResource = projectIdResource.addResource('update');
+    updateResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
 
     // ---------------------------------------------------------------
     // Template Management Lambda Function
@@ -1618,9 +1623,171 @@ export class FoundationStack extends cdk.Stack {
       this.projectDestroyStateMachine.stateMachineArn,
     );
 
-    // Grant project management Lambda permission to start executions on both state machines
+    // Grant project management Lambda permission to start executions on deploy/destroy state machines
     this.projectDeployStateMachine.grantStartExecution(this.projectManagementLambda);
     this.projectDestroyStateMachine.grantStartExecution(this.projectManagementLambda);
+
+    // ---------------------------------------------------------------
+    // Step Functions — Project Update State Machine
+    // ---------------------------------------------------------------
+
+    // Lambda function for project update workflow steps
+    const projectUpdateStepLambda = new lambda.Function(this, 'ProjectUpdateStepLambda', {
+      functionName: 'hpc-project-update-steps',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'project_update.step_handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'project_management')),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(300),
+      memorySize: 512,
+      environment: {
+        PROJECTS_TABLE_NAME: this.projectsTable.tableName,
+        CODEBUILD_PROJECT_NAME: this.cdkDeployProject.projectName,
+      },
+      description: 'Executes individual steps of the project update workflow',
+    });
+
+    // Grant update step Lambda permissions
+    this.projectsTable.grantReadWriteData(projectUpdateStepLambda);
+
+    projectUpdateStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'codebuild:StartBuild',
+        'codebuild:BatchGetBuilds',
+      ],
+      resources: [this.cdkDeployProject.projectArn],
+    }));
+
+    projectUpdateStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cloudformation:DescribeStacks',
+      ],
+      resources: [
+        `arn:aws:cloudformation:${cdk.Aws.REGION}:${cdk.Aws.ACCOUNT_ID}:stack/HpcProject-*/*`,
+      ],
+    }));
+
+    // --- Project Update State Machine Definition ---
+
+    // Step 1: Validate update state
+    const validateUpdateState = new tasks.LambdaInvoke(this, 'ValidateUpdateState', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'validate_update_state',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2: Start CDK update
+    const startCdkUpdate = new tasks.LambdaInvoke(this, 'StartCdkUpdate', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'start_cdk_update',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 3: Check update status (with wait loop)
+    const checkUpdateStatus = new tasks.LambdaInvoke(this, 'CheckUpdateStatus', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_update_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForUpdate = new sfn.Wait(this, 'WaitForUpdate', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
+    // Step 4: Extract stack outputs
+    const extractUpdateStackOutputs = new tasks.LambdaInvoke(this, 'ExtractUpdateStackOutputs', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'extract_stack_outputs',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 5: Record updated infrastructure
+    const recordUpdatedInfrastructure = new tasks.LambdaInvoke(this, 'RecordUpdatedInfrastructure', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'record_updated_infrastructure',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Failure handler
+    const handleUpdateFailure = new tasks.LambdaInvoke(this, 'HandleUpdateFailure', {
+      lambdaFunction: projectUpdateStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'handle_update_failure',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const updateFailed = new sfn.Fail(this, 'UpdateFailed', {
+      cause: 'Project update failed',
+      error: 'ProjectUpdateError',
+    });
+
+    const updateSuccess = new sfn.Succeed(this, 'UpdateSucceeded');
+
+    // Add catch to all update steps for failure handling
+    const updateCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
+    const updateFailureChain = handleUpdateFailure.next(updateFailed);
+
+    validateUpdateState.addCatch(updateFailureChain, updateCatchConfig);
+    startCdkUpdate.addCatch(updateFailureChain, updateCatchConfig);
+    checkUpdateStatus.addCatch(updateFailureChain, updateCatchConfig);
+    extractUpdateStackOutputs.addCatch(updateFailureChain, updateCatchConfig);
+    recordUpdatedInfrastructure.addCatch(updateFailureChain, updateCatchConfig);
+
+    // Update wait loop: check status → if not complete, wait → check again
+    const updateWaitLoop = waitForUpdate.next(checkUpdateStatus);
+    const isUpdateComplete = new sfn.Choice(this, 'IsUpdateComplete')
+      .when(sfn.Condition.booleanEquals('$.updateComplete', true), extractUpdateStackOutputs)
+      .otherwise(updateWaitLoop);
+
+    // Chain: Validate → Start CDK Update → Check Status → wait loop → Extract Outputs → Record Infrastructure → Success
+    const updateDefinition = validateUpdateState
+      .next(startCdkUpdate)
+      .next(checkUpdateStatus)
+      .next(isUpdateComplete);
+
+    // Post-update chain (connected via the Choice "when complete" branch)
+    extractUpdateStackOutputs
+      .next(recordUpdatedInfrastructure)
+      .next(updateSuccess);
+
+    this.projectUpdateStateMachine = new sfn.StateMachine(this, 'ProjectUpdateStateMachine', {
+      stateMachineName: 'hpc-project-update',
+      definitionBody: sfn.DefinitionBody.fromChainable(updateDefinition),
+      timeout: cdk.Duration.hours(2),
+      tracingEnabled: true,
+    });
+
+    // --- Update Project Management Lambda with update state machine ARN ---
+    this.projectManagementLambda.addEnvironment(
+      'PROJECT_UPDATE_STATE_MACHINE_ARN',
+      this.projectUpdateStateMachine.stateMachineArn,
+    );
+
+    // Grant project management Lambda permission to start executions on the update state machine
+    this.projectUpdateStateMachine.grantStartExecution(this.projectManagementLambda);
 
     // Grant project management Lambda permission to query Cost Explorer for budget breach clearing
     this.projectManagementLambda.addToRolePolicy(new iam.PolicyStatement({
@@ -1884,6 +2051,11 @@ export class FoundationStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ProjectDestroyStateMachineArn', {
       value: this.projectDestroyStateMachine.stateMachineArn,
       description: 'Project Destroy Step Functions state machine ARN',
+    });
+
+    new cdk.CfnOutput(this, 'ProjectUpdateStateMachineArn', {
+      value: this.projectUpdateStateMachine.stateMachineArn,
+      description: 'Project Update Step Functions state machine ARN',
     });
 
     new cdk.CfnOutput(this, 'AccountingQueryLambdaArn', {

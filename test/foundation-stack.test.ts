@@ -440,8 +440,8 @@ describe('FoundationStack', () => {
       });
     });
 
-    it('creates exactly 4 state machines', () => {
-      template.resourceCountIs('AWS::StepFunctions::StateMachine', 4);
+    it('creates exactly 5 state machines', () => {
+      template.resourceCountIs('AWS::StepFunctions::StateMachine', 5);
     });
 
     it('state machines have tracing enabled', () => {
@@ -1040,6 +1040,130 @@ describe('FoundationStack', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Project Update Step Lambda
+  // Validates: Requirements 6.1, 6.2, 6.3
+  // ---------------------------------------------------------------------------
+  describe('Project Update Step Lambda', () => {
+    it('creates a Python Lambda function for project update steps', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-project-update-steps',
+        Runtime: 'python3.13',
+        Handler: 'project_update.step_handler',
+        Timeout: 300,
+        MemorySize: 512,
+      });
+    });
+
+    it('passes PROJECTS_TABLE_NAME and CODEBUILD_PROJECT_NAME as environment variables', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-project-update-steps',
+        Environment: {
+          Variables: {
+            PROJECTS_TABLE_NAME: Match.anyValue(),
+            CODEBUILD_PROJECT_NAME: Match.anyValue(),
+          },
+        },
+      });
+    });
+
+    it('has DynamoDB read/write permissions on Projects table', () => {
+      // The update step Lambda needs read/write on the Projects table.
+      // This is verified via the grantReadWriteData call which produces
+      // dynamodb:BatchGetItem, Query, GetItem, Scan, ConditionCheckItem,
+      // BatchWriteItem, PutItem, UpdateItem, DeleteItem
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.arrayWith([
+                'dynamodb:BatchGetItem',
+                'dynamodb:Query',
+                'dynamodb:GetItem',
+                'dynamodb:Scan',
+                'dynamodb:ConditionCheckItem',
+                'dynamodb:BatchWriteItem',
+                'dynamodb:PutItem',
+                'dynamodb:UpdateItem',
+                'dynamodb:DeleteItem',
+              ]),
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
+    });
+
+    it('has CodeBuild start/describe permissions', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.arrayWith([
+                'codebuild:StartBuild',
+                'codebuild:BatchGetBuilds',
+              ]),
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
+    });
+
+    it('has CloudFormation DescribeStacks permission', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'cloudformation:DescribeStacks',
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Project Update State Machine
+  // Validates: Requirements 6.4, 6.5
+  // ---------------------------------------------------------------------------
+  describe('Project Update State Machine', () => {
+    it('creates a project update state machine', () => {
+      template.hasResourceProperties('AWS::StepFunctions::StateMachine', {
+        StateMachineName: 'hpc-project-update',
+      });
+    });
+
+    it('has tracing enabled', () => {
+      const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+        Properties: {
+          StateMachineName: 'hpc-project-update',
+        },
+      });
+      for (const [, resource] of Object.entries(stateMachines)) {
+        expect((resource as any).Properties?.TracingConfiguration?.Enabled).toBe(true);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Project Management Lambda — Update State Machine ARN
+  // Validates: Requirements 6.6, 6.7
+  // ---------------------------------------------------------------------------
+  describe('Project Management Lambda Update Permissions', () => {
+    it('passes PROJECT_UPDATE_STATE_MACHINE_ARN as environment variable', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-project-management',
+        Environment: {
+          Variables: {
+            PROJECT_UPDATE_STATE_MACHINE_ARN: Match.anyValue(),
+          },
+        },
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Project Management Lambda — State Machine and Cost Explorer Permissions
   // Validates: Requirements 2.1, 3.3
   // ---------------------------------------------------------------------------
@@ -1121,6 +1245,12 @@ describe('FoundationStack', () => {
       expect(Object.keys(methods).length).toBeGreaterThanOrEqual(1);
     });
 
+    it('creates /projects/{projectId}/update resource', () => {
+      template.hasResourceProperties('AWS::ApiGateway::Resource', {
+        PathPart: 'update',
+      });
+    });
+
     it('has POST method on deploy resource with Cognito auth', () => {
       const methods = template.findResources('AWS::ApiGateway::Method', {
         Properties: {
@@ -1128,9 +1258,9 @@ describe('FoundationStack', () => {
           AuthorizationType: 'COGNITO_USER_POOLS',
         },
       });
-      // Should have POST methods for: create project, add member, deploy, destroy,
-      // create cluster, create user, reactivate = at least 7
-      expect(Object.keys(methods).length).toBeGreaterThanOrEqual(7);
+      // Should have POST methods for: create project, add member, deploy, destroy, update,
+      // create cluster, create user, reactivate = at least 8
+      expect(Object.keys(methods).length).toBeGreaterThanOrEqual(8);
     });
 
     it('has Cognito-authorised methods for all lifecycle routes', () => {
@@ -1139,8 +1269,8 @@ describe('FoundationStack', () => {
           AuthorizationType: 'COGNITO_USER_POOLS',
         },
       });
-      // Previous count was ≥22, adding deploy POST + destroy POST + PUT edit = ≥25
-      expect(Object.keys(methods).length).toBeGreaterThanOrEqual(25);
+      // Previous count was ≥25, adding update POST = ≥26
+      expect(Object.keys(methods).length).toBeGreaterThanOrEqual(26);
     });
   });
 

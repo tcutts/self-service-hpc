@@ -10,6 +10,7 @@ cdk.out
 
 # Python
 __pycache__/
+.hypothesis/
 *.py[cod]
 *$py.class
 .pytest_cache/

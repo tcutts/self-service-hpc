@@ -1,6 +1,6 @@
 # Project Management (Administrator)
 
-This guide covers creating, deploying, editing, and destroying projects at the platform level. Project creation and lifecycle operations require the **Administrator** role. Budget editing is also available to **Project Administrators**.
+This guide covers creating, deploying, updating, editing, and destroying projects at the platform level. Project creation and lifecycle operations require the **Administrator** role. Budget editing is also available to **Project Administrators**.
 
 For managing project membership and budgets, see the [Project Administrator guide](../project-admin/project-management.md).
 
@@ -25,6 +25,7 @@ Every project follows a defined lifecycle. Infrastructure is not provisioned at 
 | `CREATED` | Project record exists but no infrastructure has been provisioned. |
 | `DEPLOYING` | Infrastructure provisioning is in progress (VPC, EFS, S3, security groups). |
 | `ACTIVE` | Infrastructure is fully provisioned. Clusters can be created and users can work. |
+| `UPDATING` | Infrastructure update is in progress. Running clusters are not affected. |
 | `DESTROYING` | Infrastructure teardown is in progress. |
 | `ARCHIVED` | Infrastructure has been removed. The project record is retained for audit purposes. |
 
@@ -32,9 +33,12 @@ Every project follows a defined lifecycle. Infrastructure is not provisioned at 
 
 ```
 CREATED ──► DEPLOYING ──► ACTIVE ──► DESTROYING ──► ARCHIVED
-                │                        │
-                └──► CREATED             └──► ACTIVE
-              (on failure)             (on failure)
+                │            │  ▲        │
+                └──► CREATED │  │        └──► ACTIVE
+              (on failure)   ▼  │      (on failure)
+                          UPDATING
+                        (on success
+                         or failure)
 ```
 
 | From | To | Trigger |
@@ -42,6 +46,8 @@ CREATED ──► DEPLOYING ──► ACTIVE ──► DESTROYING ──► ARCH
 | CREATED | DEPLOYING | Administrator triggers deploy |
 | DEPLOYING | ACTIVE | Deployment completes successfully |
 | DEPLOYING | CREATED | Deployment fails (rollback) |
+| ACTIVE | UPDATING | Administrator triggers update |
+| UPDATING | ACTIVE | Update completes (success or failure) |
 | ACTIVE | DESTROYING | Administrator triggers destroy |
 | DESTROYING | ARCHIVED | Destruction completes successfully |
 | DESTROYING | ACTIVE | Destruction fails (rollback) |
@@ -160,6 +166,84 @@ If a deployment fails, the project returns to `CREATED` status and the error mes
 | CDK deploy fails with "stack not found" | The `PROJECT_ID` environment variable was not passed to CodeBuild | Check the Step Functions execution history for the `start_cdk_deploy` step |
 | CloudFormation stack creation fails | IAM permissions, resource limits, or naming conflicts | Check the CloudFormation events in the AWS Console for the `HpcProject-{projectId}` stack |
 | "Failed to Fetch" errors in the web portal during deployment | Browser session token expired while polling for progress | Sign out and sign back in; the portal now refreshes tokens automatically |
+
+## Updating a Project
+
+**Endpoint:** `POST /projects/{projectId}/update`
+**Required role:** Administrator
+
+Initiates an infrastructure update for a project in `ACTIVE` status. The update runs `cdk deploy` against the existing `HpcProject-{projectId}` CloudFormation stack, applying only the delta between the current and desired infrastructure state. This is useful when the underlying CDK code changes — for example, new security group rules, updated VPC configuration, or new resource additions.
+
+### Prerequisites
+
+- The project must be in `ACTIVE` status.
+
+### What Happens
+
+1. The project status transitions to `UPDATING`.
+2. A Step Functions execution starts, which:
+   - Validates the project state and snapshots the current infrastructure outputs
+   - Starts a CDK deploy via CodeBuild (`HpcProject-{projectId}` stack with `--exclusively --require-approval never`)
+   - Polls for completion
+   - Extracts the updated CloudFormation stack outputs
+   - Compares old and new outputs, logging warnings if critical resource IDs changed
+   - Records the updated infrastructure IDs in the project record
+3. On success, the project transitions to `ACTIVE`.
+4. On failure, the project transitions back to `ACTIVE` with an error message stored in the record. CloudFormation automatically rolls back the stack to its previous known-good state.
+
+### Cluster Safety
+
+Updates do not disrupt running clusters. CloudFormation updates preserve resources that have stable logical IDs — this includes the VPC, EFS filesystem, S3 bucket, and security groups. Because these resources are not replaced, clusters that reference them continue to operate normally throughout the update.
+
+While a project is in `UPDATING` status, cluster listing, cluster detail retrieval, cluster creation, and cluster destruction all remain available.
+
+If an update changes a critical resource ID (VPC, EFS, security group, or subnet), the workflow logs a warning identifying the changed resource. Existing clusters reference the previous IDs, so this situation requires attention.
+
+### Progress Tracking
+
+While the project is in `UPDATING` status, the `GET /projects/{projectId}` endpoint includes a `progress` object:
+
+```json
+{
+  "progress": {
+    "currentStep": 2,
+    "totalSteps": 5,
+    "stepDescription": "Starting CDK deploy"
+  }
+}
+```
+
+The UI polls this endpoint and displays a progress bar. You can navigate away and return later — progress is persisted in DynamoDB.
+
+### Response (202 Accepted)
+
+```json
+{
+  "message": "Project 'genomics-team' update started.",
+  "projectId": "genomics-team",
+  "status": "UPDATING"
+}
+```
+
+### Error Cases
+
+| Scenario | Error Code | HTTP Status |
+|----------|-----------|-------------|
+| Project is not in ACTIVE status | `CONFLICT` | 409 |
+| Project does not exist | `NOT_FOUND` | 404 |
+| Caller is not an Administrator | `AUTHORISATION_ERROR` | 403 |
+
+### Troubleshooting Update Failures
+
+If an update fails, the project returns to `ACTIVE` status and the error message is stored in the project record. The existing infrastructure remains intact because CloudFormation rolls back failed updates automatically. Common causes:
+
+| Symptom | Cause | Resolution |
+|---------|-------|------------|
+| CodeBuild INSTALL phase fails with `npm ci` error | Source code not available in the build environment | Redeploy the foundation stack to update the CodeBuild source asset |
+| CDK deploy fails with resource conflict | A resource change requires replacement but is in use | Review the CloudFormation events for the `HpcProject-{projectId}` stack and adjust the CDK code to avoid replacing in-use resources |
+| CloudFormation stack update rolls back | IAM permissions, resource limits, or invalid configuration | Check the CloudFormation events in the AWS Console for the `HpcProject-{projectId}` stack |
+| Update succeeds but a warning about changed resource IDs appears | The CDK code changed a construct ID, causing CloudFormation to replace a resource | Verify that existing clusters still function correctly; clusters created before the update reference the previous resource IDs |
+| "Failed to Fetch" errors in the web portal during update | Browser session token expired while polling for progress | Sign out and sign back in; the portal refreshes tokens automatically |
 
 ## Editing a Project
 
@@ -301,7 +385,7 @@ Returns all projects on the platform. Each project includes its current lifecycl
 }
 ```
 
-### Response (200 OK) — DEPLOYING or DESTROYING project
+### Response (200 OK) — DEPLOYING, UPDATING, or DESTROYING project
 
 When a project is in a transitional state, the response includes a `progress` object:
 
@@ -309,7 +393,7 @@ When a project is in a transitional state, the response includes a `progress` ob
 {
   "projectId": "genomics-team",
   "projectName": "Genomics Research Team",
-  "status": "DEPLOYING",
+  "status": "UPDATING",
   "progress": {
     "currentStep": 3,
     "totalSteps": 5,
