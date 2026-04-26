@@ -295,6 +295,12 @@ def extract_stack_outputs(event: dict[str, Any]) -> dict[str, Any]:
     efs_sg = output_map.get("EfsSecurityGroupId", "")
     fsx_sg = output_map.get("FsxSecurityGroupId", "")
 
+    # Subnet IDs are stored as comma-separated strings in stack outputs
+    public_subnet_ids_raw = output_map.get("PublicSubnetIds", "")
+    private_subnet_ids_raw = output_map.get("PrivateSubnetIds", "")
+    public_subnet_ids = [s for s in public_subnet_ids_raw.split(",") if s]
+    private_subnet_ids = [s for s in private_subnet_ids_raw.split(",") if s]
+
     logger.info(
         "Stack outputs for project '%s': VPC=%s, EFS=%s, S3=%s",
         project_id,
@@ -309,6 +315,8 @@ def extract_stack_outputs(event: dict[str, Any]) -> dict[str, Any]:
         "vpcId": vpc_id,
         "efsFileSystemId": efs_filesystem_id,
         "s3BucketName": s3_bucket_name,
+        "publicSubnetIds": public_subnet_ids,
+        "privateSubnetIds": private_subnet_ids,
         "securityGroupIds": {
             "headNode": head_node_sg,
             "computeNode": compute_node_sg,
@@ -341,13 +349,18 @@ def record_infrastructure(event: dict[str, Any]) -> dict[str, Any]:
             Key={"PK": f"PROJECT#{project_id}", "SK": "METADATA"},
             UpdateExpression=(
                 "SET vpcId = :vpc, efsFileSystemId = :efs, "
-                "s3BucketName = :s3, cdkStackName = :stack"
+                "s3BucketName = :s3, cdkStackName = :stack, "
+                "publicSubnetIds = :pubsubs, privateSubnetIds = :privsubs, "
+                "securityGroupIds = :sgs"
             ),
             ExpressionAttributeValues={
                 ":vpc": event.get("vpcId", ""),
                 ":efs": event.get("efsFileSystemId", ""),
                 ":s3": event.get("s3BucketName", ""),
                 ":stack": event.get("cdkStackName", ""),
+                ":pubsubs": event.get("publicSubnetIds", []),
+                ":privsubs": event.get("privateSubnetIds", []),
+                ":sgs": event.get("securityGroupIds", {}),
             },
         )
     except ClientError as exc:

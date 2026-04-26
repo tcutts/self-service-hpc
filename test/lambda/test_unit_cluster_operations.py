@@ -80,9 +80,9 @@ def _unauthorised_event(method, resource, body=None, path_parameters=None):
     }
 
 
-def _seed_project(projects_table, project_id, budget_breached=False):
+def _seed_project(projects_table, project_id, budget_breached=False, **extra):
     """Insert a minimal project record into the Projects table."""
-    projects_table.put_item(Item={
+    item = {
         "PK": f"PROJECT#{project_id}",
         "SK": "METADATA",
         "projectId": project_id,
@@ -91,7 +91,20 @@ def _seed_project(projects_table, project_id, budget_breached=False):
         "budgetBreached": budget_breached,
         "status": "ACTIVE",
         "createdAt": "2024-01-01T00:00:00+00:00",
-    })
+        "s3BucketName": f"hpc-{project_id}-storage",
+        "vpcId": f"vpc-{project_id}",
+        "efsFileSystemId": f"fs-{project_id}",
+        "publicSubnetIds": ["subnet-pub-1", "subnet-pub-2"],
+        "privateSubnetIds": ["subnet-priv-1", "subnet-priv-2"],
+        "securityGroupIds": {
+            "headNode": "sg-head",
+            "computeNode": "sg-compute",
+            "efs": "sg-efs",
+            "fsx": "sg-fsx",
+        },
+    }
+    item.update(extra)
+    projects_table.put_item(Item=item)
 
 
 def _seed_cluster(clusters_table, project_id, cluster_name, status="ACTIVE", **extra):
@@ -309,6 +322,13 @@ class TestBudgetBreachBlocksCreation:
         body = json.loads(response["body"])
         assert body["clusterName"] == "good-cluster"
 
+        # Verify the step function payload includes infrastructure details
+        call_kwargs = mock_sfn.start_execution.call_args
+        sfn_input = json.loads(call_kwargs.kwargs.get("input") or call_kwargs[1]["input"])
+        assert sfn_input["s3BucketName"] == "hpc-proj-ok-storage"
+        assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
+        assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
+
     def test_budget_breach_check_uses_consistent_read(self, _env):
         """Verify the clusters module uses ConsistentRead for budget checks."""
         _seed_project(_env["projects_table"], "proj-consistent", budget_breached=False)
@@ -319,6 +339,124 @@ class TestBudgetBreachBlocksCreation:
         _seed_project(_env["projects_table"], "proj-breached-flag", budget_breached=True)
         result = _env["clusters_mod"].check_budget_breach(PROJECTS_TABLE_NAME, "proj-breached-flag")
         assert result is True
+
+
+# ---------------------------------------------------------------------------
+# Infrastructure payload in step function invocation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestClusterCreationInfraPayload:
+    """Validates that cluster creation and recreation include infrastructure
+    details (s3BucketName, privateSubnetIds, securityGroupIds) in the
+    Step Functions payload.  Regression test for KeyError: 's3BucketName'.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+            os.environ["CREATION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:creation"
+            os.environ["DESTRUCTION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:destruction"
+
+            clusters_table = create_clusters_table()
+            projects_table = create_projects_table()
+            create_cluster_name_registry_table()
+
+            handler_mod, clusters_mod, auth_mod, errors_mod, tagging_mod = reload_cluster_ops_handler_modules()
+
+            yield {
+                "clusters_table": clusters_table,
+                "projects_table": projects_table,
+                "handler_mod": handler_mod,
+                "errors_mod": errors_mod,
+            }
+
+    def test_create_cluster_payload_includes_all_infra_fields(self, _env):
+        """The SFN payload must contain every key that create_fsx_filesystem reads."""
+        _seed_project(_env["projects_table"], "proj-infra")
+
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST", "/projects/{projectId}/clusters", "proj-infra",
+                body={"clusterName": "infra-cl", "templateId": "tpl-1"},
+                path_parameters={"projectId": "proj-infra"},
+            )
+            _env["handler_mod"].handler(event, None)
+
+        sfn_input = json.loads(mock_sfn.start_execution.call_args.kwargs.get("input")
+                               or mock_sfn.start_execution.call_args[1]["input"])
+
+        assert "s3BucketName" in sfn_input
+        assert "privateSubnetIds" in sfn_input
+        assert "publicSubnetIds" in sfn_input
+        assert "securityGroupIds" in sfn_input
+        assert "vpcId" in sfn_input
+        assert "efsFileSystemId" in sfn_input
+        assert sfn_input["s3BucketName"] == "hpc-proj-infra-storage"
+        assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
+        assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
+        assert sfn_input["securityGroupIds"]["headNode"] == "sg-head"
+
+    def test_recreate_cluster_payload_includes_all_infra_fields(self, _env):
+        """Recreation must also pass infrastructure details to the SFN."""
+        _seed_project(_env["projects_table"], "proj-recreate-infra")
+        _seed_cluster(
+            _env["clusters_table"], "proj-recreate-infra", "old-cl",
+            status="DESTROYED", templateId="tpl-1",
+        )
+
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate-infra",
+                path_parameters={
+                    "projectId": "proj-recreate-infra",
+                    "clusterName": "old-cl",
+                },
+            )
+            _env["handler_mod"].handler(event, None)
+
+        sfn_input = json.loads(mock_sfn.start_execution.call_args.kwargs.get("input")
+                               or mock_sfn.start_execution.call_args[1]["input"])
+
+        assert sfn_input["s3BucketName"] == "hpc-proj-recreate-infra-storage"
+        assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
+        assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
+
+    def test_create_cluster_fails_when_infra_missing(self, _env):
+        """Creation must fail gracefully when project has no infrastructure."""
+        _env["projects_table"].put_item(Item={
+            "PK": "PROJECT#proj-no-infra",
+            "SK": "METADATA",
+            "projectId": "proj-no-infra",
+            "projectName": "No Infra Project",
+            "budgetBreached": False,
+            "status": "ACTIVE",
+            "createdAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        event = _project_user_event(
+            "POST", "/projects/{projectId}/clusters", "proj-no-infra",
+            body={"clusterName": "doomed-cl", "templateId": "tpl-1"},
+            path_parameters={"projectId": "proj-no-infra"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "infrastructure" in body["error"]["message"].lower()
 
 
 # ---------------------------------------------------------------------------

@@ -183,6 +183,14 @@ class TestProjectDeployStepHandlers:
             "efsFileSystemId": "fs-def456",
             "s3BucketName": "my-bucket-789",
             "cdkStackName": "HpcProject-proj-record",
+            "publicSubnetIds": ["subnet-pub-1", "subnet-pub-2"],
+            "privateSubnetIds": ["subnet-priv-1", "subnet-priv-2"],
+            "securityGroupIds": {
+                "headNode": "sg-head",
+                "computeNode": "sg-compute",
+                "efs": "sg-efs",
+                "fsx": "sg-fsx",
+            },
         }
 
         result = self.deploy_mod.record_infrastructure(event)
@@ -195,6 +203,10 @@ class TestProjectDeployStepHandlers:
         assert item["efsFileSystemId"] == "fs-def456"
         assert item["s3BucketName"] == "my-bucket-789"
         assert item["cdkStackName"] == "HpcProject-proj-record"
+        assert item["publicSubnetIds"] == ["subnet-pub-1", "subnet-pub-2"]
+        assert item["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
+        assert item["securityGroupIds"]["headNode"] == "sg-head"
+        assert item["securityGroupIds"]["fsx"] == "sg-fsx"
         assert item["status"] == "ACTIVE"
 
     def test_record_infrastructure_handles_empty_fields(self):
@@ -207,6 +219,9 @@ class TestProjectDeployStepHandlers:
             "efsFileSystemId": "",
             "s3BucketName": "",
             "cdkStackName": "",
+            "publicSubnetIds": [],
+            "privateSubnetIds": [],
+            "securityGroupIds": {},
         }
 
         result = self.deploy_mod.record_infrastructure(event)
@@ -216,6 +231,9 @@ class TestProjectDeployStepHandlers:
         item = _get_project(self.projects_table, "proj-empty-infra")
         assert item["status"] == "ACTIVE"
         assert item["vpcId"] == ""
+        assert item["publicSubnetIds"] == []
+        assert item["privateSubnetIds"] == []
+        assert item["securityGroupIds"] == {}
 
     # -- handle_deploy_failure: transitions back to CREATED -----------------
 
@@ -332,16 +350,28 @@ class TestProjectDeployStepHandlers:
                     {"OutputKey": "VpcId", "OutputValue": "vpc-test"},
                     {"OutputKey": "EfsFileSystemId", "OutputValue": "fs-test"},
                     {"OutputKey": "S3BucketName", "OutputValue": "bucket-test"},
+                    {"OutputKey": "PublicSubnetIds", "OutputValue": "subnet-pub-1,subnet-pub-2"},
+                    {"OutputKey": "PrivateSubnetIds", "OutputValue": "subnet-priv-1,subnet-priv-2"},
+                    {"OutputKey": "HeadNodeSecurityGroupId", "OutputValue": "sg-head"},
+                    {"OutputKey": "ComputeNodeSecurityGroupId", "OutputValue": "sg-compute"},
+                    {"OutputKey": "EfsSecurityGroupId", "OutputValue": "sg-efs"},
+                    {"OutputKey": "FsxSecurityGroupId", "OutputValue": "sg-fsx"},
                 ],
             }]
         }
 
-        self.deploy_mod.extract_stack_outputs({"projectId": "proj-prog-4"})
+        result = self.deploy_mod.extract_stack_outputs({"projectId": "proj-prog-4"})
 
         item = _get_project(self.projects_table, "proj-prog-4")
         assert item["currentStep"] == 4
         assert item["totalSteps"] == 5
         assert item["stepDescription"] == "Extracting stack outputs"
+
+        # Verify subnet IDs and security groups are extracted
+        assert result["publicSubnetIds"] == ["subnet-pub-1", "subnet-pub-2"]
+        assert result["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
+        assert result["securityGroupIds"]["headNode"] == "sg-head"
+        assert result["securityGroupIds"]["fsx"] == "sg-fsx"
 
     def test_record_infrastructure_updates_progress_to_step_5(self):
         """Validates: Requirements 2.5, 2.6 — step 5 progress written."""
@@ -353,6 +383,9 @@ class TestProjectDeployStepHandlers:
             "efsFileSystemId": "fs-x",
             "s3BucketName": "bucket-x",
             "cdkStackName": "stack-x",
+            "publicSubnetIds": ["subnet-pub-1"],
+            "privateSubnetIds": ["subnet-priv-1"],
+            "securityGroupIds": {"headNode": "sg-h", "computeNode": "sg-c", "efs": "sg-e", "fsx": "sg-f"},
         })
 
         item = _get_project(self.projects_table, "proj-prog-5")

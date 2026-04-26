@@ -229,6 +229,33 @@ class TestEndToEndWorkflow:
 
     def test_04_create_cluster(self, _env):
         """Project user creates a cluster (Step Functions mocked)."""
+        # Simulate project deployment by adding infrastructure fields
+        # that would normally be set by the deploy Step Functions workflow.
+        _env["projects_table"].update_item(
+            Key={"PK": "PROJECT#proj-alpha", "SK": "METADATA"},
+            UpdateExpression=(
+                "SET s3BucketName = :s3, vpcId = :vpc, "
+                "efsFileSystemId = :efs, "
+                "publicSubnetIds = :pubsubs, privateSubnetIds = :privsubs, "
+                "securityGroupIds = :sgs, #st = :status"
+            ),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":s3": "hpc-proj-alpha-storage",
+                ":vpc": "vpc-alpha",
+                ":efs": "fs-alpha",
+                ":pubsubs": ["subnet-pub-1", "subnet-pub-2"],
+                ":privsubs": ["subnet-priv-1", "subnet-priv-2"],
+                ":sgs": {
+                    "headNode": "sg-head",
+                    "computeNode": "sg-compute",
+                    "efs": "sg-efs",
+                    "fsx": "sg-fsx",
+                },
+                ":status": "ACTIVE",
+            },
+        )
+
         with patch.object(_env["cluster_handler"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 

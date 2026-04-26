@@ -53,6 +53,7 @@ DESTRUCTION_STATE_MACHINE_ARN = os.environ.get("DESTRUCTION_STATE_MACHINE_ARN", 
 USER_POOL_ID = os.environ.get("USER_POOL_ID", "")
 
 sfn_client = boto3.client("stepfunctions")
+dynamodb = boto3.resource("dynamodb")
 
 
 def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
@@ -133,6 +134,58 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 
+def _lookup_project_infrastructure(project_id: str) -> dict[str, Any]:
+    """Retrieve infrastructure details for a project from DynamoDB.
+
+    Returns a dict with vpcId, efsFileSystemId, s3BucketName,
+    publicSubnetIds, privateSubnetIds, and securityGroupIds.
+
+    Raises ``NotFoundError`` if the project does not exist.
+    Raises ``ValidationError`` if required infrastructure fields are missing.
+    """
+    table = dynamodb.Table(PROJECTS_TABLE_NAME)
+    response = table.get_item(
+        Key={"PK": f"PROJECT#{project_id}", "SK": "METADATA"},
+        ConsistentRead=True,
+    )
+    item = response.get("Item")
+    if not item:
+        raise NotFoundError(
+            f"Project '{project_id}' not found.",
+            {"projectId": project_id},
+        )
+
+    infra = {
+        "vpcId": item.get("vpcId", ""),
+        "efsFileSystemId": item.get("efsFileSystemId", ""),
+        "s3BucketName": item.get("s3BucketName", ""),
+        "publicSubnetIds": item.get("publicSubnetIds", []),
+        "privateSubnetIds": item.get("privateSubnetIds", []),
+        "securityGroupIds": item.get("securityGroupIds", {}),
+    }
+
+    if not infra["s3BucketName"]:
+        raise ValidationError(
+            f"Project '{project_id}' infrastructure is incomplete — "
+            "s3BucketName is missing. Has the project been deployed?",
+            {"projectId": project_id},
+        )
+    if not infra["privateSubnetIds"]:
+        raise ValidationError(
+            f"Project '{project_id}' infrastructure is incomplete — "
+            "privateSubnetIds are missing. Has the project been deployed?",
+            {"projectId": project_id},
+        )
+    if not infra["securityGroupIds"]:
+        raise ValidationError(
+            f"Project '{project_id}' infrastructure is incomplete — "
+            "securityGroupIds are missing. Has the project been deployed?",
+            {"projectId": project_id},
+        )
+
+    return infra
+
+
 def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, Any]:
     """Handle POST /projects/{projectId}/clusters — create a new cluster.
 
@@ -169,6 +222,9 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
             {"projectId": project_id},
         )
 
+    # Look up project infrastructure details
+    infra = _lookup_project_infrastructure(project_id)
+
     # Start the creation Step Functions execution
     timestamp = int(time.time())
     payload = {
@@ -176,6 +232,12 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
         "clusterName": cluster_name,
         "templateId": template_id,
         "createdBy": caller,
+        "vpcId": infra["vpcId"],
+        "efsFileSystemId": infra["efsFileSystemId"],
+        "s3BucketName": infra["s3BucketName"],
+        "publicSubnetIds": infra["publicSubnetIds"],
+        "privateSubnetIds": infra["privateSubnetIds"],
+        "securityGroupIds": infra["securityGroupIds"],
     }
 
     sfn_client.start_execution(
@@ -307,6 +369,9 @@ def _handle_recreate_cluster(
             {"projectId": project_id},
         )
 
+    # Look up project infrastructure details
+    infra = _lookup_project_infrastructure(project_id)
+
     # Start the creation Step Functions execution
     timestamp = int(time.time())
     payload = {
@@ -314,6 +379,12 @@ def _handle_recreate_cluster(
         "clusterName": cluster_name,
         "templateId": template_id,
         "createdBy": caller,
+        "vpcId": infra["vpcId"],
+        "efsFileSystemId": infra["efsFileSystemId"],
+        "s3BucketName": infra["s3BucketName"],
+        "publicSubnetIds": infra["publicSubnetIds"],
+        "privateSubnetIds": infra["privateSubnetIds"],
+        "securityGroupIds": infra["securityGroupIds"],
     }
 
     sfn_client.start_execution(

@@ -97,6 +97,17 @@ def _seed_non_breached_project(projects_table, project_id):
         "status": "ACTIVE",
         "budgetBreached": False,
         "createdAt": "2024-01-01T00:00:00+00:00",
+        "s3BucketName": f"hpc-{project_id}-storage",
+        "vpcId": f"vpc-{project_id}",
+        "efsFileSystemId": f"fs-{project_id}",
+        "publicSubnetIds": ["subnet-pub-1", "subnet-pub-2"],
+        "privateSubnetIds": ["subnet-priv-1", "subnet-priv-2"],
+        "securityGroupIds": {
+            "headNode": "sg-head",
+            "computeNode": "sg-compute",
+            "efs": "sg-efs",
+            "fsx": "sg-fsx",
+        },
     })
 
 
@@ -111,6 +122,17 @@ def _seed_breached_project(projects_table, project_id):
         "status": "ACTIVE",
         "budgetBreached": True,
         "createdAt": "2024-01-01T00:00:00+00:00",
+        "s3BucketName": f"hpc-{project_id}-storage",
+        "vpcId": f"vpc-{project_id}",
+        "efsFileSystemId": f"fs-{project_id}",
+        "publicSubnetIds": ["subnet-pub-1", "subnet-pub-2"],
+        "privateSubnetIds": ["subnet-priv-1", "subnet-priv-2"],
+        "securityGroupIds": {
+            "headNode": "sg-head",
+            "computeNode": "sg-compute",
+            "efs": "sg-efs",
+            "fsx": "sg-fsx",
+        },
     })
 
 
