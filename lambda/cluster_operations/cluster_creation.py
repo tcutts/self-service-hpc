@@ -321,12 +321,13 @@ def check_budget_breach(event: dict[str, Any]) -> dict[str, Any]:
 # ===================================================================
 
 def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
-    """Create an FSx for Lustre filesystem with a data repository association.
+    """Create an FSx for Lustre filesystem without an inline data repository.
 
     The filesystem is placed in the first private subnet and uses the
-    FSx security group from the project infrastructure.  A data
-    repository association links the filesystem to the project S3
-    bucket for automatic import/export.
+    FSx security group from the project infrastructure.  A Data
+    Repository Association (DRA) is created separately after the
+    filesystem becomes available — this allows lazy loading from S3
+    so the filesystem is ready faster.
 
     Adds ``fsxFilesystemId`` to the returned event.
     """
@@ -335,7 +336,6 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
 
     # Write progress before executing step logic
     _update_step_progress(project_id, cluster_name, 3)
-    s3_bucket_name: str = event["s3BucketName"]
     private_subnet_ids: list[str] = event["privateSubnetIds"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
 
@@ -350,15 +350,14 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
     try:
         response = fsx_client.create_file_system(
             FileSystemType="LUSTRE",
+            FileSystemTypeVersion="2.15",
             StorageCapacity=1200,  # minimum for Lustre (1.2 TiB)
             StorageType="SSD",
             SubnetIds=[subnet_id],
             SecurityGroupIds=[fsx_sg],
             LustreConfiguration={
                 "DeploymentType": "SCRATCH_2",
-                "ImportPath": f"s3://{s3_bucket_name}",
-                "ExportPath": f"s3://{s3_bucket_name}/lustre-export",
-                "AutoImportPolicy": "NEW_CHANGED_DELETED",
+                "DataCompressionType": "LZ4",
             },
             Tags=tags,
         )
@@ -414,6 +413,61 @@ def check_fsx_status(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step 4b — Create Data Repository Association (lazy loading from S3)
+# ===================================================================
+
+def create_fsx_dra(event: dict[str, Any]) -> dict[str, Any]:
+    """Create a Data Repository Association linking FSx to the project S3 bucket.
+
+    Uses lazy loading so files are only fetched from S3 on first
+    access, rather than bulk-importing everything at filesystem
+    creation time.  Auto-export ensures that new/changed/deleted
+    files on Lustre are synced back to S3 automatically.
+
+    Adds ``fsxDraId`` to the returned event.
+    """
+    fsx_id: str = event["fsxFilesystemId"]
+    s3_bucket_name: str = event["s3BucketName"]
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    tags = [
+        {"Key": tag["Key"], "Value": tag["Value"]}
+        for tag in build_resource_tags(project_id, cluster_name)
+    ]
+
+    try:
+        response = fsx_client.create_data_repository_association(
+            FileSystemId=fsx_id,
+            FileSystemPath="/data",
+            DataRepositoryPath=f"s3://{s3_bucket_name}",
+            S3={
+                "AutoImportPolicy": {
+                    "Events": ["NEW", "CHANGED", "DELETED"],
+                },
+                "AutoExportPolicy": {
+                    "Events": ["NEW", "CHANGED", "DELETED"],
+                },
+            },
+            Tags=tags,
+        )
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to create DRA for FSx filesystem '{fsx_id}': {exc}"
+        )
+
+    dra_id = response["Association"]["AssociationId"]
+    logger.info(
+        "DRA '%s' created for FSx filesystem '%s' (cluster '%s')",
+        dra_id,
+        fsx_id,
+        cluster_name,
+    )
+
+    return {**event, "fsxDraId": dra_id}
+
+
+# ===================================================================
 # Step 5 — Create PCS cluster
 # ===================================================================
 
@@ -452,7 +506,6 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
                     "securityGroupIds": [compute_sg],
                 },
                 slurmConfiguration={
-                    "authKey": {"secretArn": event.get("slurmAuthKeyArn", "")},
                     "slurmCustomSettings": [],
                     "scaleDownIdleTimeInSeconds": 600,
                 },
@@ -1028,6 +1081,7 @@ _STEP_DISPATCH.update({
     "check_budget_breach": check_budget_breach,
     "create_fsx_filesystem": create_fsx_filesystem,
     "check_fsx_status": check_fsx_status,
+    "create_fsx_dra": create_fsx_dra,
     "create_pcs_cluster": create_pcs_cluster,
     "create_login_node_group": create_login_node_group,
     "create_compute_node_group": create_compute_node_group,

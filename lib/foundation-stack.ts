@@ -720,6 +720,8 @@ export class FoundationStack extends cdk.Stack {
         'fsx:DescribeFileSystems',
         'fsx:DeleteFileSystem',
         'fsx:TagResource',
+        'fsx:CreateDataRepositoryAssociation',
+        'fsx:DescribeDataRepositoryAssociations',
       ],
       resources: ['*'],
     }));
@@ -886,6 +888,17 @@ export class FoundationStack extends cdk.Stack {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
+    // Step 4b: Create Data Repository Association (after FSx is available)
+    const createFsxDra = new tasks.LambdaInvoke(this, 'CreateFsxDra', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_fsx_dra',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Step 5: Create PCS cluster
     const createPcsCluster = new tasks.LambdaInvoke(this, 'CreatePcsCluster', {
       lambdaFunction: clusterCreationStepLambda,
@@ -976,9 +989,6 @@ export class FoundationStack extends cdk.Stack {
 
     validateAndRegisterName.addCatch(failureChain, catchConfig);
     checkBudgetBreach.addCatch(failureChain, catchConfig);
-    createFsxFilesystem.addCatch(failureChain, catchConfig);
-    checkFsxStatus.addCatch(failureChain, catchConfig);
-    createPcsCluster.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
@@ -988,18 +998,69 @@ export class FoundationStack extends cdk.Stack {
     // FSx wait loop: check status → if not available, wait → check again
     const fsxWaitLoop = waitForFsx.next(checkFsxStatus);
     const isFsxAvailable = new sfn.Choice(this, 'IsFsxAvailable')
-      .when(sfn.Condition.booleanEquals('$.fsxAvailable', true), createPcsCluster)
+      .when(sfn.Condition.booleanEquals('$.fsxAvailable', true), createFsxDra)
       .otherwise(fsxWaitLoop);
 
-    // Chain: steps 1-4 → FSx wait loop → steps 5-10 → success
-    const creationDefinition = validateAndRegisterName
-      .next(checkBudgetBreach)
-      .next(createFsxFilesystem)
+    // --- Parallel execution: FSx branch and PCS branch run concurrently ---
+
+    // FSx branch: create filesystem → wait for available → create DRA
+    const fsxBranch = createFsxFilesystem
       .next(checkFsxStatus)
       .next(isFsxAvailable);
 
-    // Post-FSx chain (connected via the Choice "when available" branch)
-    createPcsCluster
+    // PCS branch: create cluster (runs independently of FSx)
+    const pcsBranch = createPcsCluster;
+
+    // Parallel state runs both branches concurrently.
+    // Each branch receives the full state as input.
+    // Output is an array: [fsxBranchResult, pcsBranchResult].
+    // Errors from either branch are caught at the Parallel level and
+    // routed to the rollback handler.
+    const parallelFsxAndPcs = new sfn.Parallel(this, 'ParallelFsxAndPcs', {
+      comment: 'Create FSx filesystem and PCS cluster in parallel',
+      resultSelector: {
+        // Merge the two branch outputs into a single flat object.
+        // Branch 0 (FSx) has fsxFilesystemId, fsxDnsName, fsxMountName, fsxDraId.
+        // Branch 1 (PCS) has pcsClusterId, pcsClusterArn.
+        // Both branches carry the original event fields.
+        'projectId.$': '$[0].projectId',
+        'clusterName.$': '$[0].clusterName',
+        'templateId.$': '$[0].templateId',
+        'createdBy.$': '$[0].createdBy',
+        'vpcId.$': '$[0].vpcId',
+        'efsFileSystemId.$': '$[0].efsFileSystemId',
+        's3BucketName.$': '$[0].s3BucketName',
+        'publicSubnetIds.$': '$[0].publicSubnetIds',
+        'privateSubnetIds.$': '$[0].privateSubnetIds',
+        'securityGroupIds.$': '$[0].securityGroupIds',
+        'fsxFilesystemId.$': '$[0].fsxFilesystemId',
+        'fsxDnsName.$': '$[0].fsxDnsName',
+        'fsxMountName.$': '$[0].fsxMountName',
+        'fsxDraId.$': '$[0].fsxDraId',
+        'pcsClusterId.$': '$[1].pcsClusterId',
+        'pcsClusterArn.$': '$[1].pcsClusterArn',
+        // Pass through template-driven fields from PCS branch
+        'loginInstanceType.$': '$[1].loginInstanceType',
+        'instanceTypes.$': '$[1].instanceTypes',
+        'maxNodes.$': '$[1].maxNodes',
+        'minNodes.$': '$[1].minNodes',
+        'purchaseOption.$': '$[1].purchaseOption',
+        'loginLaunchTemplateId.$': '$[1].loginLaunchTemplateId',
+        'loginLaunchTemplateVersion.$': '$[1].loginLaunchTemplateVersion',
+        'computeLaunchTemplateId.$': '$[1].computeLaunchTemplateId',
+        'computeLaunchTemplateVersion.$': '$[1].computeLaunchTemplateVersion',
+        'instanceProfileArn.$': '$[1].instanceProfileArn',
+      },
+      resultPath: '$',
+    });
+
+    parallelFsxAndPcs.branch(fsxBranch, pcsBranch);
+    parallelFsxAndPcs.addCatch(failureChain, catchConfig);
+
+    // Chain: validate → budget → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
+    const creationDefinition = validateAndRegisterName
+      .next(checkBudgetBreach)
+      .next(parallelFsxAndPcs)
       .next(createLoginNodeGroup)
       .next(createComputeNodeGroup)
       .next(createPcsQueue)
@@ -1137,6 +1198,8 @@ export class FoundationStack extends cdk.Stack {
         'fsx:DescribeFileSystems',
         'fsx:DeleteFileSystem',
         'fsx:TagResource',
+        'fsx:CreateDataRepositoryAssociation',
+        'fsx:DescribeDataRepositoryAssociations',
       ],
       resources: ['*'],
     }));
