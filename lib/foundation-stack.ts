@@ -722,6 +722,18 @@ export class FoundationStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // S3 permissions required by FSx — the FSx CreateFileSystem API
+    // validates that the calling principal has s3:Get*, s3:List*, and
+    // s3:PutObject on the linked S3 bucket before proceeding.
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:Get*',
+        's3:List*',
+        's3:PutObject',
+      ],
+      resources: ['*'],
+    }));
+
     clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'ec2:DescribeSubnets',

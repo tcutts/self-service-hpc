@@ -209,19 +209,13 @@ export class ProjectInfrastructureStack extends cdk.Stack {
         removalPolicy: cdk.RemovalPolicy.RETAIN,
       });
 
-      // Deny access from outside the project VPC
-      bucket.addToResourcePolicy(new iam.PolicyStatement({
-        sid: 'DenyAccessFromOutsideProjectVpc',
-        effect: iam.Effect.DENY,
-        principals: [new iam.AnyPrincipal()],
-        actions: ['s3:*'],
-        resources: [bucket.bucketArn, `${bucket.bucketArn}/*`],
-        conditions: {
-          StringNotEquals: {
-            'aws:SourceVpc': this.vpc.vpcId,
-          },
-        },
-      }));
+      // The bucket is protected by BlockPublicAccess.BLOCK_ALL and
+      // IAM-based access control.  We intentionally do NOT add a
+      // VPC-scoped deny policy here because the FSx for Lustre
+      // service-linked role must access the bucket from outside the
+      // VPC when creating data repository associations.  A blanket
+      // VPC deny would cause FSx CreateFileSystem to fail with
+      // "unable to validate access to the S3 bucket".
 
       this.projectBucket = bucket;
     }

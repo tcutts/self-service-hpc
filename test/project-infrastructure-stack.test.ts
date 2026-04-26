@@ -296,10 +296,12 @@ describe('ProjectInfrastructureStack', () => {
       });
     });
 
-    it('has a bucket policy with a Deny statement using aws:SourceVpc condition', () => {
+    it('does not have a VPC-scoped deny policy (would break FSx data repository associations)', () => {
+      // The bucket must NOT have a Deny statement conditioned on aws:SourceVpc
+      // because the FSx service-linked role accesses S3 from outside the VPC.
+      // Security is enforced via BlockPublicAccess and IAM policies instead.
       const policies = template.findResources('AWS::S3::BucketPolicy');
       const policyLogicalIds = Object.keys(policies);
-      expect(policyLogicalIds.length).toBeGreaterThanOrEqual(1);
 
       let foundDenyWithVpcCondition = false;
       for (const logicalId of policyLogicalIds) {
@@ -313,7 +315,7 @@ describe('ProjectInfrastructureStack', () => {
           }
         }
       }
-      expect(foundDenyWithVpcCondition).toBe(true);
+      expect(foundDenyWithVpcCondition).toBe(false);
     });
   });
 
