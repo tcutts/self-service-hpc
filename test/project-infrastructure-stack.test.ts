@@ -188,28 +188,72 @@ describe('ProjectInfrastructureStack', () => {
     });
 
     describe('FSx SG', () => {
-      it('has Lustre (988) ingress from Head Node and Compute Node SGs', () => {
+      it('has Lustre LNET (988) ingress from Head Node, Compute Node, and self', () => {
         const ingressResources = template.findResources('AWS::EC2::SecurityGroupIngress');
-        const fsxFromHead = Object.values(ingressResources).some((resource: any) => {
+        const fsxFromHead988 = Object.values(ingressResources).some((resource: any) => {
           const props = resource.Properties ?? {};
           return (
-            props.Description === 'Lustre from Head Node SG' &&
+            props.Description === 'Lustre LNET from Head Node SG' &&
             props.IpProtocol === 'tcp' &&
             props.FromPort === 988 &&
             props.ToPort === 988
           );
         });
-        const fsxFromCompute = Object.values(ingressResources).some((resource: any) => {
+        const fsxFromCompute988 = Object.values(ingressResources).some((resource: any) => {
           const props = resource.Properties ?? {};
           return (
-            props.Description === 'Lustre from Compute Node SG' &&
+            props.Description === 'Lustre LNET from Compute Node SG' &&
             props.IpProtocol === 'tcp' &&
             props.FromPort === 988 &&
             props.ToPort === 988
           );
         });
-        expect(fsxFromHead).toBe(true);
-        expect(fsxFromCompute).toBe(true);
+        const fsxFromSelf988 = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'Lustre LNET from self (FSx inter-node)' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 988 &&
+            props.ToPort === 988
+          );
+        });
+        expect(fsxFromHead988).toBe(true);
+        expect(fsxFromCompute988).toBe(true);
+        expect(fsxFromSelf988).toBe(true);
+      });
+
+      it('has Lustre service ports (1018-1023) ingress from Head Node, Compute Node, and self', () => {
+        const ingressResources = template.findResources('AWS::EC2::SecurityGroupIngress');
+        const fsxFromHead1018 = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'Lustre service ports from Head Node SG' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 1018 &&
+            props.ToPort === 1023
+          );
+        });
+        const fsxFromCompute1018 = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'Lustre service ports from Compute Node SG' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 1018 &&
+            props.ToPort === 1023
+          );
+        });
+        const fsxFromSelf1018 = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'Lustre service ports from self (FSx inter-node)' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 1018 &&
+            props.ToPort === 1023
+          );
+        });
+        expect(fsxFromHead1018).toBe(true);
+        expect(fsxFromCompute1018).toBe(true);
+        expect(fsxFromSelf1018).toBe(true);
       });
     });
   });

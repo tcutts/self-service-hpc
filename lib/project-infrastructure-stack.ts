@@ -36,7 +36,7 @@ export interface ProjectInfrastructureStackProps extends cdk.StackProps {
  *  - Head Node SG: SSH (22) and DCV (8443) from trusted CIDR ranges only
  *  - Compute Node SG: all traffic from Head Node SG and self (other compute nodes)
  *  - EFS SG: NFS (2049) from Head Node and Compute Node SGs
- *  - FSx for Lustre SG: Lustre (988) from Head Node and Compute Node SGs
+ *  - FSx for Lustre SG: Lustre (988, 1018-1023) from Head Node SG, Compute Node SG, and self
  */
 export class ProjectInfrastructureStack extends cdk.Stack {
   /** Dedicated VPC for this project. */
@@ -145,23 +145,45 @@ export class ProjectInfrastructureStack extends cdk.Stack {
       'NFS from Compute Node SG',
     );
 
-    // FSx for Lustre SG: Lustre (988) from Head Node and Compute Node SGs
+    // FSx for Lustre SG: Lustre LNET (988) and service ports (1018-1023)
+    // from Head Node SG, Compute Node SG, and self (FSx inter-node traffic).
     this.fsxSecurityGroup = new ec2.SecurityGroup(this, 'FsxSecurityGroup', {
       vpc: this.vpc,
       securityGroupName: `hpc-${props.projectId}-fsx-sg`,
-      description: 'FSx for Lustre: Lustre traffic from Head Node and Compute Node SGs',
+      description: 'FSx for Lustre: Lustre traffic from Head Node, Compute Node, and self',
       allowAllOutbound: false,
     });
 
     this.fsxSecurityGroup.addIngressRule(
       this.headNodeSecurityGroup,
       ec2.Port.tcp(988),
-      'Lustre from Head Node SG',
+      'Lustre LNET from Head Node SG',
     );
     this.fsxSecurityGroup.addIngressRule(
       this.computeNodeSecurityGroup,
       ec2.Port.tcp(988),
-      'Lustre from Compute Node SG',
+      'Lustre LNET from Compute Node SG',
+    );
+    this.fsxSecurityGroup.addIngressRule(
+      this.fsxSecurityGroup,
+      ec2.Port.tcp(988),
+      'Lustre LNET from self (FSx inter-node)',
+    );
+
+    this.fsxSecurityGroup.addIngressRule(
+      this.headNodeSecurityGroup,
+      ec2.Port.tcpRange(1018, 1023),
+      'Lustre service ports from Head Node SG',
+    );
+    this.fsxSecurityGroup.addIngressRule(
+      this.computeNodeSecurityGroup,
+      ec2.Port.tcpRange(1018, 1023),
+      'Lustre service ports from Compute Node SG',
+    );
+    this.fsxSecurityGroup.addIngressRule(
+      this.fsxSecurityGroup,
+      ec2.Port.tcpRange(1018, 1023),
+      'Lustre service ports from self (FSx inter-node)',
     );
 
     // -----------------------------------------------------------------
