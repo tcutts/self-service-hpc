@@ -44,6 +44,7 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 dynamodb = boto3.resource("dynamodb")
 fsx_client = boto3.client("fsx")
+iam_client = boto3.client("iam")
 pcs_client = boto3.client("pcs")
 
 # ---------------------------------------------------------------------------
@@ -305,7 +306,157 @@ def delete_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 5 — Record cluster as destroyed in DynamoDB
+# Step 5 — Delete cluster-specific IAM resources
+# ===================================================================
+
+# Managed policy ARNs attached to PCS node roles (must match cluster_creation.py)
+_PCS_MANAGED_POLICIES = [
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+]
+
+# Inline policy name (must match cluster_creation.py)
+_PCS_INLINE_POLICY_NAME = "PCSRegisterComputeNodeGroupInstance"
+
+
+def _delete_role_and_instance_profile(role_name: str) -> list[str]:
+    """Best-effort deletion of an IAM role and its instance profile.
+
+    Cleanup order:
+    1. Remove role from instance profile
+    2. Delete instance profile
+    3. Detach managed policies
+    4. Delete inline policies
+    5. Delete IAM role
+
+    Each step logs and continues on ``NoSuchEntity`` or ``ClientError``
+    so that subsequent steps are always attempted.
+
+    Returns a list of result strings for logging.
+    """
+    results: list[str] = []
+
+    # 1. Remove role from instance profile
+    try:
+        iam_client.remove_role_from_instance_profile(
+            InstanceProfileName=role_name,
+            RoleName=role_name,
+        )
+        logger.info("Removed role '%s' from instance profile", role_name)
+        results.append(f"remove_role_from_profile:{role_name}:done")
+    except ClientError as exc:
+        logger.warning(
+            "Failed to remove role '%s' from instance profile: %s",
+            role_name,
+            exc,
+        )
+        results.append(f"remove_role_from_profile:{role_name}:skipped")
+
+    # 2. Delete instance profile
+    try:
+        iam_client.delete_instance_profile(InstanceProfileName=role_name)
+        logger.info("Deleted instance profile '%s'", role_name)
+        results.append(f"instance_profile:{role_name}:deleted")
+    except ClientError as exc:
+        logger.warning(
+            "Failed to delete instance profile '%s': %s",
+            role_name,
+            exc,
+        )
+        results.append(f"instance_profile:{role_name}:failed")
+
+    # 3. Detach managed policies
+    for policy_arn in _PCS_MANAGED_POLICIES:
+        try:
+            iam_client.detach_role_policy(
+                RoleName=role_name,
+                PolicyArn=policy_arn,
+            )
+            logger.info(
+                "Detached policy '%s' from role '%s'", policy_arn, role_name
+            )
+        except ClientError as exc:
+            logger.warning(
+                "Failed to detach policy '%s' from role '%s': %s",
+                policy_arn,
+                role_name,
+                exc,
+            )
+
+    # 4. Delete inline policies
+    try:
+        iam_client.delete_role_policy(
+            RoleName=role_name,
+            PolicyName=_PCS_INLINE_POLICY_NAME,
+        )
+        logger.info(
+            "Deleted inline policy '%s' from role '%s'",
+            _PCS_INLINE_POLICY_NAME,
+            role_name,
+        )
+    except ClientError as exc:
+        logger.warning(
+            "Failed to delete inline policy '%s' from role '%s': %s",
+            _PCS_INLINE_POLICY_NAME,
+            role_name,
+            exc,
+        )
+
+    # 5. Delete IAM role
+    try:
+        iam_client.delete_role(RoleName=role_name)
+        logger.info("Deleted IAM role '%s'", role_name)
+        results.append(f"role:{role_name}:deleted")
+    except ClientError as exc:
+        logger.warning("Failed to delete IAM role '%s': %s", role_name, exc)
+        results.append(f"role:{role_name}:failed")
+
+    return results
+
+
+def delete_iam_resources(event: dict[str, Any]) -> dict[str, Any]:
+    """Delete cluster-specific IAM roles and instance profiles.
+
+    Cleans up the two IAM roles and instance profiles created during
+    cluster creation:
+    - ``AWSPCS-{projectId}-{clusterName}-login``
+    - ``AWSPCS-{projectId}-{clusterName}-compute``
+
+    Uses best-effort approach — each deletion step logs and continues
+    on failure so that all resources are attempted regardless of
+    individual errors.
+
+    Adds ``iamCleanupResults`` to the returned event.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    login_role_name = f"AWSPCS-{project_id}-{cluster_name}-login"
+    compute_role_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
+
+    cleanup_results: list[str] = []
+
+    logger.info(
+        "Deleting IAM resources for cluster '%s': %s, %s",
+        cluster_name,
+        login_role_name,
+        compute_role_name,
+    )
+
+    cleanup_results.extend(_delete_role_and_instance_profile(login_role_name))
+    cleanup_results.extend(_delete_role_and_instance_profile(compute_role_name))
+
+    logger.info(
+        "IAM cleanup for cluster '%s': %s",
+        cluster_name,
+        "; ".join(cleanup_results),
+    )
+
+    return {**event, "iamCleanupResults": cleanup_results}
+
+
+# ===================================================================
+# Step 6 — Record cluster as destroyed in DynamoDB
 # ===================================================================
 
 def record_cluster_destroyed(event: dict[str, Any]) -> dict[str, Any]:
@@ -406,5 +557,6 @@ _STEP_DISPATCH.update({
     "check_fsx_export_status": check_fsx_export_status,
     "delete_pcs_resources": delete_pcs_resources,
     "delete_fsx_filesystem": delete_fsx_filesystem,
+    "delete_iam_resources": delete_iam_resources,
     "record_cluster_destroyed": record_cluster_destroyed,
 })

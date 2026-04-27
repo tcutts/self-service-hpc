@@ -351,6 +351,35 @@ describe('ProjectInfrastructureStack', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // IAM — no project-level PCS instance profile or role
+  // Validates: Requirement 3.1 (instance profiles created per-cluster at runtime)
+  // ---------------------------------------------------------------------------
+  describe('No project-level PCS IAM resources', () => {
+    it('does not create an IAM role named AWSPCS-*-node', () => {
+      const roles = template.findResources('AWS::IAM::Role');
+      for (const [logicalId, resource] of Object.entries(roles)) {
+        const roleName = (resource as any).Properties?.RoleName ?? '';
+        expect(roleName).not.toMatch(/^AWSPCS-.*-node$/);
+      }
+    });
+
+    it('does not create a CfnInstanceProfile for PCS nodes', () => {
+      const profiles = template.findResources('AWS::IAM::InstanceProfile');
+      for (const [logicalId, resource] of Object.entries(profiles)) {
+        const profileName = (resource as any).Properties?.InstanceProfileName ?? '';
+        expect(profileName).not.toMatch(/^AWSPCS-.*-node$/);
+      }
+    });
+
+    it('does not output an InstanceProfileArn', () => {
+      const outputs = template.findOutputs('*');
+      for (const [outputId] of Object.entries(outputs)) {
+        expect(outputId).not.toMatch(/InstanceProfileArn/i);
+      }
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Cost Allocation Tagging — all resources tagged with Project cost allocation tag
   // Validates: Requirement 14.1, 14.2
   // ---------------------------------------------------------------------------

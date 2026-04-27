@@ -25,6 +25,7 @@ computeNodeGroupId (set by create_compute_node_group)
 queueId           (set by create_pcs_queue)
 """
 
+import json
 import logging
 import os
 import time
@@ -47,6 +48,7 @@ logger.setLevel(logging.INFO)
 # ---------------------------------------------------------------------------
 dynamodb = boto3.resource("dynamodb")
 fsx_client = boto3.client("fsx")
+iam_client = boto3.client("iam")
 pcs_client = boto3.client("pcs")
 tagging_client = boto3.client("resourcegroupstaggingapi")
 sns_client = boto3.client("sns")
@@ -74,19 +76,21 @@ _PCS_BASE_DELAY_SECONDS = 10
 # ---------------------------------------------------------------------------
 # Step progress tracking
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 10
+TOTAL_STEPS = 12
 
 STEP_LABELS: dict[int, str] = {
     1: "Registering cluster name",
     2: "Checking budget",
-    3: "Creating FSx filesystem",
-    4: "Waiting for FSx",
-    5: "Creating PCS cluster",
-    6: "Creating login nodes",
-    7: "Creating compute nodes",
-    8: "Creating queue",
-    9: "Tagging resources",
-    10: "Finalising",
+    3: "Creating IAM roles",
+    4: "Waiting for instance profiles",
+    5: "Creating FSx filesystem",
+    6: "Waiting for FSx",
+    7: "Creating PCS cluster",
+    8: "Creating login nodes",
+    9: "Creating compute nodes",
+    10: "Creating queue",
+    11: "Tagging resources",
+    12: "Finalising",
 }
 
 # ---------------------------------------------------------------------------
@@ -318,7 +322,213 @@ def check_budget_breach(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 3 — Create FSx for Lustre filesystem
+# Step 3 — Create IAM roles and instance profiles
+# ===================================================================
+
+# Managed policy ARNs attached to every PCS node role
+_PCS_MANAGED_POLICIES = [
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore",
+    "arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy",
+]
+
+# Inline policy granting PCS node registration
+_PCS_INLINE_POLICY_NAME = "PCSRegisterComputeNodeGroupInstance"
+_PCS_INLINE_POLICY_DOCUMENT = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Action": "pcs:RegisterComputeNodeGroupInstance",
+            "Resource": "*",
+        }
+    ],
+}
+
+# Trust policy allowing EC2 to assume the role
+_EC2_TRUST_POLICY = {
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Effect": "Allow",
+            "Principal": {"Service": "ec2.amazonaws.com"},
+            "Action": "sts:AssumeRole",
+        }
+    ],
+}
+
+
+def _create_role_and_instance_profile(
+    role_name: str,
+    project_id: str,
+    cluster_name: str,
+) -> str:
+    """Create an IAM role and instance profile for a PCS node type.
+
+    Creates the role with the EC2 trust policy, attaches the required
+    managed policies, adds the PCS inline policy, creates an instance
+    profile with the same name, and adds the role to the profile.
+
+    Returns the instance profile ARN.
+    """
+    tags = [
+        {"Key": tag["Key"], "Value": tag["Value"]}
+        for tag in build_resource_tags(project_id, cluster_name)
+    ]
+
+    # 1. Create IAM role
+    iam_client.create_role(
+        RoleName=role_name,
+        AssumeRolePolicyDocument=json.dumps(_EC2_TRUST_POLICY),
+        Tags=tags,
+    )
+    logger.info("Created IAM role '%s'", role_name)
+
+    # 2. Add inline policy
+    iam_client.put_role_policy(
+        RoleName=role_name,
+        PolicyName=_PCS_INLINE_POLICY_NAME,
+        PolicyDocument=json.dumps(_PCS_INLINE_POLICY_DOCUMENT),
+    )
+
+    # 3. Attach managed policies
+    for policy_arn in _PCS_MANAGED_POLICIES:
+        iam_client.attach_role_policy(
+            RoleName=role_name,
+            PolicyArn=policy_arn,
+        )
+
+    # 4. Create instance profile
+    iam_client.create_instance_profile(
+        InstanceProfileName=role_name,
+        Tags=tags,
+    )
+    logger.info("Created instance profile '%s'", role_name)
+
+    # 5. Add role to instance profile
+    response = iam_client.add_role_to_instance_profile(
+        InstanceProfileName=role_name,
+        RoleName=role_name,
+    )
+
+    # Retrieve the instance profile ARN
+    ip_response = iam_client.get_instance_profile(
+        InstanceProfileName=role_name,
+    )
+    instance_profile_arn = ip_response["InstanceProfile"]["Arn"]
+
+    logger.info(
+        "Instance profile '%s' ready (ARN: %s)",
+        role_name,
+        instance_profile_arn,
+    )
+    return instance_profile_arn
+
+
+def create_iam_resources(event: dict[str, Any]) -> dict[str, Any]:
+    """Create cluster-specific IAM roles and instance profiles.
+
+    Creates two IAM roles and instance profiles:
+    - ``AWSPCS-{projectId}-{clusterName}-login`` for login nodes
+    - ``AWSPCS-{projectId}-{clusterName}-compute`` for compute nodes
+
+    Each role gets:
+    - EC2 trust policy (``ec2.amazonaws.com``)
+    - Inline policy granting ``pcs:RegisterComputeNodeGroupInstance``
+    - Managed policies: ``AmazonSSMManagedInstanceCore``,
+      ``CloudWatchAgentServerPolicy``
+
+    Adds ``loginInstanceProfileArn`` and ``computeInstanceProfileArn``
+    to the returned event.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    # Write progress before executing step logic
+    _update_step_progress(project_id, cluster_name, 3)
+
+    login_role_name = f"AWSPCS-{project_id}-{cluster_name}-login"
+    compute_role_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
+
+    try:
+        login_profile_arn = _create_role_and_instance_profile(
+            login_role_name, project_id, cluster_name,
+        )
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to create login IAM resources '{login_role_name}': {exc}"
+        )
+
+    try:
+        compute_profile_arn = _create_role_and_instance_profile(
+            compute_role_name, project_id, cluster_name,
+        )
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to create compute IAM resources '{compute_role_name}': {exc}"
+        )
+
+    logger.info(
+        "IAM resources created for cluster '%s': login=%s, compute=%s",
+        cluster_name,
+        login_profile_arn,
+        compute_profile_arn,
+    )
+
+    return {
+        **event,
+        "loginInstanceProfileArn": login_profile_arn,
+        "computeInstanceProfileArn": compute_profile_arn,
+    }
+
+
+# ===================================================================
+# Step 4 — Wait for instance profiles to propagate
+# ===================================================================
+
+def wait_for_instance_profiles(event: dict[str, Any]) -> dict[str, Any]:
+    """Poll IAM until both login and compute instance profiles are available.
+
+    Instance profiles can take a few seconds to propagate after
+    creation.  This step is called by the Step Functions state machine
+    in a retry loop — it returns ``instanceProfilesReady: True`` when
+    both profiles are available, or ``False`` so the state machine can
+    wait and retry.
+
+    Handles ``NoSuchEntity`` gracefully by returning
+    ``instanceProfilesReady: False``.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    # Write progress before executing step logic
+    _update_step_progress(project_id, cluster_name, 4)
+
+    login_profile_name = f"AWSPCS-{project_id}-{cluster_name}-login"
+    compute_profile_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
+
+    for profile_name in (login_profile_name, compute_profile_name):
+        try:
+            iam_client.get_instance_profile(InstanceProfileName=profile_name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "NoSuchEntity":
+                logger.info(
+                    "Instance profile '%s' not yet available — will retry",
+                    profile_name,
+                )
+                return {**event, "instanceProfilesReady": False}
+            raise
+
+    logger.info(
+        "Instance profiles ready for cluster '%s': %s, %s",
+        cluster_name,
+        login_profile_name,
+        compute_profile_name,
+    )
+    return {**event, "instanceProfilesReady": True}
+
+
+# ===================================================================
+# Step 5 — Create FSx for Lustre filesystem
 # ===================================================================
 
 def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
@@ -336,7 +546,7 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 3)
+    _update_step_progress(project_id, cluster_name, 5)
     private_subnet_ids: list[str] = event["privateSubnetIds"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
 
@@ -376,7 +586,7 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 4 — Check FSx filesystem status
+# Step 6 — Check FSx filesystem status
 # ===================================================================
 
 _FSX_TERMINAL_FAILURE_STATES = {"FAILED", "DELETING", "MISCONFIGURED"}
@@ -397,7 +607,7 @@ def check_fsx_status(event: dict[str, Any]) -> dict[str, Any]:
     fsx_id: str = event["fsxFilesystemId"]
 
     # Write progress before executing step logic
-    _update_step_progress(event["projectId"], event.get("clusterName", ""), 4)
+    _update_step_progress(event["projectId"], event.get("clusterName", ""), 6)
 
     # Track poll attempts to prevent infinite wait loops
     poll_count: int = event.get("fsxPollCount", 0) + 1
@@ -448,7 +658,7 @@ def check_fsx_status(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 4b — Create Data Repository Association (lazy loading from S3)
+# Step 6b — Create Data Repository Association (lazy loading from S3)
 # ===================================================================
 
 def create_fsx_dra(event: dict[str, Any]) -> dict[str, Any]:
@@ -503,7 +713,7 @@ def create_fsx_dra(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 5 — Create PCS cluster
+# Step 7 — Create PCS cluster
 # ===================================================================
 
 def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
@@ -518,7 +728,7 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 5)
+    _update_step_progress(project_id, cluster_name, 7)
     private_subnet_ids: list[str] = event["privateSubnetIds"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
 
@@ -584,7 +794,7 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 6 — Create login node compute node group
+# Step 8 — Create login node compute node group
 # ===================================================================
 
 def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
@@ -602,7 +812,7 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 6)
+    _update_step_progress(project_id, cluster_name, 8)
     template_id: str = event.get("templateId", "")
     public_subnet_ids: list[str] = event["publicSubnetIds"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
@@ -645,7 +855,7 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
                 "id": event.get("loginLaunchTemplateId", ""),
                 "version": event.get("loginLaunchTemplateVersion", "$Default"),
             },
-            iamInstanceProfileArn=event.get("instanceProfileArn", ""),
+            iamInstanceProfileArn=event.get("loginInstanceProfileArn", ""),
             tags=tags,
         )
     except ClientError as exc:
@@ -664,7 +874,7 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 7 — Create compute node compute node group
+# Step 9 — Create compute node compute node group
 # ===================================================================
 
 def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
@@ -681,7 +891,7 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 7)
+    _update_step_progress(project_id, cluster_name, 9)
     private_subnet_ids: list[str] = event["privateSubnetIds"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
 
@@ -724,7 +934,7 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
                 "id": event.get("computeLaunchTemplateId", ""),
                 "version": event.get("computeLaunchTemplateVersion", "$Default"),
             },
-            iamInstanceProfileArn=event.get("instanceProfileArn", ""),
+            iamInstanceProfileArn=event.get("computeInstanceProfileArn", ""),
             tags=tags,
         )
     except ClientError as exc:
@@ -743,7 +953,7 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 8 — Create PCS queue
+# Step 10 — Create PCS queue
 # ===================================================================
 
 def create_pcs_queue(event: dict[str, Any]) -> dict[str, Any]:
@@ -756,7 +966,7 @@ def create_pcs_queue(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 8)
+    _update_step_progress(project_id, cluster_name, 10)
     compute_node_group_id: str = event["computeNodeGroupId"]
 
     tags = tags_as_dict(project_id, cluster_name)
@@ -786,7 +996,7 @@ def create_pcs_queue(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 9 — Tag all resources
+# Step 11 — Tag all resources
 # ===================================================================
 
 def tag_resources(event: dict[str, Any]) -> dict[str, Any]:
@@ -799,7 +1009,7 @@ def tag_resources(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 9)
+    _update_step_progress(project_id, cluster_name, 11)
 
     tags = tags_as_dict(project_id, cluster_name)
 
@@ -845,7 +1055,7 @@ def tag_resources(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 10 — Record cluster in DynamoDB
+# Step 12 — Record cluster in DynamoDB
 # ===================================================================
 
 def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
@@ -858,7 +1068,7 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 10)
+    _update_step_progress(project_id, cluster_name, 12)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -923,18 +1133,19 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
-# Step 11 — Handle creation failure (rollback)
+# Step 13 — Handle creation failure (rollback)
 # ===================================================================
 
 def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
     """Rollback handler for cluster creation failures.
 
     Cleans up partially created resources in reverse order:
-    1. Delete PCS queue (if created)
-    2. Delete PCS compute node groups (if created)
-    3. Delete PCS cluster (if created)
-    4. Delete FSx filesystem (if created)
-    5. Mark cluster as FAILED in DynamoDB
+    1. Delete IAM roles and instance profiles (login and compute)
+    2. Delete PCS queue (if created)
+    3. Delete PCS compute node groups (if created)
+    4. Delete PCS cluster (if created)
+    5. Delete FSx filesystem (if created)
+    6. Mark cluster as FAILED in DynamoDB
 
     Each cleanup step is best-effort — failures are logged but do
     not prevent subsequent cleanup steps from running.
@@ -953,37 +1164,48 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
 
     cleanup_results: list[str] = []
 
-    # 1. Delete PCS queue
+    # 1. Delete IAM roles and instance profiles
+    if project_id and cluster_name:
+        login_role_name = f"AWSPCS-{project_id}-{cluster_name}-login"
+        compute_role_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
+        cleanup_results.extend(
+            _cleanup_iam_role_and_profile(login_role_name)
+        )
+        cleanup_results.extend(
+            _cleanup_iam_role_and_profile(compute_role_name)
+        )
+
+    # 2. Delete PCS queue
     if queue_id and pcs_cluster_id:
         cleanup_results.append(
             _cleanup_pcs_queue(pcs_cluster_id, queue_id)
         )
 
-    # 2. Delete compute node group
+    # 3. Delete compute node group
     if compute_group_id and pcs_cluster_id:
         cleanup_results.append(
             _cleanup_pcs_node_group(pcs_cluster_id, compute_group_id, "compute")
         )
 
-    # 3. Delete login node group
+    # 4. Delete login node group
     if login_group_id and pcs_cluster_id:
         cleanup_results.append(
             _cleanup_pcs_node_group(pcs_cluster_id, login_group_id, "login")
         )
 
-    # 4. Delete PCS cluster
+    # 5. Delete PCS cluster
     if pcs_cluster_id:
         cleanup_results.append(
             _cleanup_pcs_cluster(pcs_cluster_id)
         )
 
-    # 5. Delete FSx filesystem
+    # 6. Delete FSx filesystem
     if fsx_id:
         cleanup_results.append(
             _cleanup_fsx_filesystem(fsx_id)
         )
 
-    # 6. Record FAILED status in DynamoDB
+    # 7. Record FAILED status in DynamoDB
     if project_id and cluster_name:
         _record_failed_cluster(project_id, cluster_name, error_message)
 
@@ -1019,6 +1241,101 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
 # ===================================================================
 # Internal cleanup helpers
 # ===================================================================
+
+def _cleanup_iam_role_and_profile(role_name: str) -> list[str]:
+    """Best-effort deletion of an IAM role and its instance profile.
+
+    Cleanup order:
+    1. Remove role from instance profile
+    2. Delete instance profile
+    3. Detach managed policies
+    4. Delete inline policies
+    5. Delete IAM role
+
+    Each step logs and continues on ``NoSuchEntity`` or ``ClientError``
+    so that subsequent steps are always attempted.
+
+    Returns a list of result strings for logging.
+    """
+    results: list[str] = []
+
+    # 1. Remove role from instance profile
+    try:
+        iam_client.remove_role_from_instance_profile(
+            InstanceProfileName=role_name,
+            RoleName=role_name,
+        )
+        logger.info("Removed role '%s' from instance profile", role_name)
+        results.append(f"remove_role_from_profile:{role_name}:done")
+    except ClientError as exc:
+        logger.warning(
+            "Failed to remove role '%s' from instance profile: %s",
+            role_name,
+            exc,
+        )
+        results.append(f"remove_role_from_profile:{role_name}:skipped")
+
+    # 2. Delete instance profile
+    try:
+        iam_client.delete_instance_profile(InstanceProfileName=role_name)
+        logger.info("Deleted instance profile '%s'", role_name)
+        results.append(f"instance_profile:{role_name}:deleted")
+    except ClientError as exc:
+        logger.warning(
+            "Failed to delete instance profile '%s': %s",
+            role_name,
+            exc,
+        )
+        results.append(f"instance_profile:{role_name}:failed")
+
+    # 3. Detach managed policies
+    for policy_arn in _PCS_MANAGED_POLICIES:
+        try:
+            iam_client.detach_role_policy(
+                RoleName=role_name,
+                PolicyArn=policy_arn,
+            )
+            logger.info(
+                "Detached policy '%s' from role '%s'", policy_arn, role_name
+            )
+        except ClientError as exc:
+            logger.warning(
+                "Failed to detach policy '%s' from role '%s': %s",
+                policy_arn,
+                role_name,
+                exc,
+            )
+
+    # 4. Delete inline policies
+    try:
+        iam_client.delete_role_policy(
+            RoleName=role_name,
+            PolicyName=_PCS_INLINE_POLICY_NAME,
+        )
+        logger.info(
+            "Deleted inline policy '%s' from role '%s'",
+            _PCS_INLINE_POLICY_NAME,
+            role_name,
+        )
+    except ClientError as exc:
+        logger.warning(
+            "Failed to delete inline policy '%s' from role '%s': %s",
+            _PCS_INLINE_POLICY_NAME,
+            role_name,
+            exc,
+        )
+
+    # 5. Delete IAM role
+    try:
+        iam_client.delete_role(RoleName=role_name)
+        logger.info("Deleted IAM role '%s'", role_name)
+        results.append(f"role:{role_name}:deleted")
+    except ClientError as exc:
+        logger.warning("Failed to delete IAM role '%s': %s", role_name, exc)
+        results.append(f"role:{role_name}:failed")
+
+    return results
+
 
 def _cleanup_pcs_queue(cluster_id: str, queue_id: str) -> str:
     """Best-effort deletion of a PCS queue."""
@@ -1176,6 +1493,8 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
 _STEP_DISPATCH.update({
     "validate_and_register_name": validate_and_register_name,
     "check_budget_breach": check_budget_breach,
+    "create_iam_resources": create_iam_resources,
+    "wait_for_instance_profiles": wait_for_instance_profiles,
     "resolve_template": resolve_template,
     "create_fsx_filesystem": create_fsx_filesystem,
     "check_fsx_status": check_fsx_status,

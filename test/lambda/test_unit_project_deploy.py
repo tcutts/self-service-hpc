@@ -191,7 +191,6 @@ class TestProjectDeployStepHandlers:
                 "efs": "sg-efs",
                 "fsx": "sg-fsx",
             },
-            "instanceProfileArn": "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-record-node",
             "loginLaunchTemplateId": "lt-login-proj-record",
             "computeLaunchTemplateId": "lt-compute-proj-record",
         }
@@ -211,7 +210,8 @@ class TestProjectDeployStepHandlers:
         assert item["securityGroupIds"]["headNode"] == "sg-head"
         assert item["securityGroupIds"]["fsx"] == "sg-fsx"
         assert item["status"] == "ACTIVE"
-        assert item["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-record-node"
+        # instanceProfileArn is no longer stored at project level (per-cluster profiles now)
+        assert "instanceProfileArn" not in item
         assert item["loginLaunchTemplateId"] == "lt-login-proj-record"
         assert item["computeLaunchTemplateId"] == "lt-compute-proj-record"
 
@@ -362,7 +362,6 @@ class TestProjectDeployStepHandlers:
                     {"OutputKey": "ComputeNodeSecurityGroupId", "OutputValue": "sg-compute"},
                     {"OutputKey": "EfsSecurityGroupId", "OutputValue": "sg-efs"},
                     {"OutputKey": "FsxSecurityGroupId", "OutputValue": "sg-fsx"},
-                    {"OutputKey": "InstanceProfileArn", "OutputValue": "arn:aws:iam::123456789012:instance-profile/AWSPCS-test-node"},
                     {"OutputKey": "LoginLaunchTemplateId", "OutputValue": "lt-login-test"},
                     {"OutputKey": "ComputeLaunchTemplateId", "OutputValue": "lt-compute-test"},
                 ],
@@ -381,8 +380,8 @@ class TestProjectDeployStepHandlers:
         assert result["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert result["securityGroupIds"]["headNode"] == "sg-head"
         assert result["securityGroupIds"]["fsx"] == "sg-fsx"
-        # Verify PCS compute node group fields are extracted
-        assert result["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-test-node"
+        # instanceProfileArn is no longer extracted (per-cluster profiles now)
+        assert "instanceProfileArn" not in result
         assert result["loginLaunchTemplateId"] == "lt-login-test"
         assert result["computeLaunchTemplateId"] == "lt-compute-test"
 

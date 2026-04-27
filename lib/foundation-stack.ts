@@ -810,6 +810,28 @@ export class FoundationStack extends cdk.Stack {
       },
     }));
 
+    // IAM management permissions for per-cluster instance profile lifecycle
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateRole',
+        'iam:DeleteRole',
+        'iam:AttachRolePolicy',
+        'iam:DetachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:DeleteRolePolicy',
+        'iam:CreateInstanceProfile',
+        'iam:DeleteInstanceProfile',
+        'iam:AddRoleToInstanceProfile',
+        'iam:RemoveRoleFromInstanceProfile',
+        'iam:PassRole',
+        'iam:GetInstanceProfile',
+      ],
+      resources: [
+        'arn:aws:iam::*:role/AWSPCS-*',
+        'arn:aws:iam::*:instance-profile/AWSPCS-*',
+      ],
+    }));
+
     // Lambda function for cluster destruction workflow steps
     const clusterDestructionStepLambda = new lambda.Function(this, 'ClusterDestructionStepLambda', {
       functionName: 'hpc-cluster-destruction-steps',
@@ -845,6 +867,28 @@ export class FoundationStack extends cdk.Stack {
         'fsx:DescribeFileSystems',
       ],
       resources: ['*'],
+    }));
+
+    // IAM management permissions for per-cluster instance profile cleanup
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateRole',
+        'iam:DeleteRole',
+        'iam:AttachRolePolicy',
+        'iam:DetachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:DeleteRolePolicy',
+        'iam:CreateInstanceProfile',
+        'iam:DeleteInstanceProfile',
+        'iam:AddRoleToInstanceProfile',
+        'iam:RemoveRoleFromInstanceProfile',
+        'iam:PassRole',
+        'iam:GetInstanceProfile',
+      ],
+      resources: [
+        'arn:aws:iam::*:role/AWSPCS-*',
+        'arn:aws:iam::*:instance-profile/AWSPCS-*',
+      ],
     }));
 
     // --- Cluster Creation State Machine Definition ---

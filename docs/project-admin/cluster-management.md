@@ -11,6 +11,7 @@ Clusters are ephemeral HPC environments provisioned using AWS Parallel Computing
 - An **FSx for Lustre** filesystem linked to the project's S3 storage bucket
 - **EFS home directories** mounted for each authorised user
 - **Slurm accounting** enabled for job tracking
+- **Dedicated IAM roles and instance profiles** for login and compute nodes (`AWSPCS-{projectId}-{clusterName}-login` and `AWSPCS-{projectId}-{clusterName}-compute`)
 
 Clusters are created from predefined **cluster templates** that specify instance types, node counts, and software configuration.
 
@@ -81,10 +82,12 @@ Before creating a cluster, review the available templates:
 2. The project's budget status is checked — creation is blocked if the budget is breached.
 3. A Step Functions workflow is started to orchestrate the multi-step creation process:
    - Register the cluster name in the global registry
+   - Create dedicated IAM roles and instance profiles for the cluster (`AWSPCS-{projectId}-{clusterName}-login` and `AWSPCS-{projectId}-{clusterName}-compute`)
+   - Wait for instance profiles to propagate in IAM
    - Create an FSx for Lustre filesystem with a data repository association to the project S3 bucket
    - Create the PCS cluster with Slurm accounting enabled
-   - Create the login node group (public subnet, static scaling)
-   - Create the compute node group (private subnet, elastic scaling)
+   - Create the login node group (public subnet, static scaling) using the cluster-specific login instance profile
+   - Create the compute node group (private subnet, elastic scaling) using the cluster-specific compute instance profile
    - Create the PCS queue
    - Provision POSIX user accounts on all nodes
    - Tag all resources with `Project` and `ClusterName` tags
@@ -212,7 +215,8 @@ For **ACTIVE** clusters, the response includes SSH and DCV connection details:
 1. An FSx data repository export task syncs data back to the project S3 bucket.
 2. PCS compute node groups, queue, and cluster are deleted.
 3. The FSx for Lustre filesystem is deleted.
-4. The cluster record is updated to `DESTROYED` in DynamoDB.
+4. The cluster-specific IAM resources are cleaned up — roles are removed from instance profiles, instance profiles are deleted, managed policies are detached, and IAM roles are deleted for both the login and compute profiles.
+5. The cluster record is updated to `DESTROYED` in DynamoDB.
 
 Home directories (EFS) and project storage (S3) are **preserved** after cluster destruction.
 
@@ -289,6 +293,19 @@ Home directories (EFS) and project storage (S3) are **preserved** across destruc
 | Cluster not in DESTROYED status | `CONFLICT` | 409 |
 | Project budget breached | `BUDGET_EXCEEDED` | 403 |
 | Caller is not a project member | `AUTHORISATION_ERROR` | 403 |
+
+## Per-Cluster IAM Roles and Instance Profiles
+
+Each cluster is provisioned with its own dedicated IAM roles and instance profiles, created automatically during cluster creation and cleaned up during cluster destruction:
+
+- **Login instance profile**: `AWSPCS-{projectId}-{clusterName}-login`
+- **Compute instance profile**: `AWSPCS-{projectId}-{clusterName}-compute`
+
+Both roles are granted baseline permissions required by PCS (`pcs:RegisterComputeNodeGroupInstance`), SSM (`AmazonSSMManagedInstanceCore`), and CloudWatch (`CloudWatchAgentServerPolicy`).
+
+Because each cluster has its own isolated IAM roles, this enables future per-cluster permission customisation — for example, granting a specific cluster's compute nodes access to additional S3 paths or AWS services without affecting other clusters in the same project.
+
+If cluster creation fails, any partially created IAM resources are automatically rolled back as part of the cleanup process.
 
 ## Best Practices
 

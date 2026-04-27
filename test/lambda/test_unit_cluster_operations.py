@@ -407,10 +407,9 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
         assert sfn_input["securityGroupIds"]["headNode"] == "sg-head"
-        assert "instanceProfileArn" in sfn_input
+        assert "instanceProfileArn" not in sfn_input
         assert "loginLaunchTemplateId" in sfn_input
         assert "computeLaunchTemplateId" in sfn_input
-        assert sfn_input["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-infra-node"
         assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-infra"
         assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-infra"
 
@@ -442,7 +441,7 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["s3BucketName"] == "hpc-proj-recreate-infra-storage"
         assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
-        assert sfn_input["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-recreate-infra-node"
+        assert "instanceProfileArn" not in sfn_input
         assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-recreate-infra"
         assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-recreate-infra"
 
@@ -1158,7 +1157,7 @@ class TestClusterCreationStartsSFN:
         assert item["createdBy"] == "proj-user"
         assert "createdAt" in item
         assert item["currentStep"] == 0
-        assert item["totalSteps"] == 10
+        assert item["totalSteps"] == 12
 
     def test_creation_calls_sfn_start_execution(self, _env):
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
@@ -1447,7 +1446,7 @@ class TestStepProgressTracking:
 
         item = self._get_cluster_item(_env, "proj-progress", "progress-cl")
         assert item["currentStep"] == 1
-        assert item["totalSteps"] == 10
+        assert item["totalSteps"] == 12
         assert item["stepDescription"] == "Registering cluster name"
         assert item["status"] == "CREATING"
 
@@ -1458,37 +1457,39 @@ class TestStepProgressTracking:
 
         item = self._get_cluster_item(_env, "proj-progress", "progress-cl")
         assert item["currentStep"] == 2
-        assert item["totalSteps"] == 10
+        assert item["totalSteps"] == 12
         assert item["stepDescription"] == "Checking budget"
 
     def test_step_labels_are_defined_for_all_steps(self, _env):
-        """All 10 step labels are defined in STEP_LABELS."""
-        assert len(_env["creation_mod"].STEP_LABELS) == 10
-        for step_num in range(1, 11):
+        """All 12 step labels are defined in STEP_LABELS."""
+        assert len(_env["creation_mod"].STEP_LABELS) == 12
+        for step_num in range(1, 13):
             assert step_num in _env["creation_mod"].STEP_LABELS
             assert isinstance(_env["creation_mod"].STEP_LABELS[step_num], str)
             assert len(_env["creation_mod"].STEP_LABELS[step_num]) > 0
 
-    def test_total_steps_constant_is_10(self, _env):
-        """TOTAL_STEPS constant is 10."""
-        assert _env["creation_mod"].TOTAL_STEPS == 10
+    def test_total_steps_constant_is_12(self, _env):
+        """TOTAL_STEPS constant is 12."""
+        assert _env["creation_mod"].TOTAL_STEPS == 12
 
     def test_step_labels_match_expected_values(self, _env):
         """Step labels match the specification."""
         labels = _env["creation_mod"].STEP_LABELS
         assert labels[1] == "Registering cluster name"
         assert labels[2] == "Checking budget"
-        assert labels[3] == "Creating FSx filesystem"
-        assert labels[4] == "Waiting for FSx"
-        assert labels[5] == "Creating PCS cluster"
-        assert labels[6] == "Creating login nodes"
-        assert labels[7] == "Creating compute nodes"
-        assert labels[8] == "Creating queue"
-        assert labels[9] == "Tagging resources"
-        assert labels[10] == "Finalising"
+        assert labels[3] == "Creating IAM roles"
+        assert labels[4] == "Waiting for instance profiles"
+        assert labels[5] == "Creating FSx filesystem"
+        assert labels[6] == "Waiting for FSx"
+        assert labels[7] == "Creating PCS cluster"
+        assert labels[8] == "Creating login nodes"
+        assert labels[9] == "Creating compute nodes"
+        assert labels[10] == "Creating queue"
+        assert labels[11] == "Tagging resources"
+        assert labels[12] == "Finalising"
 
-    def test_record_cluster_writes_step10_progress(self, _env):
-        """Step 10 (record_cluster / Finalising) writes step 10 progress."""
+    def test_record_cluster_writes_step12_progress(self, _env):
+        """Step 12 (record_cluster / Finalising) writes step 12 progress."""
         event = {
             "projectId": "proj-progress",
             "clusterName": "progress-cl",
@@ -1516,8 +1517,8 @@ class TestStepProgressTracking:
         _seed_cluster(
             _env["clusters_table"], "proj-progress", "creating-with-progress",
             status="CREATING",
-            currentStep=3,
-            totalSteps=10,
+            currentStep=5,
+            totalSteps=12,
             stepDescription="Creating FSx filesystem",
         )
         _seed_project(_env["projects_table"], "proj-progress", budget_breached=False)
@@ -1532,8 +1533,8 @@ class TestStepProgressTracking:
         body = json.loads(response["body"])
         assert body["status"] == "CREATING"
         assert "progress" in body
-        assert body["progress"]["currentStep"] == 3
-        assert body["progress"]["totalSteps"] == 10
+        assert body["progress"]["currentStep"] == 5
+        assert body["progress"]["totalSteps"] == 12
         assert body["progress"]["stepDescription"] == "Creating FSx filesystem"
         # CREATING clusters should NOT have connectionInfo
         assert "connectionInfo" not in body
