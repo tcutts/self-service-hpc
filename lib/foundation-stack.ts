@@ -1076,6 +1076,10 @@ export class FoundationStack extends cdk.Stack {
         'maxNodes.$': '$[0].maxNodes',
         'minNodes.$': '$[0].minNodes',
         'purchaseOption.$': '$[0].purchaseOption',
+        // PCS compute node group fields — instance profile and launch templates
+        'instanceProfileArn.$': '$[0].instanceProfileArn',
+        'loginLaunchTemplateId.$': '$[0].loginLaunchTemplateId',
+        'computeLaunchTemplateId.$': '$[0].computeLaunchTemplateId',
       },
       resultPath: '$',
     });

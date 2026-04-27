@@ -102,6 +102,9 @@ def _seed_project(projects_table, project_id, budget_breached=False, **extra):
             "efs": "sg-efs",
             "fsx": "sg-fsx",
         },
+        "instanceProfileArn": f"arn:aws:iam::123456789012:instance-profile/AWSPCS-{project_id}-node",
+        "loginLaunchTemplateId": f"lt-login-{project_id}",
+        "computeLaunchTemplateId": f"lt-compute-{project_id}",
     }
     item.update(extra)
     projects_table.put_item(Item=item)
@@ -404,6 +407,12 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
         assert sfn_input["securityGroupIds"]["headNode"] == "sg-head"
+        assert "instanceProfileArn" in sfn_input
+        assert "loginLaunchTemplateId" in sfn_input
+        assert "computeLaunchTemplateId" in sfn_input
+        assert sfn_input["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-infra-node"
+        assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-infra"
+        assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-infra"
 
     def test_recreate_cluster_payload_includes_all_infra_fields(self, _env):
         """Recreation must also pass infrastructure details to the SFN."""
@@ -433,6 +442,9 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["s3BucketName"] == "hpc-proj-recreate-infra-storage"
         assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
+        assert sfn_input["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-recreate-infra-node"
+        assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-recreate-infra"
+        assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-recreate-infra"
 
     def test_create_cluster_fails_when_infra_missing(self, _env):
         """Creation must fail gracefully when project has no infrastructure."""

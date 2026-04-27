@@ -162,6 +162,9 @@ def _lookup_project_infrastructure(project_id: str) -> dict[str, Any]:
         "publicSubnetIds": item.get("publicSubnetIds", []),
         "privateSubnetIds": item.get("privateSubnetIds", []),
         "securityGroupIds": item.get("securityGroupIds", {}),
+        "instanceProfileArn": item.get("instanceProfileArn", ""),
+        "loginLaunchTemplateId": item.get("loginLaunchTemplateId", ""),
+        "computeLaunchTemplateId": item.get("computeLaunchTemplateId", ""),
     }
 
     if not infra["s3BucketName"]:
@@ -260,6 +263,9 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
         "publicSubnetIds": infra["publicSubnetIds"],
         "privateSubnetIds": infra["privateSubnetIds"],
         "securityGroupIds": infra["securityGroupIds"],
+        "instanceProfileArn": infra["instanceProfileArn"],
+        "loginLaunchTemplateId": infra["loginLaunchTemplateId"],
+        "computeLaunchTemplateId": infra["computeLaunchTemplateId"],
     }
 
     sfn_client.start_execution(
@@ -427,6 +433,9 @@ def _handle_recreate_cluster(
         "publicSubnetIds": infra["publicSubnetIds"],
         "privateSubnetIds": infra["privateSubnetIds"],
         "securityGroupIds": infra["securityGroupIds"],
+        "instanceProfileArn": infra["instanceProfileArn"],
+        "loginLaunchTemplateId": infra["loginLaunchTemplateId"],
+        "computeLaunchTemplateId": infra["computeLaunchTemplateId"],
     }
 
     sfn_client.start_execution(

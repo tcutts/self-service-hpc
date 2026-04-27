@@ -55,6 +55,12 @@ export class ProjectInfrastructureStack extends cdk.Stack {
   public readonly fsxSecurityGroup: ec2.SecurityGroup;
   /** CloudWatch Log Group for cluster SSH/DCV access logs (365-day retention). */
   public readonly clusterAccessLogGroup: logs.LogGroup;
+  /** IAM instance profile for PCS compute node groups. */
+  public readonly pcsInstanceProfile: iam.CfnInstanceProfile;
+  /** EC2 launch template for login (head) nodes. */
+  public readonly loginLaunchTemplate: ec2.LaunchTemplate;
+  /** EC2 launch template for compute nodes. */
+  public readonly computeLaunchTemplate: ec2.LaunchTemplate;
 
   constructor(scope: Construct, id: string, props: ProjectInfrastructureStackProps) {
     super(scope, id, props);
@@ -230,6 +236,50 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     });
 
     // -----------------------------------------------------------------
+    // IAM — PCS instance profile for compute node groups
+    // -----------------------------------------------------------------
+    // PCS requires the IAM role to have path /aws-pcs/ or name starting
+    // with AWSPCS.  The role needs pcs:RegisterComputeNodeGroupInstance
+    // plus SSM and CloudWatch for operational access.
+    const pcsNodeRole = new iam.Role(this, 'PcsNodeRole', {
+      roleName: `AWSPCS-${props.projectId}-node`,
+      assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
+      description: `PCS compute node role for project ${props.projectId}`,
+    });
+
+    pcsNodeRole.addToPolicy(new iam.PolicyStatement({
+      actions: ['pcs:RegisterComputeNodeGroupInstance'],
+      resources: ['*'],
+    }));
+
+    pcsNodeRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('AmazonSSMManagedInstanceCore'),
+    );
+    pcsNodeRole.addManagedPolicy(
+      iam.ManagedPolicy.fromAwsManagedPolicyName('CloudWatchAgentServerPolicy'),
+    );
+
+    this.pcsInstanceProfile = new iam.CfnInstanceProfile(this, 'PcsInstanceProfile', {
+      instanceProfileName: `AWSPCS-${props.projectId}-node`,
+      roles: [pcsNodeRole.roleName],
+    });
+
+    // -----------------------------------------------------------------
+    // EC2 Launch Templates — login and compute nodes
+    // -----------------------------------------------------------------
+    // Login nodes: head node SG, SSH/DCV access from trusted CIDRs
+    this.loginLaunchTemplate = new ec2.LaunchTemplate(this, 'LoginLaunchTemplate', {
+      launchTemplateName: `hpc-${props.projectId}-login`,
+      securityGroup: this.headNodeSecurityGroup,
+    });
+
+    // Compute nodes: compute node SG, private subnet only
+    this.computeLaunchTemplate = new ec2.LaunchTemplate(this, 'ComputeLaunchTemplate', {
+      launchTemplateName: `hpc-${props.projectId}-compute`,
+      securityGroup: this.computeNodeSecurityGroup,
+    });
+
+    // -----------------------------------------------------------------
     // Tags — Cost_Allocation_Tag on all resources
     // -----------------------------------------------------------------
     cdk.Tags.of(this).add('Project', tagValue);
@@ -285,6 +335,21 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ClusterAccessLogGroupName', {
       value: this.clusterAccessLogGroup.logGroupName,
       description: `CloudWatch Log Group for cluster access logs for project ${props.projectId}`,
+    });
+
+    new cdk.CfnOutput(this, 'InstanceProfileArn', {
+      value: this.pcsInstanceProfile.attrArn,
+      description: `PCS instance profile ARN for project ${props.projectId}`,
+    });
+
+    new cdk.CfnOutput(this, 'LoginLaunchTemplateId', {
+      value: this.loginLaunchTemplate.launchTemplateId!,
+      description: `Login node launch template ID for project ${props.projectId}`,
+    });
+
+    new cdk.CfnOutput(this, 'ComputeLaunchTemplateId', {
+      value: this.computeLaunchTemplate.launchTemplateId!,
+      description: `Compute node launch template ID for project ${props.projectId}`,
     });
   }
 }

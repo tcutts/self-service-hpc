@@ -191,6 +191,9 @@ class TestProjectDeployStepHandlers:
                 "efs": "sg-efs",
                 "fsx": "sg-fsx",
             },
+            "instanceProfileArn": "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-record-node",
+            "loginLaunchTemplateId": "lt-login-proj-record",
+            "computeLaunchTemplateId": "lt-compute-proj-record",
         }
 
         result = self.deploy_mod.record_infrastructure(event)
@@ -208,6 +211,9 @@ class TestProjectDeployStepHandlers:
         assert item["securityGroupIds"]["headNode"] == "sg-head"
         assert item["securityGroupIds"]["fsx"] == "sg-fsx"
         assert item["status"] == "ACTIVE"
+        assert item["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-proj-record-node"
+        assert item["loginLaunchTemplateId"] == "lt-login-proj-record"
+        assert item["computeLaunchTemplateId"] == "lt-compute-proj-record"
 
     def test_record_infrastructure_handles_empty_fields(self):
         """Validates: Requirement 2.2 — empty infrastructure fields are stored."""
@@ -356,6 +362,9 @@ class TestProjectDeployStepHandlers:
                     {"OutputKey": "ComputeNodeSecurityGroupId", "OutputValue": "sg-compute"},
                     {"OutputKey": "EfsSecurityGroupId", "OutputValue": "sg-efs"},
                     {"OutputKey": "FsxSecurityGroupId", "OutputValue": "sg-fsx"},
+                    {"OutputKey": "InstanceProfileArn", "OutputValue": "arn:aws:iam::123456789012:instance-profile/AWSPCS-test-node"},
+                    {"OutputKey": "LoginLaunchTemplateId", "OutputValue": "lt-login-test"},
+                    {"OutputKey": "ComputeLaunchTemplateId", "OutputValue": "lt-compute-test"},
                 ],
             }]
         }
@@ -372,6 +381,10 @@ class TestProjectDeployStepHandlers:
         assert result["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert result["securityGroupIds"]["headNode"] == "sg-head"
         assert result["securityGroupIds"]["fsx"] == "sg-fsx"
+        # Verify PCS compute node group fields are extracted
+        assert result["instanceProfileArn"] == "arn:aws:iam::123456789012:instance-profile/AWSPCS-test-node"
+        assert result["loginLaunchTemplateId"] == "lt-login-test"
+        assert result["computeLaunchTemplateId"] == "lt-compute-test"
 
     def test_record_infrastructure_updates_progress_to_step_5(self):
         """Validates: Requirements 2.5, 2.6 — step 5 progress written."""

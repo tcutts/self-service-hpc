@@ -309,6 +309,10 @@ def extract_stack_outputs(event: dict[str, Any]) -> dict[str, Any]:
         s3_bucket_name,
     )
 
+    instance_profile_arn = output_map.get("InstanceProfileArn", "")
+    login_launch_template_id = output_map.get("LoginLaunchTemplateId", "")
+    compute_launch_template_id = output_map.get("ComputeLaunchTemplateId", "")
+
     return {
         **event,
         "cdkStackName": stack_name,
@@ -323,6 +327,9 @@ def extract_stack_outputs(event: dict[str, Any]) -> dict[str, Any]:
             "efs": efs_sg,
             "fsx": fsx_sg,
         },
+        "instanceProfileArn": instance_profile_arn,
+        "loginLaunchTemplateId": login_launch_template_id,
+        "computeLaunchTemplateId": compute_launch_template_id,
     }
 
 
@@ -351,7 +358,10 @@ def record_infrastructure(event: dict[str, Any]) -> dict[str, Any]:
                 "SET vpcId = :vpc, efsFileSystemId = :efs, "
                 "s3BucketName = :s3, cdkStackName = :stack, "
                 "publicSubnetIds = :pubsubs, privateSubnetIds = :privsubs, "
-                "securityGroupIds = :sgs"
+                "securityGroupIds = :sgs, "
+                "instanceProfileArn = :ipa, "
+                "loginLaunchTemplateId = :llt, "
+                "computeLaunchTemplateId = :clt"
             ),
             ExpressionAttributeValues={
                 ":vpc": event.get("vpcId", ""),
@@ -361,6 +371,9 @@ def record_infrastructure(event: dict[str, Any]) -> dict[str, Any]:
                 ":pubsubs": event.get("publicSubnetIds", []),
                 ":privsubs": event.get("privateSubnetIds", []),
                 ":sgs": event.get("securityGroupIds", {}),
+                ":ipa": event.get("instanceProfileArn", ""),
+                ":llt": event.get("loginLaunchTemplateId", ""),
+                ":clt": event.get("computeLaunchTemplateId", ""),
             },
         )
     except ClientError as exc:
