@@ -815,12 +815,15 @@ export class FoundationStack extends cdk.Stack {
       actions: [
         'iam:CreateRole',
         'iam:DeleteRole',
+        'iam:TagRole',
+        'iam:UntagRole',
         'iam:AttachRolePolicy',
         'iam:DetachRolePolicy',
         'iam:PutRolePolicy',
         'iam:DeleteRolePolicy',
         'iam:CreateInstanceProfile',
         'iam:DeleteInstanceProfile',
+        'iam:TagInstanceProfile',
         'iam:AddRoleToInstanceProfile',
         'iam:RemoveRoleFromInstanceProfile',
         'iam:PassRole',
@@ -874,6 +877,8 @@ export class FoundationStack extends cdk.Stack {
       actions: [
         'iam:CreateRole',
         'iam:DeleteRole',
+        'iam:TagRole',
+        'iam:UntagRole',
         'iam:AttachRolePolicy',
         'iam:DetachRolePolicy',
         'iam:PutRolePolicy',
@@ -924,6 +929,32 @@ export class FoundationStack extends cdk.Stack {
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
+    });
+
+    // Step 2c: Create per-cluster IAM resources (roles + instance profiles)
+    const createIamResources = new tasks.LambdaInvoke(this, 'CreateIamResources', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_iam_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2d: Wait for instance profiles to propagate
+    const waitForInstanceProfiles = new tasks.LambdaInvoke(this, 'WaitForInstanceProfiles', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'wait_for_instance_profiles',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForInstanceProfilesPropagation = new sfn.Wait(this, 'WaitForInstanceProfilesPropagation', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(10)),
     });
 
     // Step 3: Create FSx filesystem
@@ -1096,6 +1127,8 @@ export class FoundationStack extends cdk.Stack {
     validateAndRegisterName.addCatch(failureChain, catchConfig);
     checkBudgetBreach.addCatch(failureChain, catchConfig);
     resolveTemplate.addCatch(failureChain, catchConfig);
+    createIamResources.addCatch(failureChain, catchConfig);
+    waitForInstanceProfiles.addCatch(failureChain, catchConfig);
     // createFsxFilesystem, checkFsxStatus, createFsxDra, and createPcsCluster
     // are inside the ParallelFsxAndPcs state which has its own addCatch below.
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
@@ -1156,8 +1189,9 @@ export class FoundationStack extends cdk.Stack {
         'maxNodes.$': '$[0].maxNodes',
         'minNodes.$': '$[0].minNodes',
         'purchaseOption.$': '$[0].purchaseOption',
-        // PCS compute node group fields — instance profile and launch templates
-        'instanceProfileArn.$': '$[0].instanceProfileArn',
+        // PCS compute node group fields — per-cluster instance profiles and launch templates
+        'loginInstanceProfileArn.$': '$[0].loginInstanceProfileArn',
+        'computeInstanceProfileArn.$': '$[0].computeInstanceProfileArn',
         'loginLaunchTemplateId.$': '$[0].loginLaunchTemplateId',
         'computeLaunchTemplateId.$': '$[0].computeLaunchTemplateId',
       },
@@ -1167,11 +1201,22 @@ export class FoundationStack extends cdk.Stack {
     parallelFsxAndPcs.branch(fsxBranch, pcsBranch);
     parallelFsxAndPcs.addCatch(failureChain, catchConfig);
 
-    // Chain: validate → budget → resolve template → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
+    // Instance profile wait loop: check ready → if not ready, wait → check again
+    const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
+    const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
+      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), parallelFsxAndPcs)
+      .otherwise(instanceProfileWaitLoop);
+
+    // Chain: validate → budget → resolve template → create IAM resources → wait for instance profiles (loop) → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
     const creationDefinition = validateAndRegisterName
       .next(checkBudgetBreach)
       .next(resolveTemplate)
-      .next(parallelFsxAndPcs)
+      .next(createIamResources)
+      .next(waitForInstanceProfiles)
+      .next(areInstanceProfilesReady);
+
+    // Post-parallel chain (connected via the Choice "when ready" → parallelFsxAndPcs)
+    parallelFsxAndPcs
       .next(createLoginNodeGroup)
       .next(createComputeNodeGroup)
       .next(createPcsQueue)
@@ -1249,6 +1294,17 @@ export class FoundationStack extends cdk.Stack {
 
     const destructionSuccess = new sfn.Succeed(this, 'DestructionSucceeded');
 
+    // Step 5b: Delete per-cluster IAM resources (roles + instance profiles)
+    const deleteIamResources = new tasks.LambdaInvoke(this, 'DeleteIamResources', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_iam_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Export wait loop: check status → if not complete, wait → check again
     const exportWaitLoop = waitForExport.next(checkFsxExportStatus);
     const isExportComplete = new sfn.Choice(this, 'IsExportComplete')
@@ -1263,6 +1319,7 @@ export class FoundationStack extends cdk.Stack {
     // Post-export chain (connected via the Choice "when complete" branch)
     deletePcsResources
       .next(deleteFsxFilesystem)
+      .next(deleteIamResources)
       .next(recordClusterDestroyed)
       .next(destructionSuccess);
 

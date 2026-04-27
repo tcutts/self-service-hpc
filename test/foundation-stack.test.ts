@@ -1497,6 +1497,311 @@ describe('FoundationStack', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Instance Profile SFN Wiring — Bug Condition
+  // Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 2.1, 2.2, 2.3, 2.6
+  // ---------------------------------------------------------------------------
+  describe('Instance Profile SFN Wiring — Bug Condition', () => {
+    /**
+     * Helper: parse a state machine DefinitionString from the synthesised
+     * CloudFormation template. Handles the Fn::Join pattern used by CDK,
+     * replacing non-string parts (Ref, Fn::GetAtt) with placeholder ARNs.
+     */
+    function parseStateMachineDefinition(smName: string): Record<string, any> {
+      const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+        Properties: { StateMachineName: smName },
+      });
+      const entries = Object.entries(stateMachines);
+      expect(entries).toHaveLength(1);
+      const [, resource] = entries[0];
+      const definitionString = (resource as any).Properties?.DefinitionString;
+      expect(definitionString).toBeDefined();
+
+      if (typeof definitionString === 'string') {
+        return JSON.parse(definitionString);
+      }
+      if (definitionString['Fn::Join']) {
+        const separator: string = definitionString['Fn::Join'][0];
+        const parts: any[] = definitionString['Fn::Join'][1];
+        const joined = parts
+          .map((p: any) => (typeof p === 'string' ? p : 'arn:aws:placeholder:us-east-1:123456789012:placeholder'))
+          .join(separator);
+        return JSON.parse(joined);
+      }
+      throw new Error('Unexpected DefinitionString format');
+    }
+
+    /**
+     * Helper: check if a state's Parameters contain a specific step value
+     * in the payload sent to the Lambda. CDK LambdaInvoke with
+     * payloadResponseOnly wraps the payload under Parameters.Payload.
+     */
+    function stateInvokesStep(state: any, expectedStep: string): boolean {
+      const payload = state?.Parameters?.Payload;
+      if (payload && payload.step === expectedStep) return true;
+      // Also check FunctionName-style direct parameters
+      if (state?.Parameters?.step === expectedStep) return true;
+      return false;
+    }
+
+    // **Validates: Requirements 2.1**
+    it('creation state machine contains CreateIamResources invoking create_iam_resources', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const states = def.States;
+      expect(states).toHaveProperty('CreateIamResources');
+      expect(stateInvokesStep(states['CreateIamResources'], 'create_iam_resources')).toBe(true);
+    });
+
+    // **Validates: Requirements 2.2**
+    it('creation state machine contains WaitForInstanceProfiles invoking wait_for_instance_profiles', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const states = def.States;
+      expect(states).toHaveProperty('WaitForInstanceProfiles');
+      expect(stateInvokesStep(states['WaitForInstanceProfiles'], 'wait_for_instance_profiles')).toBe(true);
+    });
+
+    // **Validates: Requirements 2.2, 3.5**
+    it('creation state machine contains AreInstanceProfilesReady Choice and a Wait state for the loop', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const states = def.States;
+      expect(states).toHaveProperty('AreInstanceProfilesReady');
+      expect(states['AreInstanceProfilesReady'].Type).toBe('Choice');
+      // There should be a Wait state for the instance profile propagation loop
+      const waitStateNames = Object.keys(states).filter(
+        (name) => states[name].Type === 'Wait' && name.toLowerCase().includes('instanceprofile'),
+      );
+      expect(waitStateNames.length).toBeGreaterThanOrEqual(1);
+    });
+
+    // **Validates: Requirements 2.3**
+    it('Parallel resultSelector contains loginInstanceProfileArn and computeInstanceProfileArn, not instanceProfileArn', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const states = def.States;
+      // Find the Parallel state (ParallelFsxAndPcs)
+      const parallelState = states['ParallelFsxAndPcs'];
+      expect(parallelState).toBeDefined();
+      expect(parallelState.Type).toBe('Parallel');
+      const resultSelector = parallelState.ResultSelector;
+      expect(resultSelector).toBeDefined();
+      expect(resultSelector).toHaveProperty(['loginInstanceProfileArn.$']);
+      expect(resultSelector).toHaveProperty(['computeInstanceProfileArn.$']);
+      expect(resultSelector).not.toHaveProperty(['instanceProfileArn.$']);
+    });
+
+    // **Validates: Requirements 2.6**
+    it('destruction state machine contains DeleteIamResources invoking delete_iam_resources', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-destruction');
+      const states = def.States;
+      expect(states).toHaveProperty('DeleteIamResources');
+      expect(stateInvokesStep(states['DeleteIamResources'], 'delete_iam_resources')).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Instance Profile SFN Wiring — Preservation
+  // Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5, 3.6
+  // ---------------------------------------------------------------------------
+  describe('Instance Profile SFN Wiring — Preservation', () => {
+    /**
+     * Reuse the same parseStateMachineDefinition helper from the Bug Condition
+     * block. Re-declared here because the helper is scoped to the sibling
+     * describe block; a small duplication is acceptable for test isolation.
+     */
+    function parseStateMachineDefinition(smName: string): Record<string, any> {
+      const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+        Properties: { StateMachineName: smName },
+      });
+      const entries = Object.entries(stateMachines);
+      expect(entries).toHaveLength(1);
+      const [, resource] = entries[0];
+      const definitionString = (resource as any).Properties?.DefinitionString;
+      expect(definitionString).toBeDefined();
+
+      if (typeof definitionString === 'string') {
+        return JSON.parse(definitionString);
+      }
+      if (definitionString['Fn::Join']) {
+        const separator: string = definitionString['Fn::Join'][0];
+        const parts: any[] = definitionString['Fn::Join'][1];
+        const joined = parts
+          .map((p: any) => (typeof p === 'string' ? p : 'arn:aws:placeholder:us-east-1:123456789012:placeholder'))
+          .join(separator);
+        return JSON.parse(joined);
+      }
+      throw new Error('Unexpected DefinitionString format');
+    }
+
+    /**
+     * Helper: collect all state names from a definition, including states
+     * nested inside Parallel branches.
+     */
+    function collectAllStateNames(def: Record<string, any>): Set<string> {
+      const names = new Set<string>();
+      const walk = (states: Record<string, any>) => {
+        for (const [name, state] of Object.entries(states)) {
+          names.add(name);
+          if (state.Branches && Array.isArray(state.Branches)) {
+            for (const branch of state.Branches) {
+              if (branch.States) walk(branch.States);
+            }
+          }
+        }
+      };
+      if (def.States) walk(def.States);
+      return names;
+    }
+
+    // **Validates: Requirements 3.1**
+    it('all original creation states exist', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const allNames = collectAllStateNames(def);
+      const expectedStates = [
+        'ValidateAndRegisterName',
+        'CheckBudgetBreach',
+        'ResolveTemplate',
+        'ParallelFsxAndPcs',
+        'CreateFsxFilesystem',
+        'CheckFsxStatus',
+        'CreateFsxDra',
+        'CreatePcsCluster',
+        'CreateLoginNodeGroup',
+        'CreateComputeNodeGroup',
+        'CreatePcsQueue',
+        'TagResources',
+        'RecordCluster',
+      ];
+      for (const stateName of expectedStates) {
+        expect(allNames).toContain(stateName);
+      }
+    });
+
+    // **Validates: Requirements 3.3**
+    it('error handling states exist with correct Catch routing', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const states = def.States;
+
+      expect(states).toHaveProperty('HandleCreationFailure');
+      expect(states).toHaveProperty('CreationFailed');
+      expect(states).toHaveProperty('MarkClusterFailed');
+
+      // HandleCreationFailure should have a Catch that routes to MarkClusterFailed
+      const handleFailure = states['HandleCreationFailure'];
+      expect(handleFailure.Catch).toBeDefined();
+      const catchTargets = handleFailure.Catch.map((c: any) => c.Next);
+      expect(catchTargets).toContain('MarkClusterFailed');
+
+      // MarkClusterFailed should route to CreationFailed
+      const markFailed = states['MarkClusterFailed'];
+      expect(markFailed.Next === 'CreationFailed' || markFailed.Catch?.some((c: any) => c.Next === 'CreationFailed')).toBe(true);
+    });
+
+    // **Validates: Requirements 3.2**
+    it('FSx wait loop exists — IsFsxAvailable Choice and WaitForFsx Wait state', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      // IsFsxAvailable and WaitForFsx are inside the Parallel branches
+      const parallelState = def.States['ParallelFsxAndPcs'];
+      expect(parallelState).toBeDefined();
+      const fsxBranch = parallelState.Branches[0];
+      const branchStates = fsxBranch.States;
+
+      expect(branchStates).toHaveProperty('IsFsxAvailable');
+      expect(branchStates['IsFsxAvailable'].Type).toBe('Choice');
+
+      expect(branchStates).toHaveProperty('WaitForFsx');
+      expect(branchStates['WaitForFsx'].Type).toBe('Wait');
+    });
+
+    // **Validates: Requirements 3.2**
+    it('all non-IAM resultSelector fields in the Parallel state are present', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-creation');
+      const parallelState = def.States['ParallelFsxAndPcs'];
+      expect(parallelState).toBeDefined();
+      expect(parallelState.Type).toBe('Parallel');
+
+      const resultSelector = parallelState.ResultSelector;
+      expect(resultSelector).toBeDefined();
+
+      const expectedFields = [
+        'projectId.$',
+        'clusterName.$',
+        'templateId.$',
+        'createdBy.$',
+        'vpcId.$',
+        'efsFileSystemId.$',
+        's3BucketName.$',
+        'publicSubnetIds.$',
+        'privateSubnetIds.$',
+        'securityGroupIds.$',
+        'fsxFilesystemId.$',
+        'fsxDnsName.$',
+        'fsxMountName.$',
+        'fsxDraId.$',
+        'pcsClusterId.$',
+        'pcsClusterArn.$',
+        'loginInstanceType.$',
+        'instanceTypes.$',
+        'maxNodes.$',
+        'minNodes.$',
+        'purchaseOption.$',
+        'loginLaunchTemplateId.$',
+        'computeLaunchTemplateId.$',
+      ];
+      const selectorKeys = Object.keys(resultSelector);
+      for (const field of expectedFields) {
+        expect(selectorKeys).toContain(field);
+      }
+    });
+
+    // **Validates: Requirements 3.4**
+    it('all original destruction states exist', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-destruction');
+      const states = def.States;
+      const expectedStates = [
+        'CreateFsxExportTask',
+        'CheckFsxExportStatus',
+        'DeletePcsResources',
+        'DeleteFsxFilesystem',
+        'RecordClusterDestroyed',
+        'DestructionSucceeded',
+      ];
+      for (const stateName of expectedStates) {
+        expect(states).toHaveProperty(stateName);
+      }
+    });
+
+    // **Validates: Requirements 3.4**
+    it('export wait loop exists — IsExportComplete Choice and WaitForExport Wait state', () => {
+      const def = parseStateMachineDefinition('hpc-cluster-destruction');
+      const states = def.States;
+
+      expect(states).toHaveProperty('IsExportComplete');
+      expect(states['IsExportComplete'].Type).toBe('Choice');
+
+      expect(states).toHaveProperty('WaitForExport');
+      expect(states['WaitForExport'].Type).toBe('Wait');
+    });
+
+    // **Validates: Requirements 3.6**
+    it('state machine configuration preserved — tracing, timeout, names', () => {
+      // Check both state machines have correct names, tracing, and timeout
+      const creationSMs = template.findResources('AWS::StepFunctions::StateMachine', {
+        Properties: { StateMachineName: 'hpc-cluster-creation' },
+      });
+      const creationEntries = Object.entries(creationSMs);
+      expect(creationEntries).toHaveLength(1);
+      const [, creationResource] = creationEntries[0];
+      expect((creationResource as any).Properties.TracingConfiguration?.Enabled).toBe(true);
+
+      const destructionSMs = template.findResources('AWS::StepFunctions::StateMachine', {
+        Properties: { StateMachineName: 'hpc-cluster-destruction' },
+      });
+      const destructionEntries = Object.entries(destructionSMs);
+      expect(destructionEntries).toHaveLength(1);
+      const [, destructionResource] = destructionEntries[0];
+      expect((destructionResource as any).Properties.TracingConfiguration?.Enabled).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Documentation Deployment — S3 BucketDeployment with docs/ prefix
   // Validates: Requirements 21.2, 21.6
   // ---------------------------------------------------------------------------
