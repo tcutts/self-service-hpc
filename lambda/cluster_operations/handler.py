@@ -101,6 +101,14 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             cluster_name = path_parameters.get("clusterName", "")
             response = _handle_recreate_cluster(event, project_id, cluster_name)
 
+        elif (
+            resource == "/projects/{projectId}/clusters/{clusterName}/fail"
+            and http_method == "POST"
+        ):
+            project_id = path_parameters.get("projectId", "")
+            cluster_name = path_parameters.get("clusterName", "")
+            response = _handle_force_fail_cluster(event, project_id, cluster_name)
+
         else:
             response = _response(
                 404,
@@ -516,6 +524,70 @@ def _handle_delete_cluster(
         202,
         {
             "message": f"Cluster '{cluster_name}' destruction started.",
+            "projectId": project_id,
+            "clusterName": cluster_name,
+        },
+    )
+
+
+def _handle_force_fail_cluster(
+    event: dict[str, Any], project_id: str, cluster_name: str
+) -> dict[str, Any]:
+    """Handle POST /projects/{projectId}/clusters/{clusterName}/fail.
+
+    Allows a user to manually transition a stuck CREATING cluster to
+    FAILED status so they can take corrective action (destroy or recreate).
+    """
+    caller = get_caller_identity(event)
+    if not is_project_user(event, project_id):
+        raise AuthorisationError(
+            "You must be a project member to force-fail clusters."
+        )
+
+    # Retrieve the cluster record — raises NotFoundError if missing
+    cluster = get_cluster(
+        clusters_table_name=CLUSTERS_TABLE_NAME,
+        project_id=project_id,
+        cluster_name=cluster_name,
+    )
+
+    # Only CREATING clusters can be force-failed
+    if cluster.get("status") != "CREATING":
+        raise ConflictError(
+            f"Cluster '{cluster_name}' cannot be marked as failed in its current state "
+            f"(status: {cluster.get('status')}). Only CREATING clusters can be force-failed.",
+            {"clusterName": cluster_name, "status": cluster.get("status")},
+        )
+
+    # Update the DynamoDB record to FAILED
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    clusters_table.update_item(
+        Key={
+            "PK": f"PROJECT#{project_id}",
+            "SK": f"CLUSTER#{cluster_name}",
+        },
+        UpdateExpression=(
+            "SET #st = :status, errorMessage = :msg, updatedAt = :now"
+        ),
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={
+            ":status": "FAILED",
+            ":msg": "Manually marked as failed by user",
+            ":now": now,
+        },
+    )
+
+    logger.info(
+        "Cluster force-failed: %s in project %s by %s",
+        cluster_name,
+        project_id,
+        caller,
+    )
+    return _response(
+        200,
+        {
+            "message": f"Cluster '{cluster_name}' has been marked as failed.",
             "projectId": project_id,
             "clusterName": cluster_name,
         },

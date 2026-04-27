@@ -1412,10 +1412,15 @@ async function loadClusters(projectId) {
               const total = row.totalSteps || 10;
               const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
               const desc = row.stepDescription || 'Initialising…';
-              return `<div class="progress-container compact">
+              const isStale = row.createdAt && (Date.now() - new Date(row.createdAt).getTime()) > CONFIG.clusterCreationTimeoutMs;
+              let html = `<div class="progress-container compact">
                 <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
                 <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
               </div>`;
+              if (isStale) {
+                html += `<span class="badge badge-stale-warning" role="alert">Creation may have failed</span>`;
+              }
+              return html;
             } else if (row.status === 'FAILED') {
               return `<span style="color:var(--color-danger);font-size:0.8rem">${esc(row.errorMessage || 'Unknown error')}</span>`;
             }
@@ -1429,6 +1434,8 @@ async function loadClusters(projectId) {
               return `<button class="btn btn-danger btn-sm" onclick="destroyCluster('${esc(projectId)}','${esc(row.clusterName)}')">Destroy</button>`;
             } else if (row.status === 'DESTROYED' && !budgetBreached) {
               return `<button class="btn btn-primary btn-sm" onclick="recreateCluster('${esc(projectId)}','${esc(row.clusterName)}')">Recreate</button>`;
+            } else if (row.status === 'CREATING' && row.createdAt && (Date.now() - new Date(row.createdAt).getTime()) > CONFIG.clusterCreationTimeoutMs) {
+              return `<button class="btn btn-warning btn-sm" onclick="forceFailCluster('${esc(projectId)}','${esc(row.clusterName)}')">Mark as Failed</button>`;
             }
             return '';
           },
@@ -1509,6 +1516,22 @@ async function recreateCluster(projectId, clusterName) {
   } catch (e) { showToast(e.message, 'error'); }
 }
 
+async function forceFailCluster(projectId, clusterName) {
+  if (!confirm(`Mark cluster '${clusterName}' as failed? This indicates the creation workflow has stopped and the cluster cannot recover.`)) return;
+  try {
+    await apiCall('POST',
+      `/projects/${encodeURIComponent(projectId)}/clusters/${encodeURIComponent(clusterName)}/fail`
+    );
+    showToast(`Cluster '${clusterName}' marked as FAILED`);
+    // Refresh whichever view is active
+    if (state.currentPage === 'cluster-detail') {
+      loadClusterDetail(projectId, clusterName);
+    } else {
+      loadClusters(projectId);
+    }
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
 
 /* ============================================================
    Cluster Detail Page
@@ -1576,6 +1599,7 @@ async function loadClusterDetail(projectId, clusterName) {
       const total = progress.totalSteps || 10;
       const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
       const desc = progress.stepDescription || 'Initialising…';
+      const isStale = cluster.createdAt && (Date.now() - new Date(cluster.createdAt).getTime()) > CONFIG.clusterCreationTimeoutMs;
 
       html += `<div class="info-box">
         <h4>Deployment Progress</h4>
@@ -1587,6 +1611,14 @@ async function loadClusterDetail(projectId, clusterName) {
           This page refreshes automatically. You can navigate away and return to check progress.
         </p>
       </div>`;
+
+      if (isStale) {
+        html += `<div class="warning-box" role="alert">
+          <h4>⚠ Creation may have failed</h4>
+          <p>This cluster has been in CREATING status for longer than expected. The backend workflow may have stopped.</p>
+          <button class="btn btn-warning" onclick="forceFailCluster('${esc(projectId)}','${esc(clusterName)}')">Mark as Failed</button>
+        </div>`;
+      }
 
       // Start polling for this cluster
       startClusterDetailPolling(projectId, clusterName);

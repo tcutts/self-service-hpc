@@ -261,6 +261,13 @@ tr:last-child td {
 .badge-destroying { background: #fff3cd; color: #856404; }
 .badge-destroyed  { background: #e2e3e5; color: var(--color-text-muted); }
 .badge-inactive   { background: #e2e3e5; color: var(--color-text-muted); }
+.badge-stale-warning {
+  background: #fff3cd;
+  color: #856404;
+  border: 1px solid #ffc107;
+  margin-top: 0.35rem;
+  display: inline-block;
+}
 
 /* ---- Progress Bar ---- */
 
@@ -340,6 +347,24 @@ tr:last-child td {
   padding: 1rem;
   margin: 0.75rem 0;
   color: var(--color-primary-dark);
+}
+
+.warning-box {
+  background: #fff3cd;
+  border: 1px solid #ffc107;
+  border-radius: var(--radius);
+  padding: 1rem;
+  margin: 0.75rem 0;
+  color: #856404;
+}
+
+.btn-warning {
+  background: #ffc107;
+  color: #212529;
+  border: 1px solid #e0a800;
+}
+.btn-warning:hover {
+  background: #e0a800;
 }
 
 /* ---- Notification Toast ---- */

@@ -50,6 +50,7 @@ dynamodb = boto3.resource("dynamodb")
 fsx_client = boto3.client("fsx")
 iam_client = boto3.client("iam")
 pcs_client = boto3.client("pcs")
+sfn_client = boto3.client("stepfunctions")
 tagging_client = boto3.client("resourcegroupstaggingapi")
 sns_client = boto3.client("sns")
 
@@ -1484,6 +1485,125 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
         "maxNodes": 10,
         "minNodes": 0,
         "purchaseOption": "ONDEMAND",
+    }
+
+
+# ===================================================================
+# EventBridge handler — mark cluster FAILED on execution termination
+# ===================================================================
+
+def mark_cluster_failed_from_event(event: dict[str, Any], context: Any = None) -> dict[str, Any]:
+    """Handle EventBridge Step Functions execution status change events.
+
+    Extracts the execution ARN from the event, describes the execution
+    to retrieve the input payload, and transitions the cluster record
+    to FAILED status if it is still in CREATING (idempotency guard).
+
+    Expected event structure (EventBridge detail)::
+
+        {
+            "source": "aws.states",
+            "detail-type": "Step Functions Execution Status Change",
+            "detail": {
+                "executionArn": "arn:aws:states:...",
+                "stateMachineArn": "arn:aws:states:...",
+                "status": "TIMED_OUT" | "FAILED" | "ABORTED"
+            }
+        }
+    """
+    detail = event.get("detail", {})
+    execution_arn = detail.get("executionArn", "")
+    execution_status = detail.get("status", "")
+
+    if not execution_arn:
+        logger.error("EventBridge event missing executionArn in detail")
+        return {"status": "error", "message": "Missing executionArn"}
+
+    logger.info(
+        "Processing execution termination event: %s (status: %s)",
+        execution_arn,
+        execution_status,
+    )
+
+    # Describe the execution to get the input payload
+    try:
+        response = sfn_client.describe_execution(executionArn=execution_arn)
+    except ClientError as exc:
+        logger.error("Failed to describe execution '%s': %s", execution_arn, exc)
+        return {"status": "error", "message": f"Failed to describe execution: {exc}"}
+
+    input_str = response.get("input", "{}")
+    try:
+        payload = json.loads(input_str)
+    except (json.JSONDecodeError, TypeError):
+        logger.error("Failed to parse execution input as JSON: %s", input_str[:200])
+        return {"status": "error", "message": "Invalid execution input JSON"}
+
+    project_id = payload.get("projectId", "")
+    cluster_name = payload.get("clusterName", "")
+
+    if not project_id or not cluster_name:
+        logger.error(
+            "Execution input missing projectId or clusterName: %s",
+            input_str[:200],
+        )
+        return {"status": "error", "message": "Missing projectId or clusterName in execution input"}
+
+    # Idempotency guard: only update if the cluster is still in CREATING status
+    table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    try:
+        get_response = table.get_item(
+            Key={
+                "PK": f"PROJECT#{project_id}",
+                "SK": f"CLUSTER#{cluster_name}",
+            },
+            ConsistentRead=True,
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed to read cluster record for '%s/%s': %s",
+            project_id,
+            cluster_name,
+            exc,
+        )
+        return {"status": "error", "message": f"Failed to read cluster record: {exc}"}
+
+    item = get_response.get("Item")
+    if not item:
+        logger.warning(
+            "Cluster record not found for '%s/%s' — nothing to update",
+            project_id,
+            cluster_name,
+        )
+        return {"status": "skipped", "message": "Cluster record not found"}
+
+    current_status = item.get("status", "")
+    if current_status != "CREATING":
+        logger.info(
+            "Cluster '%s/%s' is already in '%s' status — skipping update",
+            project_id,
+            cluster_name,
+            current_status,
+        )
+        return {"status": "skipped", "message": f"Cluster already in {current_status} status"}
+
+    # Transition to FAILED
+    error_message = (
+        f"Cluster creation failed — Step Functions execution {execution_status.lower()}"
+    )
+    _record_failed_cluster(project_id, cluster_name, error_message)
+
+    logger.info(
+        "Cluster '%s/%s' marked as FAILED due to execution %s",
+        project_id,
+        cluster_name,
+        execution_status,
+    )
+    return {
+        "status": "updated",
+        "projectId": project_id,
+        "clusterName": cluster_name,
+        "newStatus": "FAILED",
     }
 
 

@@ -294,6 +294,44 @@ Home directories (EFS) and project storage (S3) are **preserved** across destruc
 | Project budget breached | `BUDGET_EXCEEDED` | 403 |
 | Caller is not a project member | `AUTHORISATION_ERROR` | 403 |
 
+## Stuck Cluster Recovery
+
+In rare cases, a cluster can become stuck in `CREATING` status if the backend creation workflow terminates unexpectedly — for example, if the rollback handler encounters an error or the workflow exceeds its 2-hour timeout. The platform includes multiple layers of automatic and manual recovery to handle these situations.
+
+### Automatic Detection
+
+The system uses two mechanisms to automatically detect and recover stuck clusters:
+
+1. **Last-resort DynamoDB update**: If the creation workflow fails and the rollback handler itself encounters an error, a direct DynamoDB SDK call (not a Lambda function) marks the cluster record as `FAILED` with an error message before the workflow terminates. This ensures the cluster record is updated even when the rollback code path fails.
+
+2. **EventBridge timeout detection**: An EventBridge rule monitors the cluster creation Step Functions state machine for terminal execution states (timed out, failed, or aborted). When detected, a Lambda handler reads the execution input to identify the cluster, checks whether the record is still in `CREATING` status, and transitions it to `FAILED`. This covers the case where the workflow times out after 2 hours without any handler running.
+
+In most cases, one of these mechanisms will automatically transition a stuck cluster to `FAILED` status without any user intervention.
+
+### Staleness Warning in the UI
+
+If a cluster has been in `CREATING` status for more than 2.5 hours (slightly longer than the 2-hour workflow timeout), the web portal displays a warning badge indicating that creation may have failed. This serves as a visual indicator that the backend workflow has likely stopped, even if the automatic recovery mechanisms have not yet updated the record.
+
+The warning does not stop the normal status polling — if the cluster transitions to `ACTIVE` or `FAILED` in the background, the UI will update accordingly.
+
+### Manually Marking a Cluster as Failed
+
+When the staleness warning appears, a **Mark as Failed** button is shown next to the cluster. Clicking this button sends a request to the force-fail API endpoint:
+
+**Endpoint:** `POST /projects/{projectId}/clusters/{clusterName}/fail`
+**Required role:** Project User or Project Administrator
+
+This endpoint transitions the cluster from `CREATING` to `FAILED` status. It only works on clusters currently in `CREATING` status — clusters in any other status are rejected.
+
+### After Marking as Failed
+
+Once a cluster is in `FAILED` status (whether via automatic detection or manual action), you can take the same corrective actions as any other failed cluster:
+
+- **Destroy** the cluster to clean up any partially created resources
+- **Recreate** the cluster to start a fresh creation workflow
+
+See [Destroying a Cluster](#destroying-a-cluster) and [Recreating a Cluster](#recreating-a-cluster) for details.
+
 ## Per-Cluster IAM Roles and Instance Profiles
 
 Each cluster is provisioned with its own dedicated IAM roles and instance profiles, created automatically during cluster creation and cleaned up during cluster destruction:

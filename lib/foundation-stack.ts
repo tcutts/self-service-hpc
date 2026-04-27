@@ -1045,17 +1045,53 @@ export class FoundationStack extends cdk.Stack {
       error: 'ClusterCreationError',
     });
 
+    // Last-resort DynamoDB UpdateItem task: when the rollback handler
+    // itself fails, this direct SDK call marks the cluster as FAILED
+    // so the record never stays stuck in CREATING.  Because it is a
+    // native SDK integration (not a Lambda), it has minimal failure
+    // surface.
+    const markClusterFailed = new tasks.CallAwsService(this, 'MarkClusterFailed', {
+      service: 'dynamodb',
+      action: 'updateItem',
+      parameters: {
+        TableName: this.clustersTable.tableName,
+        Key: {
+          PK: { S: sfn.JsonPath.format('PROJECT#{}', sfn.JsonPath.stringAt('$.projectId')) },
+          SK: { S: sfn.JsonPath.format('CLUSTER#{}', sfn.JsonPath.stringAt('$.clusterName')) },
+        },
+        UpdateExpression: 'SET #s = :status, #err = :errorMsg, #ua = :updatedAt',
+        ExpressionAttributeNames: {
+          '#s': 'status',
+          '#err': 'errorMessage',
+          '#ua': 'updatedAt',
+        },
+        ExpressionAttributeValues: {
+          ':status': { S: 'FAILED' },
+          ':errorMsg': { S: 'Cluster creation failed \u2014 rollback handler encountered an error' },
+          ':updatedAt': { S: sfn.JsonPath.stringAt('$$.State.EnteredTime') },
+        },
+      },
+      iamResources: [this.clustersTable.tableArn],
+      resultPath: '$.markFailedResult',
+    });
+
+    // If the MarkClusterFailed SDK call itself fails (e.g. transient
+    // DynamoDB error), proceed to the Fail state anyway — this is
+    // best-effort.
+    markClusterFailed.addCatch(creationFailed, { resultPath: '$.error' });
+    markClusterFailed.next(creationFailed);
+
     const creationSuccess = new sfn.Succeed(this, 'CreationSucceeded');
 
     // Add catch to all steps for rollback
     const catchConfig: sfn.CatchProps = { resultPath: '$.error' };
     const failureChain = handleCreationFailure.next(creationFailed);
 
-    // If the rollback handler itself fails, go directly to the Fail
-    // state.  The initial CREATING record (written by the API handler)
-    // will remain, but the Step Functions execution will be in FAILED
-    // status so operators can investigate.
-    handleCreationFailure.addCatch(creationFailed, { resultPath: '$.error' });
+    // If the rollback handler itself fails, route through
+    // MarkClusterFailed to update DynamoDB before reaching the Fail
+    // state.  This ensures the cluster record is set to FAILED even
+    // when the Lambda-based rollback handler throws.
+    handleCreationFailure.addCatch(markClusterFailed, { resultPath: '$.error' });
 
     validateAndRegisterName.addCatch(failureChain, catchConfig);
     checkBudgetBreach.addCatch(failureChain, catchConfig);
@@ -2001,6 +2037,9 @@ export class FoundationStack extends cdk.Stack {
     // POST /projects/{projectId}/clusters/{clusterName}/recreate — recreate destroyed cluster
     const recreateResource = clusterNameResource.addResource('recreate');
     recreateResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/clusters/{clusterName}/fail — force-fail stuck cluster
+    const failResource = clusterNameResource.addResource('fail');
+    failResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
 
     // ---------------------------------------------------------------
     // Accounting Query Lambda Function
@@ -2125,6 +2164,63 @@ export class FoundationStack extends cdk.Stack {
 
     this.fsxCleanupScheduleRule.addTarget(
       new eventsTargets.LambdaFunction(this.fsxCleanupLambda),
+    );
+
+    // ---------------------------------------------------------------
+    // Cluster Creation Failure Handler — EventBridge + Lambda
+    // Detects timed-out, failed, or aborted Step Functions executions
+    // for the cluster creation state machine and marks the cluster
+    // record as FAILED in DynamoDB.
+    // ---------------------------------------------------------------
+    const clusterCreationFailureHandler = new lambda.Function(this, 'ClusterCreationFailureHandler', {
+      functionName: 'hpc-cluster-creation-failure-handler',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'cluster_creation.mark_cluster_failed_from_event',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'cluster_operations')),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: this.clustersTable.tableName,
+      },
+      description: 'Handles Step Functions execution termination events to mark stuck clusters as FAILED',
+    });
+
+    // Grant DynamoDB read/write on the Clusters table
+    this.clustersTable.grantReadWriteData(clusterCreationFailureHandler);
+
+    // Grant states:DescribeExecution on the cluster creation state machine
+    // Execution ARNs use the format arn:aws:states:region:account:execution:smName:execName
+    // so we need to construct the resource ARN from the state machine ARN.
+    clusterCreationFailureHandler.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['states:DescribeExecution'],
+      resources: [
+        cdk.Arn.format({
+          service: 'states',
+          resource: 'execution',
+          resourceName: `${this.clusterCreationStateMachine.stateMachineName}:*`,
+          arnFormat: cdk.ArnFormat.COLON_RESOURCE_NAME,
+        }, this),
+      ],
+    }));
+
+    // EventBridge rule matching Step Functions execution status changes
+    // for the cluster creation state machine
+    const clusterCreationFailureRule = new events.Rule(this, 'ClusterCreationFailureRule', {
+      ruleName: 'hpc-cluster-creation-failure',
+      description: 'Detects timed-out, failed, or aborted cluster creation executions',
+      eventPattern: {
+        source: ['aws.states'],
+        detailType: ['Step Functions Execution Status Change'],
+        detail: {
+          stateMachineArn: [this.clusterCreationStateMachine.stateMachineArn],
+          status: ['TIMED_OUT', 'FAILED', 'ABORTED'],
+        },
+      },
+    });
+
+    clusterCreationFailureRule.addTarget(
+      new eventsTargets.LambdaFunction(clusterCreationFailureHandler),
     );
 
     // ---------------------------------------------------------------
