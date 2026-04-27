@@ -1005,6 +1005,21 @@ export class FoundationStack extends cdk.Stack {
       resultPath: '$',
     });
 
+    // Step 5b: Check PCS cluster status (with wait loop)
+    const checkPcsClusterStatus = new tasks.LambdaInvoke(this, 'CheckPcsClusterStatus', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_pcs_cluster_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForPcsCluster = new sfn.Wait(this, 'WaitForPcsCluster', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
     // Step 6: Create login node group
     const createLoginNodeGroup = new tasks.LambdaInvoke(this, 'CreateLoginNodeGroup', {
       lambdaFunction: clusterCreationStepLambda,
@@ -1143,6 +1158,12 @@ export class FoundationStack extends cdk.Stack {
       .when(sfn.Condition.booleanEquals('$.fsxAvailable', true), createFsxDra)
       .otherwise(fsxWaitLoop);
 
+    // PCS cluster wait loop: check status → if not active, wait → check again
+    const pcsWaitLoop = waitForPcsCluster.next(checkPcsClusterStatus);
+    const isPcsClusterActive = new sfn.Choice(this, 'IsPcsClusterActive')
+      .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), new sfn.Pass(this, 'PcsClusterReady'))
+      .otherwise(pcsWaitLoop);
+
     // --- Parallel execution: FSx branch and PCS branch run concurrently ---
 
     // FSx branch: create filesystem → wait for available → create DRA
@@ -1150,8 +1171,10 @@ export class FoundationStack extends cdk.Stack {
       .next(checkFsxStatus)
       .next(isFsxAvailable);
 
-    // PCS branch: create cluster (runs independently of FSx)
-    const pcsBranch = createPcsCluster;
+    // PCS branch: create cluster → wait for active
+    const pcsBranch = createPcsCluster
+      .next(checkPcsClusterStatus)
+      .next(isPcsClusterActive);
 
     // Parallel state runs both branches concurrently.
     // Each branch receives the full state as input.

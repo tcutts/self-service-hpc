@@ -795,6 +795,73 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step 7b — Check PCS cluster status
+# ===================================================================
+
+_PCS_TERMINAL_FAILURE_STATES = {"CREATE_FAILED", "DELETE_IN_PROGRESS", "DELETED"}
+
+_PCS_MAX_POLL_ATTEMPTS = 40  # 40 × 30s wait = 20 minutes max
+
+
+def check_pcs_cluster_status(event: dict[str, Any]) -> dict[str, Any]:
+    """Poll PCS cluster status.
+
+    Returns the event with an added ``pcsClusterActive`` boolean.
+    Step Functions uses this to decide whether to wait and retry.
+
+    Raises ``InternalError`` if the cluster enters a terminal failure
+    state or if the maximum number of poll attempts is exceeded.
+    """
+    pcs_cluster_id: str = event["pcsClusterId"]
+    cluster_name: str = event.get("clusterName", "")
+    project_id: str = event.get("projectId", "")
+
+    # Track poll attempts to prevent infinite wait loops
+    poll_count: int = event.get("pcsPollCount", 0) + 1
+
+    try:
+        response = pcs_client.get_cluster(clusterIdentifier=pcs_cluster_id)
+    except ClientError as exc:
+        raise InternalError(f"Failed to describe PCS cluster '{pcs_cluster_id}': {exc}")
+
+    cluster_info = response.get("cluster", {})
+    status = cluster_info.get("status", "UNKNOWN")
+
+    logger.info(
+        "PCS cluster '%s' (%s) status: %s (poll %d/%d)",
+        cluster_name,
+        pcs_cluster_id,
+        status,
+        poll_count,
+        _PCS_MAX_POLL_ATTEMPTS,
+    )
+
+    # Fail fast on terminal error states
+    if status in _PCS_TERMINAL_FAILURE_STATES:
+        error_details = ""
+        for error in cluster_info.get("errors", []):
+            error_details += f" {error.get('code', '')}: {error.get('message', '')}"
+        raise InternalError(
+            f"PCS cluster '{pcs_cluster_id}' entered terminal state '{status}'.{error_details} "
+            "Cluster creation cannot proceed."
+        )
+
+    # Fail if we've exceeded the maximum number of poll attempts
+    if poll_count >= _PCS_MAX_POLL_ATTEMPTS and status != "ACTIVE":
+        raise InternalError(
+            f"PCS cluster '{pcs_cluster_id}' did not become active after "
+            f"{poll_count} attempts (status: {status}). "
+            "Cluster creation timed out waiting for PCS."
+        )
+
+    return {
+        **event,
+        "pcsClusterActive": status == "ACTIVE",
+        "pcsPollCount": poll_count,
+    }
+
+
+# ===================================================================
 # Step 8 — Create login node compute node group
 # ===================================================================
 
@@ -1620,6 +1687,7 @@ _STEP_DISPATCH.update({
     "check_fsx_status": check_fsx_status,
     "create_fsx_dra": create_fsx_dra,
     "create_pcs_cluster": create_pcs_cluster,
+    "check_pcs_cluster_status": check_pcs_cluster_status,
     "create_login_node_group": create_login_node_group,
     "create_compute_node_group": create_compute_node_group,
     "create_pcs_queue": create_pcs_queue,
