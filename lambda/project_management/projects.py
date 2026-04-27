@@ -162,6 +162,21 @@ def _get_active_clusters(
     ]
 
 
+def get_foundation_timestamp(table_name: str) -> str | None:
+    """Read the foundation stack timestamp from the Projects table.
+
+    Returns the timestamp string, or None if the record does not exist.
+    """
+    table = dynamodb.Table(table_name)
+    response = table.get_item(
+        Key={"PK": "PLATFORM", "SK": "FOUNDATION_TIMESTAMP"},
+    )
+    item = response.get("Item")
+    if item is None:
+        return None
+    return item.get("timestamp")
+
+
 def _sanitise_record(item: dict[str, Any]) -> dict[str, Any]:
     """Remove DynamoDB key attributes from a project record for API response."""
     return {k: v for k, v in item.items() if k not in ("PK", "SK")}

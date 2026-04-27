@@ -64,6 +64,8 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/templates/{templateId}" and http_method == "PUT":
             template_id = path_parameters.get("templateId", "")
             response = _handle_update_template(event, template_id)
+        elif resource == "/templates/batch/delete" and http_method == "POST":
+            response = _handle_batch_delete(event)
         elif resource == "/templates/default-ami" and http_method == "GET":
             response = _handle_default_ami(event)
         else:
@@ -219,6 +221,63 @@ def _handle_default_ami(event: dict[str, Any]) -> dict[str, Any]:
 
     ami = get_latest_pcs_ami(arch)
     return _response(200, ami)
+
+
+def _validate_batch_request(event: dict[str, Any], id_field: str) -> list[str]:
+    """Validate a batch request: check admin auth, parse body, validate ID array.
+
+    Returns the list of IDs on success. Raises ValidationError on failure.
+    """
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can perform batch operations.")
+
+    body = _parse_body(event)
+    ids = body.get(id_field)
+
+    if not isinstance(ids, list) or len(ids) == 0:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+    if len(ids) > 25:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+
+    return ids
+
+
+def _build_batch_response(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a BatchResult response from a list of per-item results."""
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    failed = len(results) - succeeded
+    return _response(200, {
+        "results": results,
+        "summary": {
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+    })
+
+
+def _handle_batch_delete(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /templates/batch/delete — batch delete multiple templates."""
+    template_ids = _validate_batch_request(event, "templateIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for tid in template_ids:
+        try:
+            delete_template(table_name=TEMPLATES_TABLE_NAME, template_id=tid)
+            logger.info("Batch delete succeeded for template '%s' by %s", tid, caller)
+            results.append({"id": tid, "status": "success", "message": "Template deleted"})
+        except ApiError as exc:
+            logger.warning("Batch delete failed for template '%s': %s", tid, str(exc))
+            results.append({"id": tid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
 
 
 def _parse_body(event: dict[str, Any]) -> dict[str, Any]:

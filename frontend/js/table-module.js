@@ -50,6 +50,7 @@
         sortColumn: null,
         sortDirection: 'asc',
         filterText: '',
+        selectedIds: new Set(),
       };
     }
     return tableStates[tableId];
@@ -198,8 +199,21 @@
 
   /**
    * Build the table header row HTML.
+   * When config.selectable is true, prepends a select-all checkbox column.
    */
-  function buildThead(columns, tableState) {
+  function buildThead(columns, tableState, config, visibleRows) {
+    var selectAllTh = '';
+    if (config && config.selectable && config.rowId) {
+      var allSelected = visibleRows && visibleRows.length > 0 && visibleRows.every(function (row) {
+        return tableState.selectedIds.has(String(row[config.rowId]));
+      });
+      selectAllTh = '<th role="columnheader" aria-sort="none">'
+        + '<input type="checkbox" class="select-all-checkbox" aria-label="Select all rows"'
+        + (allSelected ? ' checked' : '')
+        + ' />'
+        + '</th>';
+    }
+
     var ths = columns.map(function (col) {
       var sortable = col.sortable !== false;
       var ariaSortVal = 'none';
@@ -223,16 +237,32 @@
       return '<th' + attrs + '>' + esc(col.label) + indicator + '</th>';
     }).join('');
 
-    return '<thead><tr>' + ths + '</tr></thead>';
+    return '<thead><tr>' + selectAllTh + ths + '</tr></thead>';
   }
 
   /**
    * Build the table body HTML from processed (sorted + filtered) rows.
+   * When config.selectable is true, prepends a checkbox column to each row.
    */
-  function buildTbody(columns, rows) {
+  function buildTbody(columns, rows, config, tableState) {
     if (rows.length === 0) return '<tbody></tbody>';
 
+    var selectable = config && config.selectable && config.rowId;
+
     var trs = rows.map(function (row) {
+      var checkboxTd = '';
+      if (selectable) {
+        var rowIdValue = String(row[config.rowId]);
+        var isChecked = tableState.selectedIds.has(rowIdValue);
+        checkboxTd = '<td>'
+          + '<input type="checkbox" class="row-select-checkbox"'
+          + ' data-row-id="' + esc(rowIdValue) + '"'
+          + ' aria-label="Select ' + esc(config.rowId) + ' ' + esc(rowIdValue) + '"'
+          + (isChecked ? ' checked' : '')
+          + ' />'
+          + '</td>';
+      }
+
       var tds = columns.map(function (col) {
         if (col.render) {
           return '<td>' + col.render(row) + '</td>';
@@ -240,7 +270,7 @@
         var val = row[col.key];
         return '<td>' + esc(val == null ? '' : String(val)) + '</td>';
       }).join('');
-      return '<tr>' + tds + '</tr>';
+      return '<tr>' + checkboxTd + tds + '</tr>';
     }).join('');
 
     return '<tbody>' + trs + '</tbody>';
@@ -287,24 +317,26 @@
     if (table) {
       var oldTbody = table.querySelector('tbody');
       var temp = document.createElement('table');
-      temp.innerHTML = buildTbody(columns, processedRows);
+      temp.innerHTML = buildTbody(columns, processedRows, config, tableState);
       var newTbody = temp.querySelector('tbody');
       if (oldTbody && newTbody) {
         table.replaceChild(newTbody, oldTbody);
       }
     }
 
-    // Update thead (for sort indicators and aria-sort)
+    // Update thead (for sort indicators, aria-sort, and select-all checkbox state)
     if (table) {
       var oldThead = table.querySelector('thead');
       var tempHead = document.createElement('table');
-      tempHead.innerHTML = buildThead(columns, tableState);
+      tempHead.innerHTML = buildThead(columns, tableState, config, processedRows);
       var newThead = tempHead.querySelector('thead');
       if (oldThead && newThead) {
         table.replaceChild(newThead, oldThead);
       }
       // Re-attach sort event handlers on new thead
       attachSortHandlers(table, tableId, config, data, container);
+      // Re-attach selection event handlers
+      attachSelectionHandlers(table, tableId, config, data, container);
     }
 
     // Update no-match message
@@ -358,6 +390,71 @@
     }
   }
 
+  /**
+   * Attach selection event handlers for select-all and individual row checkboxes.
+   * Only attaches when config.selectable is true and config.rowId is set.
+   */
+  function attachSelectionHandlers(table, tableId, config, data, container) {
+    if (!config || !config.selectable || !config.rowId) return;
+
+    var tableState = getState(tableId);
+    var columns = config.columns || [];
+
+    // Select-all checkbox handler
+    var selectAllCb = table.querySelector('.select-all-checkbox');
+    if (selectAllCb) {
+      selectAllCb.addEventListener('change', function () {
+        var visibleRows = processData(data, columns, tableState);
+        if (selectAllCb.checked) {
+          // Add all visible row IDs to selectedIds
+          visibleRows.forEach(function (row) {
+            tableState.selectedIds.add(String(row[config.rowId]));
+          });
+        } else {
+          // Remove all visible row IDs from selectedIds
+          visibleRows.forEach(function (row) {
+            tableState.selectedIds.delete(String(row[config.rowId]));
+          });
+        }
+        // Update row checkboxes to match
+        var rowCbs = table.querySelectorAll('.row-select-checkbox');
+        for (var i = 0; i < rowCbs.length; i++) {
+          rowCbs[i].checked = tableState.selectedIds.has(rowCbs[i].getAttribute('data-row-id'));
+        }
+        if (config.onSelectionChange) {
+          config.onSelectionChange(Array.from(tableState.selectedIds));
+        }
+      });
+    }
+
+    // Individual row checkbox handlers
+    var rowCbs = table.querySelectorAll('.row-select-checkbox');
+    for (var i = 0; i < rowCbs.length; i++) {
+      (function (cb) {
+        cb.addEventListener('change', function () {
+          var rowId = cb.getAttribute('data-row-id');
+          if (cb.checked) {
+            tableState.selectedIds.add(rowId);
+          } else {
+            tableState.selectedIds.delete(rowId);
+          }
+          // Update select-all checkbox state
+          var visibleRows = processData(data, columns, tableState);
+          var allVisibleSelected = visibleRows.length > 0 && visibleRows.every(function (row) {
+            return tableState.selectedIds.has(String(row[config.rowId]));
+          });
+          var selectAll = table.querySelector('.select-all-checkbox');
+          if (selectAll) {
+            selectAll.checked = allVisibleSelected;
+          }
+          if (config.onSelectionChange) {
+            config.onSelectionChange(Array.from(tableState.selectedIds));
+          }
+        });
+      })(rowCbs[i]);
+    }
+  }
+
   /* ==========================================================
      Public API
      ========================================================== */
@@ -403,8 +500,8 @@
       + '</div>';
 
     // Build table
-    var theadHtml = buildThead(columns, tableState);
-    var tbodyHtml = buildTbody(columns, processedRows);
+    var theadHtml = buildThead(columns, tableState, config, processedRows);
+    var tbodyHtml = buildTbody(columns, processedRows, config, tableState);
     var tableHtml = '<table>' + theadHtml + tbodyHtml + '</table>';
 
     // Build scroll container
@@ -429,6 +526,7 @@
     var tableEl = container.querySelector('table');
     if (tableEl) {
       attachSortHandlers(tableEl, tableId, config, data, container);
+      attachSelectionHandlers(tableEl, tableId, config, data, container);
     }
 
     // Attach filter handler
@@ -481,6 +579,26 @@
     tableStates = {};
   }
 
+  /**
+   * Get the currently selected row IDs for a given table.
+   * @param {string} tableId
+   * @returns {string[]}
+   */
+  function getSelectedIds(tableId) {
+    var state = getState(tableId);
+    return Array.from(state.selectedIds);
+  }
+
+  /**
+   * Clear the selection for a given table: empties the selectedIds Set
+   * and unchecks all checkboxes in the DOM.
+   * @param {string} tableId
+   */
+  function clearSelection(tableId) {
+    var state = getState(tableId);
+    state.selectedIds = new Set();
+  }
+
   /* ==========================================================
      Export
      ========================================================== */
@@ -497,6 +615,9 @@
     calcMaxHeight: calcMaxHeight,
     debounce: debounce,
     esc: esc,
+    buildThead: buildThead,
+    buildTbody: buildTbody,
+    attachSelectionHandlers: attachSelectionHandlers,
   };
 
   // Use a getter so tests always see the current tableStates reference
@@ -510,6 +631,8 @@
     render: render,
     clearState: clearState,
     clearAllState: clearAllState,
+    getSelectedIds: getSelectedIds,
+    clearSelection: clearSelection,
     _internals: _internals,
   };
 

@@ -123,6 +123,12 @@ def deactivate_user(
 
     user_record = response["Item"]
 
+    # Validate user is currently ACTIVE
+    if user_record.get("status") != "ACTIVE":
+        raise ValidationError(
+            f"User '{user_id}' is already inactive.", {"userId": user_id}
+        )
+
     # Update DynamoDB status
     table.update_item(
         Key={"PK": f"USER#{user_id}", "SK": "PROFILE"},

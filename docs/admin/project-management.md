@@ -455,6 +455,54 @@ All project resources are tagged with `Project={costAllocationTag}`. This tag is
 - Applied to all clusters and their resources created within the project
 - Enabled in AWS Cost Explorer for cost reporting and attribution
 
+## Bulk Project Actions
+
+Administrators can select multiple projects and perform operations on all of them at once, rather than acting on each project individually.
+
+### Selecting Projects
+
+The Projects table includes a checkbox column. Use the checkboxes to select individual projects, or click the "Select all" checkbox in the column header to select all visible projects (respecting any active filter). Selections are preserved when you change the filter text — projects that become hidden remain selected.
+
+When one or more projects are selected, a bulk action toolbar appears above the table showing the number of selected items and the available actions.
+
+### Available Bulk Actions
+
+| Button | Action | Eligible Projects |
+|--------|--------|-------------------|
+| Deploy All | Starts infrastructure deployment for all selected projects | Projects in `CREATED` status |
+| Update All | Starts infrastructure update for all selected projects | Stale projects in `ACTIVE` status (see [Staleness Detection](#staleness-detection) below) |
+| Destroy All | Starts infrastructure teardown for all selected projects | Projects in `ACTIVE` status with no active or creating clusters |
+| Clear Selection | Deselects all projects and hides the toolbar | — |
+
+Each bulk action sends a single batch request to the API. The backend processes each project sequentially and returns per-item results. Projects that are not in the required status or otherwise ineligible receive an error entry in the result — they do not block the remaining projects from being processed.
+
+### Confirmation Dialogs
+
+Destroy All requires you to type **CONFIRM** in a confirmation dialog before proceeding. This prevents accidental destruction of project infrastructure.
+
+### Result Summary
+
+After a bulk action completes, a toast notification displays a summary: "X of Y succeeded, Z failed". If any items failed, the toast uses an error style. On network errors, the selection is preserved so you can retry.
+
+### Progress Tracking
+
+After a bulk operation, each project that transitioned to a new status (DEPLOYING, UPDATING, or DESTROYING) displays its own independent progress bar. The portal polls for updates automatically, and each project's progress advances at its own pace.
+
+### Batch Size Limit
+
+Each bulk action can process up to 25 projects at a time. If you need to act on more than 25 projects, perform the operation in multiple batches.
+
+## Staleness Detection
+
+The platform tracks when the foundation stack was last deployed. When listing projects, the portal compares each ACTIVE project's last update timestamp (`statusChangedAt`) against the foundation stack deployment timestamp.
+
+- If a project was last updated **at or after** the foundation stack deployment, it is considered **up to date**. The Update button is greyed out with a tooltip "Project is up to date".
+- If a project was last updated **before** the foundation stack deployment, it is considered **stale**. The Update button is enabled.
+
+This prevents unnecessary updates for projects that are already running the latest infrastructure configuration.
+
+The "Update All" bulk action automatically filters the selection to include only stale projects. If all selected ACTIVE projects are already up to date, the "Update All" button is disabled and a toast message informs you: "All selected projects are already up to date."
+
 ## Table Sorting and Filtering
 
 The Projects table in the web portal supports interactive sorting and filtering to help Administrators locate projects quickly.

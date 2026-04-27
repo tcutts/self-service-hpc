@@ -20,6 +20,7 @@ from api_logging import log_api_action  # noqa: E402
 
 from auth import is_administrator, get_caller_identity
 from errors import (
+    ApiError,
     AuthorisationError,
     DuplicateError,
     NotFoundError,
@@ -62,6 +63,10 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/users/{userId}/reactivate" and http_method == "POST":
             user_id = path_parameters.get("userId", "")
             response = _handle_reactivate_user(event, user_id)
+        elif resource == "/users/batch/deactivate" and http_method == "POST":
+            response = _handle_batch_deactivate(event)
+        elif resource == "/users/batch/reactivate" and http_method == "POST":
+            response = _handle_batch_reactivate(event)
         else:
             response = _response(404, {"error": {"code": "NOT_FOUND", "message": "Route not found", "details": {}}})
 
@@ -163,6 +168,89 @@ def _handle_reactivate_user(event: dict[str, Any], user_id: str) -> dict[str, An
     )
     logger.info("User reactivated: %s by %s", user_id, caller)
     return _response(200, user_record)
+
+
+def _validate_batch_request(event: dict[str, Any], id_field: str) -> list[str]:
+    """Validate a batch request: check admin auth, parse body, validate ID array.
+
+    Returns the list of IDs on success. Raises ValidationError on failure.
+    """
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can perform batch operations.")
+
+    body = _parse_body(event)
+    ids = body.get(id_field)
+
+    if not isinstance(ids, list) or len(ids) == 0:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+    if len(ids) > 25:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+
+    return ids
+
+
+def _build_batch_response(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a BatchResult response from a list of per-item results."""
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    failed = len(results) - succeeded
+    return _response(200, {
+        "results": results,
+        "summary": {
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+    })
+
+
+def _handle_batch_deactivate(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /users/batch/deactivate — batch deactivate multiple users."""
+    user_ids = _validate_batch_request(event, "userIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for uid in user_ids:
+        try:
+            deactivate_user(
+                table_name=USERS_TABLE_NAME,
+                user_pool_id=USER_POOL_ID,
+                user_id=uid,
+            )
+            logger.info("Batch deactivate succeeded for user '%s' by %s", uid, caller)
+            results.append({"id": uid, "status": "success", "message": "User deactivated"})
+        except ApiError as exc:
+            logger.warning("Batch deactivate failed for user '%s': %s", uid, str(exc))
+            results.append({"id": uid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
+
+
+def _handle_batch_reactivate(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /users/batch/reactivate — batch reactivate multiple users."""
+    user_ids = _validate_batch_request(event, "userIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for uid in user_ids:
+        try:
+            reactivate_user(
+                table_name=USERS_TABLE_NAME,
+                user_pool_id=USER_POOL_ID,
+                user_id=uid,
+            )
+            logger.info("Batch reactivate succeeded for user '%s' by %s", uid, caller)
+            results.append({"id": uid, "status": "success", "message": "User reactivated"})
+        except ApiError as exc:
+            logger.warning("Batch reactivate failed for user '%s': %s", uid, str(exc))
+            results.append({"id": uid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
 
 
 def _parse_body(event: dict[str, Any]) -> dict[str, Any]:

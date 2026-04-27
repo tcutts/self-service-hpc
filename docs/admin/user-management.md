@@ -201,6 +201,34 @@ Created (ACTIVE) → Deactivated (INACTIVE) → Reactivated (ACTIVE)
 
 Administrators can reactivate a previously deactivated user via `POST /users/{userId}/reactivate`. Reactivation preserves the user's POSIX identity, project memberships, and audit history.
 
+## Bulk User Actions
+
+Administrators can select multiple users and perform operations on all of them at once, rather than acting on each user individually.
+
+### Selecting Users
+
+The Users table includes a checkbox column. Use the checkboxes to select individual users, or click the "Select all" checkbox in the column header to select all visible users (respecting any active filter). Selections are preserved when you change the filter text — users that become hidden remain selected.
+
+When one or more users are selected, a bulk action toolbar appears above the table showing the number of selected items and the available actions.
+
+### Available Bulk Actions
+
+| Button | Action | Eligible Users |
+|--------|--------|----------------|
+| Deactivate All | Deactivates all selected users (disables Cognito accounts, revokes sessions) | Users in `ACTIVE` status |
+| Reactivate All | Reactivates all selected users (re-enables Cognito accounts) | Users in `INACTIVE` status |
+| Clear Selection | Deselects all users and hides the toolbar | — |
+
+Each bulk action sends a single batch request to the API. The backend processes each user sequentially and returns per-item results. Users that are not in the required status or do not exist receive an error entry in the result — they do not block the remaining users from being processed.
+
+### Result Summary
+
+After a bulk action completes, a toast notification displays a summary: "X of Y succeeded, Z failed". If any items failed, the toast uses an error style. On network errors, the selection is preserved so you can retry.
+
+### Batch Size Limit
+
+Each bulk action can process up to 25 users at a time. If you need to act on more than 25 users, perform the operation in multiple batches.
+
 ## Table Sorting and Filtering
 
 The Users table in the web portal supports interactive sorting and filtering to help Administrators locate users quickly.

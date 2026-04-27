@@ -22,11 +22,17 @@ const state = {
   projectContext: localStorage.getItem('hpc_project_context') || null,
 };
 
+/* Foundation stack timestamp and projects data for staleness detection */
+let foundationStackTimestamp = null;
+let projectsData = [];
+
 /* ============================================================
    Table Column Configurations
    ============================================================ */
 
 const usersTableConfig = {
+  selectable: true,
+  rowId: 'userId',
   columns: [
     { key: 'userId', label: 'User ID', type: 'text', sortable: true },
     { key: 'displayName', label: 'Display Name', type: 'text', sortable: true },
@@ -55,6 +61,8 @@ const usersTableConfig = {
 };
 
 const projectsTableConfig = {
+  selectable: true,
+  rowId: 'projectId',
   columns: [
     {
       key: 'projectId', label: 'Project ID', type: 'text', sortable: true,
@@ -102,8 +110,11 @@ const projectsTableConfig = {
             <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
           </div>`;
         } else if (status === 'ACTIVE') {
+          const isUpToDate = foundationStackTimestamp && row.statusChangedAt && row.statusChangedAt >= foundationStackTimestamp;
+          const updateDisabled = isUpToDate ? ' disabled title="Project is up to date"' : '';
+          const updateClass = isUpToDate ? 'btn btn-primary btn-sm disabled-btn' : 'btn btn-primary btn-sm';
           return `<button class="btn btn-primary btn-sm" onclick="editProject('${esc(row.projectId)}')">Edit</button>
-            <button class="btn btn-primary btn-sm" style="margin-left:0.25rem" onclick="updateProject('${esc(row.projectId)}')">Update</button>
+            <button class="${updateClass}" style="margin-left:0.25rem" onclick="updateProject('${esc(row.projectId)}')"${updateDisabled}>Update</button>
             <button class="btn btn-danger btn-sm" style="margin-left:0.25rem" onclick="showDestroyConfirmation('${esc(row.projectId)}')">Destroy</button>`;
         } else if (status === 'DESTROYING') {
           const cur = row.currentStep || 0;
@@ -125,6 +136,8 @@ const projectsTableConfig = {
 };
 
 const templatesTableConfig = {
+  selectable: true,
+  rowId: 'templateId',
   columns: [
     { key: 'templateId', label: 'Template ID', type: 'text', sortable: true },
     { key: 'templateName', label: 'Name', type: 'text', sortable: true },
@@ -478,10 +491,27 @@ function renderPage(page, params = {}) {
    ============================================================ */
 
 function renderUsersPage(container) {
+  usersTableConfig.onSelectionChange = function (selectedIds) {
+    const toolbar = document.getElementById('users-bulk-toolbar');
+    if (!toolbar) return;
+    if (selectedIds.length > 0) {
+      toolbar.style.display = '';
+      toolbar.querySelector('.bulk-selection-count').textContent = selectedIds.length + ' selected';
+    } else {
+      toolbar.style.display = 'none';
+    }
+  };
+
   container.innerHTML = `
     <div class="page-header">
       <h2>User Management</h2>
       <button class="btn btn-primary" id="btn-add-user">Add User</button>
+    </div>
+    <div id="users-bulk-toolbar" class="bulk-action-toolbar" role="toolbar" aria-label="Bulk actions" aria-live="polite" style="display:none">
+      <span class="bulk-selection-count"></span>
+      <button class="btn btn-danger btn-sm" id="btn-bulk-deactivate-users">Deactivate All</button>
+      <button class="btn btn-primary btn-sm" id="btn-bulk-reactivate-users">Reactivate All</button>
+      <button class="btn btn-sm" id="btn-bulk-clear-users">Clear Selection</button>
     </div>
     <div id="users-list"><div class="empty-state"><span class="spinner"></span> Loading users…</div></div>
     <div id="add-user-form" style="display:none" class="detail-panel">
@@ -531,6 +561,22 @@ function renderUsersPage(container) {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
+  document.getElementById('btn-bulk-clear-users').addEventListener('click', () => {
+    TableModule.clearSelection('users');
+    const toolbar = document.getElementById('users-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+  });
+
+  document.getElementById('btn-bulk-deactivate-users').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('users');
+    if (ids.length > 0) bulkDeactivateUsers(ids);
+  });
+
+  document.getElementById('btn-bulk-reactivate-users').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('users');
+    if (ids.length > 0) bulkReactivateUsers(ids);
+  });
+
   loadUsers();
 }
 
@@ -564,14 +610,83 @@ async function reactivateUser(userId) {
 }
 
 /* ============================================================
+   Bulk User Actions
+   ============================================================ */
+
+async function bulkDeactivateUsers(ids) {
+  try {
+    const data = await apiCall('POST', '/users/batch/deactivate', { userIds: ids });
+    const s = data.summary || {};
+    const toastType = s.failed > 0 ? 'error' : 'success';
+    showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+    TableModule.clearSelection('users');
+    const toolbar = document.getElementById('users-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+    loadUsers();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function bulkReactivateUsers(ids) {
+  try {
+    const data = await apiCall('POST', '/users/batch/reactivate', { userIds: ids });
+    const s = data.summary || {};
+    const toastType = s.failed > 0 ? 'error' : 'success';
+    showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+    TableModule.clearSelection('users');
+    const toolbar = document.getElementById('users-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+    loadUsers();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+/* ============================================================
    Projects Page
    ============================================================ */
 
 function renderProjectsPage(container) {
+  projectsTableConfig.onSelectionChange = function (selectedIds) {
+    const toolbar = document.getElementById('projects-bulk-toolbar');
+    if (!toolbar) return;
+    if (selectedIds.length > 0) {
+      toolbar.style.display = '';
+      toolbar.querySelector('.bulk-selection-count').textContent = selectedIds.length + ' selected';
+
+      // Disable "Update All" if all selected ACTIVE projects are up to date
+      const updateAllBtn = document.getElementById('btn-bulk-update-projects');
+      if (updateAllBtn) {
+        const hasStale = selectedIds.some(id => {
+          const project = projectsData.find(p => p.projectId === id);
+          if (!project || project.status !== 'ACTIVE') return false;
+          if (!foundationStackTimestamp || !project.statusChangedAt) return true;
+          return project.statusChangedAt < foundationStackTimestamp;
+        });
+        const hasActiveSelected = selectedIds.some(id => {
+          const project = projectsData.find(p => p.projectId === id);
+          return project && project.status === 'ACTIVE';
+        });
+        // Disable if there are ACTIVE projects selected but none are stale
+        updateAllBtn.disabled = hasActiveSelected && !hasStale;
+      }
+    } else {
+      toolbar.style.display = 'none';
+    }
+  };
+
   container.innerHTML = `
     <div class="page-header">
       <h2>Project Management</h2>
       <button class="btn btn-primary" id="btn-add-project">Create Project</button>
+    </div>
+    <div id="projects-bulk-toolbar" class="bulk-action-toolbar" role="toolbar" aria-label="Bulk actions" aria-live="polite" style="display:none">
+      <span class="bulk-selection-count"></span>
+      <button class="btn btn-primary btn-sm" id="btn-bulk-deploy-projects">Deploy All</button>
+      <button class="btn btn-primary btn-sm" id="btn-bulk-update-projects">Update All</button>
+      <button class="btn btn-danger btn-sm" id="btn-bulk-destroy-projects">Destroy All</button>
+      <button class="btn btn-sm" id="btn-bulk-clear-projects">Clear Selection</button>
     </div>
     <div id="projects-list"><div class="empty-state"><span class="spinner"></span> Loading projects…</div></div>
     <div id="add-project-form" style="display:none" class="detail-panel">
@@ -607,6 +722,27 @@ function renderProjectsPage(container) {
     } catch (e) { showToast(e.message, 'error'); }
   });
 
+  document.getElementById('btn-bulk-clear-projects').addEventListener('click', () => {
+    TableModule.clearSelection('projects');
+    const toolbar = document.getElementById('projects-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+  });
+
+  document.getElementById('btn-bulk-deploy-projects').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('projects');
+    if (ids.length > 0) bulkDeployProjects(ids);
+  });
+
+  document.getElementById('btn-bulk-update-projects').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('projects');
+    if (ids.length > 0) bulkUpdateProjects(ids);
+  });
+
+  document.getElementById('btn-bulk-destroy-projects').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('projects');
+    if (ids.length > 0) bulkDestroyProjects(ids);
+  });
+
   loadProjects();
 }
 
@@ -614,6 +750,8 @@ async function loadProjects() {
   try {
     const data = await apiCall('GET', '/projects');
     const projects = data.projects || [];
+    foundationStackTimestamp = data.foundationStackTimestamp || null;
+    projectsData = projects;
     const el = document.getElementById('projects-list');
     if (!el) return;
 
@@ -819,6 +957,115 @@ function showEditProjectDialog(project) {
 }
 
 /* ============================================================
+   Bulk Project Actions
+   ============================================================ */
+
+async function bulkUpdateProjects(ids) {
+  // Filter to only stale projects (statusChangedAt < foundationStackTimestamp)
+  const staleIds = ids.filter(id => {
+    const project = projectsData.find(p => p.projectId === id);
+    if (!project || project.status !== 'ACTIVE') return true; // let backend handle non-ACTIVE
+    if (!foundationStackTimestamp || !project.statusChangedAt) return true; // no timestamp info, include
+    return project.statusChangedAt < foundationStackTimestamp;
+  });
+
+  if (staleIds.length === 0) {
+    showToast('All selected projects are already up to date', 'success');
+    return;
+  }
+
+  try {
+    const data = await apiCall('POST', '/projects/batch/update', { projectIds: staleIds });
+    const s = data.summary || {};
+    const toastType = s.failed > 0 ? 'error' : 'success';
+    showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+    TableModule.clearSelection('projects');
+    const toolbar = document.getElementById('projects-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+    loadProjects();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+async function bulkDeployProjects(ids) {
+  try {
+    const data = await apiCall('POST', '/projects/batch/deploy', { projectIds: ids });
+    const s = data.summary || {};
+    const toastType = s.failed > 0 ? 'error' : 'success';
+    showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+    TableModule.clearSelection('projects');
+    const toolbar = document.getElementById('projects-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+    loadProjects();
+  } catch (e) {
+    showToast(e.message, 'error');
+  }
+}
+
+function bulkDestroyProjects(ids) {
+  // Remove any existing modal
+  const existing = document.getElementById('bulk-destroy-confirm-modal');
+  if (existing) existing.remove();
+
+  const modal = document.createElement('div');
+  modal.id = 'bulk-destroy-confirm-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-content">
+      <h3>Bulk Destroy Projects</h3>
+      <p>Are you sure you want to destroy <strong>${ids.length}</strong> project(s)?</p>
+      <p style="font-size:0.85rem;color:var(--color-text-muted)">This will delete all infrastructure for the selected projects. Type <strong>CONFIRM</strong> to proceed.</p>
+      <div class="form-group">
+        <label for="bulk-destroy-confirm-input">Type CONFIRM</label>
+        <input type="text" id="bulk-destroy-confirm-input" placeholder="Type CONFIRM to proceed" autocomplete="off" />
+      </div>
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+        <button class="btn" id="bulk-destroy-cancel-btn">Cancel</button>
+        <button class="btn btn-danger" id="bulk-destroy-confirm-btn" disabled>Destroy All</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  const input = document.getElementById('bulk-destroy-confirm-input');
+  const confirmBtn = document.getElementById('bulk-destroy-confirm-btn');
+
+  input.addEventListener('input', () => {
+    confirmBtn.disabled = input.value.trim() !== 'CONFIRM';
+  });
+
+  document.getElementById('bulk-destroy-cancel-btn').addEventListener('click', () => {
+    modal.remove();
+  });
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  confirmBtn.addEventListener('click', async () => {
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Destroying…';
+    try {
+      const data = await apiCall('POST', '/projects/batch/destroy', { projectIds: ids });
+      const s = data.summary || {};
+      const toastType = s.failed > 0 ? 'error' : 'success';
+      showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+      modal.remove();
+      TableModule.clearSelection('projects');
+      const toolbar = document.getElementById('projects-bulk-toolbar');
+      if (toolbar) toolbar.style.display = 'none';
+      loadProjects();
+    } catch (e) {
+      showToast(e.message, 'error');
+      modal.remove();
+    }
+  });
+
+  input.focus();
+}
+
+/* ============================================================
    Project List Polling
    ============================================================ */
 
@@ -914,10 +1161,26 @@ async function fetchDefaultAmi(arch) {
 }
 
 function renderTemplatesPage(container) {
+  templatesTableConfig.onSelectionChange = function (selectedIds) {
+    const toolbar = document.getElementById('templates-bulk-toolbar');
+    if (!toolbar) return;
+    if (selectedIds.length > 0) {
+      toolbar.style.display = '';
+      toolbar.querySelector('.bulk-selection-count').textContent = selectedIds.length + ' selected';
+    } else {
+      toolbar.style.display = 'none';
+    }
+  };
+
   container.innerHTML = `
     <div class="page-header">
       <h2>Cluster Templates</h2>
       <button class="btn btn-primary" id="btn-add-template">Create Template</button>
+    </div>
+    <div id="templates-bulk-toolbar" class="bulk-action-toolbar" role="toolbar" aria-label="Bulk actions" aria-live="polite" style="display:none">
+      <span class="bulk-selection-count"></span>
+      <button class="btn btn-danger btn-sm" id="btn-bulk-delete-templates">Delete All</button>
+      <button class="btn btn-sm" id="btn-bulk-clear-templates">Clear Selection</button>
     </div>
     <div id="templates-list"><div class="empty-state"><span class="spinner"></span> Loading templates…</div></div>
     <div id="add-template-form" style="display:none" class="detail-panel">
@@ -1055,6 +1318,17 @@ function renderTemplatesPage(container) {
       document.getElementById('add-template-form').style.display = 'none';
       loadTemplates();
     } catch (e) { showToast(e.message, 'error'); }
+  });
+
+  document.getElementById('btn-bulk-clear-templates').addEventListener('click', () => {
+    TableModule.clearSelection('templates');
+    const toolbar = document.getElementById('templates-bulk-toolbar');
+    if (toolbar) toolbar.style.display = 'none';
+  });
+
+  document.getElementById('btn-bulk-delete-templates').addEventListener('click', () => {
+    const ids = TableModule.getSelectedIds('templates');
+    if (ids.length > 0) bulkDeleteTemplates(ids);
   });
 
   loadTemplates();
@@ -1250,6 +1524,62 @@ async function deleteTemplate(templateId) {
     showToast(`Template '${templateId}' deleted`);
     loadTemplates();
   } catch (e) { showToast(e.message, 'error'); }
+}
+
+/* ============================================================
+   Bulk Template Actions
+   ============================================================ */
+
+function bulkDeleteTemplates(ids) {
+  // Remove any existing modal
+  const existing = document.getElementById('bulk-delete-confirm-modal');
+  if (existing) existing.remove();
+
+  const listHtml = ids.map(id => `<li>${esc(id)}</li>`).join('');
+
+  const modal = document.createElement('div');
+  modal.id = 'bulk-delete-confirm-modal';
+  modal.className = 'modal-overlay';
+  modal.innerHTML = `
+    <div class="modal-content">
+      <h3>Bulk Delete Templates</h3>
+      <p>Are you sure you want to delete the following <strong>${ids.length}</strong> template(s)?</p>
+      <ul style="font-size:0.85rem;max-height:150px;overflow-y:auto;margin:0.5rem 0">${listHtml}</ul>
+      <div style="display:flex;gap:0.5rem;justify-content:flex-end">
+        <button class="btn" id="bulk-delete-cancel-btn">Cancel</button>
+        <button class="btn btn-danger" id="bulk-delete-confirm-btn">Delete All</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+
+  document.getElementById('bulk-delete-cancel-btn').addEventListener('click', () => {
+    modal.remove();
+  });
+
+  modal.addEventListener('click', (e) => {
+    if (e.target === modal) modal.remove();
+  });
+
+  document.getElementById('bulk-delete-confirm-btn').addEventListener('click', async () => {
+    const confirmBtn = document.getElementById('bulk-delete-confirm-btn');
+    confirmBtn.disabled = true;
+    confirmBtn.textContent = 'Deleting…';
+    try {
+      const data = await apiCall('POST', '/templates/batch/delete', { templateIds: ids });
+      const s = data.summary || {};
+      const toastType = s.failed > 0 ? 'error' : 'success';
+      showToast(`${s.succeeded} of ${s.total} succeeded, ${s.failed} failed`, toastType);
+      modal.remove();
+      TableModule.clearSelection('templates');
+      const toolbar = document.getElementById('templates-bulk-toolbar');
+      if (toolbar) toolbar.style.display = 'none';
+      loadTemplates();
+    } catch (e) {
+      showToast(e.message, 'error');
+      modal.remove();
+    }
+  });
 }
 
 /* ============================================================

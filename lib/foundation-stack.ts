@@ -461,6 +461,15 @@ export class FoundationStack extends cdk.Stack {
     const reactivateResource = userIdResource.addResource('reactivate');
     reactivateResource.addMethod('POST', userManagementIntegration, cognitoMethodOptions);
 
+    // Batch user operations
+    const usersBatchResource = usersResource.addResource('batch');
+    // POST /users/batch/deactivate — bulk deactivate users
+    const usersBatchDeactivateResource = usersBatchResource.addResource('deactivate');
+    usersBatchDeactivateResource.addMethod('POST', userManagementIntegration, cognitoMethodOptions);
+    // POST /users/batch/reactivate — bulk reactivate users
+    const usersBatchReactivateResource = usersBatchResource.addResource('reactivate');
+    usersBatchReactivateResource.addMethod('POST', userManagementIntegration, cognitoMethodOptions);
+
     // ---------------------------------------------------------------
     // SNS Topic for Budget Notifications
     // ---------------------------------------------------------------
@@ -579,6 +588,18 @@ export class FoundationStack extends cdk.Stack {
     const updateResource = projectIdResource.addResource('update');
     updateResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
 
+    // Batch project operations
+    const projectsBatchResource = projectsResource.addResource('batch');
+    // POST /projects/batch/update — bulk update projects
+    const projectsBatchUpdateResource = projectsBatchResource.addResource('update');
+    projectsBatchUpdateResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+    // POST /projects/batch/deploy — bulk deploy projects
+    const projectsBatchDeployResource = projectsBatchResource.addResource('deploy');
+    projectsBatchDeployResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+    // POST /projects/batch/destroy — bulk destroy projects
+    const projectsBatchDestroyResource = projectsBatchResource.addResource('destroy');
+    projectsBatchDestroyResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+
     // ---------------------------------------------------------------
     // Template Management Lambda Function
     // ---------------------------------------------------------------
@@ -626,6 +647,12 @@ export class FoundationStack extends cdk.Stack {
     templateIdResource.addMethod('DELETE', templateManagementIntegration, cognitoMethodOptions);
     // PUT /templates/{templateId} — update template (admin only in handler)
     templateIdResource.addMethod('PUT', templateManagementIntegration, cognitoMethodOptions);
+
+    // Batch template operations
+    const templatesBatchResource = templatesResource.addResource('batch');
+    // POST /templates/batch/delete — bulk delete templates
+    const templatesBatchDeleteResource = templatesBatchResource.addResource('delete');
+    templatesBatchDeleteResource.addMethod('POST', templateManagementIntegration, cognitoMethodOptions);
 
     // ---------------------------------------------------------------
     // Cluster Operations Lambda Function
@@ -708,6 +735,7 @@ export class FoundationStack extends cdk.Stack {
 
     clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
+        'pcs:GetCluster',
         'pcs:CreateCluster',
         'pcs:CreateComputeNodeGroup',
         'pcs:CreateQueue',
@@ -2377,6 +2405,31 @@ export class FoundationStack extends cdk.Stack {
       destinationKeyPrefix: 'docs',
       distribution: this.webPortalDistribution,
       distributionPaths: ['/docs/*'],
+    });
+
+    // ---------------------------------------------------------------
+    // Foundation Stack Timestamp (staleness detection)
+    // ---------------------------------------------------------------
+    // Writes a timestamp to the Projects table on every deploy/update.
+    // The portal compares each project's statusChangedAt against this
+    // timestamp to determine whether the project stack is up to date.
+    new cr.AwsCustomResource(this, 'FoundationStackTimestamp', {
+      onUpdate: {
+        service: 'DynamoDB',
+        action: 'putItem',
+        parameters: {
+          TableName: this.projectsTable.tableName,
+          Item: {
+            PK: { S: 'PLATFORM' },
+            SK: { S: 'FOUNDATION_TIMESTAMP' },
+            timestamp: { S: new Date().toISOString() },
+          },
+        },
+        physicalResourceId: cr.PhysicalResourceId.of('FoundationStackTimestamp-' + Date.now()),
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: [this.projectsTable.tableArn],
+      }),
     });
 
     // ---------------------------------------------------------------

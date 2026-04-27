@@ -38,7 +38,7 @@ from errors import (
     ValidationError,
     build_error_response,
 )
-from projects import create_project, delete_project, get_project, list_projects, _get_active_clusters
+from projects import create_project, delete_project, get_foundation_timestamp, get_project, list_projects, _get_active_clusters
 from members import add_member, remove_member
 from budget import set_budget
 import lifecycle
@@ -115,6 +115,14 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             project_id = path_parameters.get("projectId", "")
             response = _handle_update_project(event, project_id)
 
+        # Batch routes
+        elif resource == "/projects/batch/update" and http_method == "POST":
+            response = _handle_batch_update(event)
+        elif resource == "/projects/batch/deploy" and http_method == "POST":
+            response = _handle_batch_deploy(event)
+        elif resource == "/projects/batch/destroy" and http_method == "POST":
+            response = _handle_batch_destroy(event)
+
         # Edit route
         elif resource == "/projects/{projectId}" and http_method == "PUT":
             project_id = path_parameters.get("projectId", "")
@@ -174,7 +182,8 @@ def _handle_list_projects(event: dict[str, Any]) -> dict[str, Any]:
         raise AuthorisationError("Only administrators can list all projects.")
 
     projects = list_projects(table_name=PROJECTS_TABLE_NAME)
-    return _response(200, {"projects": projects})
+    foundation_timestamp = get_foundation_timestamp(table_name=PROJECTS_TABLE_NAME)
+    return _response(200, {"projects": projects, "foundationStackTimestamp": foundation_timestamp})
 
 
 def _handle_get_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
@@ -512,6 +521,189 @@ def _handle_update_project(event: dict[str, Any], project_id: str) -> dict[str, 
         "projectId": project_id,
         "status": "UPDATING",
     })
+
+
+def _validate_batch_request(event: dict[str, Any], id_field: str) -> list[str]:
+    """Validate a batch request: check admin auth, parse body, validate ID array.
+
+    Returns the list of IDs on success. Raises ValidationError on failure.
+    """
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can perform batch operations.")
+
+    body = _parse_body(event)
+    ids = body.get(id_field)
+
+    if not isinstance(ids, list) or len(ids) == 0:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+    if len(ids) > 25:
+        raise ValidationError(
+            "Batch request must contain between 1 and 25 identifiers.",
+            {"field": id_field},
+        )
+
+    return ids
+
+
+def _build_batch_response(results: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build a BatchResult response from a list of per-item results."""
+    succeeded = sum(1 for r in results if r["status"] == "success")
+    failed = len(results) - succeeded
+    return _response(200, {
+        "results": results,
+        "summary": {
+            "total": len(results),
+            "succeeded": succeeded,
+            "failed": failed,
+        },
+    })
+
+
+def _handle_batch_update(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /projects/batch/update — batch update multiple projects."""
+    project_ids = _validate_batch_request(event, "projectIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for pid in project_ids:
+        try:
+            project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=pid)
+            if project_record.get("status") != "ACTIVE":
+                raise ConflictError(
+                    f"Cannot update project '{pid}': project status is "
+                    f"'{project_record.get('status')}', expected 'ACTIVE'.",
+                    {"projectId": pid, "currentStatus": project_record.get("status"), "requiredStatus": "ACTIVE"},
+                )
+
+            lifecycle.transition_project(
+                table_name=PROJECTS_TABLE_NAME,
+                project_id=pid,
+                target_status="UPDATING",
+            )
+
+            dynamodb_resource = boto3.resource("dynamodb")
+            table = dynamodb_resource.Table(PROJECTS_TABLE_NAME)
+            table.update_item(
+                Key={"PK": f"PROJECT#{pid}", "SK": "METADATA"},
+                UpdateExpression="SET currentStep = :step, totalSteps = :total",
+                ExpressionAttributeValues={":step": 0, ":total": 5},
+            )
+
+            if PROJECT_UPDATE_STATE_MACHINE_ARN:
+                sfn_client.start_execution(
+                    stateMachineArn=PROJECT_UPDATE_STATE_MACHINE_ARN,
+                    input=json.dumps({"projectId": pid}),
+                )
+
+            logger.info("Batch update started for project '%s' by %s", pid, caller)
+            results.append({"id": pid, "status": "success", "message": "Update started"})
+        except ApiError as exc:
+            logger.warning("Batch update failed for project '%s': %s", pid, str(exc))
+            results.append({"id": pid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
+
+
+def _handle_batch_deploy(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /projects/batch/deploy — batch deploy multiple projects."""
+    project_ids = _validate_batch_request(event, "projectIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for pid in project_ids:
+        try:
+            project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=pid)
+            if project_record.get("status") != "CREATED":
+                raise ConflictError(
+                    f"Cannot deploy project '{pid}': project status is "
+                    f"'{project_record.get('status')}', expected 'CREATED'.",
+                    {"projectId": pid, "currentStatus": project_record.get("status"), "requiredStatus": "CREATED"},
+                )
+
+            lifecycle.transition_project(
+                table_name=PROJECTS_TABLE_NAME,
+                project_id=pid,
+                target_status="DEPLOYING",
+            )
+
+            dynamodb_resource = boto3.resource("dynamodb")
+            table = dynamodb_resource.Table(PROJECTS_TABLE_NAME)
+            table.update_item(
+                Key={"PK": f"PROJECT#{pid}", "SK": "METADATA"},
+                UpdateExpression="SET currentStep = :step, totalSteps = :total",
+                ExpressionAttributeValues={":step": 0, ":total": 5},
+            )
+
+            if PROJECT_DEPLOY_STATE_MACHINE_ARN:
+                sfn_client.start_execution(
+                    stateMachineArn=PROJECT_DEPLOY_STATE_MACHINE_ARN,
+                    input=json.dumps({"projectId": pid}),
+                )
+
+            logger.info("Batch deploy started for project '%s' by %s", pid, caller)
+            results.append({"id": pid, "status": "success", "message": "Deploy started"})
+        except ApiError as exc:
+            logger.warning("Batch deploy failed for project '%s': %s", pid, str(exc))
+            results.append({"id": pid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
+
+
+def _handle_batch_destroy(event: dict[str, Any]) -> dict[str, Any]:
+    """Handle POST /projects/batch/destroy — batch destroy multiple projects."""
+    project_ids = _validate_batch_request(event, "projectIds")
+    caller = get_caller_identity(event)
+    results: list[dict[str, Any]] = []
+
+    for pid in project_ids:
+        try:
+            project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=pid)
+            if project_record.get("status") != "ACTIVE":
+                raise ConflictError(
+                    f"Cannot destroy project '{pid}': project status is "
+                    f"'{project_record.get('status')}', expected 'ACTIVE'.",
+                    {"projectId": pid, "currentStatus": project_record.get("status"), "requiredStatus": "ACTIVE"},
+                )
+
+            active_clusters = _get_active_clusters(CLUSTERS_TABLE_NAME, pid)
+            if active_clusters:
+                cluster_names = [c["clusterName"] for c in active_clusters]
+                raise ConflictError(
+                    f"Cannot destroy project '{pid}': active clusters exist. "
+                    f"Destroy all clusters first.",
+                    {"projectId": pid, "activeClusters": cluster_names},
+                )
+
+            lifecycle.transition_project(
+                table_name=PROJECTS_TABLE_NAME,
+                project_id=pid,
+                target_status="DESTROYING",
+            )
+
+            dynamodb_resource = boto3.resource("dynamodb")
+            table = dynamodb_resource.Table(PROJECTS_TABLE_NAME)
+            table.update_item(
+                Key={"PK": f"PROJECT#{pid}", "SK": "METADATA"},
+                UpdateExpression="SET currentStep = :step, totalSteps = :total",
+                ExpressionAttributeValues={":step": 0, ":total": 5},
+            )
+
+            if PROJECT_DESTROY_STATE_MACHINE_ARN:
+                sfn_client.start_execution(
+                    stateMachineArn=PROJECT_DESTROY_STATE_MACHINE_ARN,
+                    input=json.dumps({"projectId": pid}),
+                )
+
+            logger.info("Batch destroy started for project '%s' by %s", pid, caller)
+            results.append({"id": pid, "status": "success", "message": "Destroy started"})
+        except ApiError as exc:
+            logger.warning("Batch destroy failed for project '%s': %s", pid, str(exc))
+            results.append({"id": pid, "status": "error", "message": str(exc)})
+
+    return _build_batch_response(results)
 
 
 def _handle_edit_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
