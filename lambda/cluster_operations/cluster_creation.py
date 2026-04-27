@@ -379,16 +379,28 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
 # Step 4 — Check FSx filesystem status
 # ===================================================================
 
+_FSX_TERMINAL_FAILURE_STATES = {"FAILED", "DELETING", "MISCONFIGURED"}
+
+_FSX_MAX_POLL_ATTEMPTS = 60  # 60 × 30s wait = 30 minutes max
+
+
 def check_fsx_status(event: dict[str, Any]) -> dict[str, Any]:
     """Poll FSx filesystem status.
 
     Returns the event with an added ``fsxAvailable`` boolean.
     Step Functions uses this to decide whether to wait and retry.
+
+    Raises ``InternalError`` if the filesystem enters a terminal
+    failure state (FAILED, DELETING, MISCONFIGURED) or if the
+    maximum number of poll attempts is exceeded.
     """
     fsx_id: str = event["fsxFilesystemId"]
 
     # Write progress before executing step logic
     _update_step_progress(event["projectId"], event.get("clusterName", ""), 4)
+
+    # Track poll attempts to prevent infinite wait loops
+    poll_count: int = event.get("fsxPollCount", 0) + 1
 
     try:
         response = fsx_client.describe_file_systems(FileSystemIds=[fsx_id])
@@ -403,13 +415,35 @@ def check_fsx_status(event: dict[str, Any]) -> dict[str, Any]:
     dns_name = filesystems[0].get("DNSName", "")
     mount_name = filesystems[0].get("LustreConfiguration", {}).get("MountName", "")
 
-    logger.info("FSx filesystem '%s' status: %s", fsx_id, status)
+    logger.info(
+        "FSx filesystem '%s' status: %s (poll %d/%d)",
+        fsx_id,
+        status,
+        poll_count,
+        _FSX_MAX_POLL_ATTEMPTS,
+    )
+
+    # Fail fast on terminal error states
+    if status in _FSX_TERMINAL_FAILURE_STATES:
+        raise InternalError(
+            f"FSx filesystem '{fsx_id}' entered terminal state '{status}'. "
+            "Cluster creation cannot proceed."
+        )
+
+    # Fail if we've exceeded the maximum number of poll attempts
+    if poll_count >= _FSX_MAX_POLL_ATTEMPTS and status != "AVAILABLE":
+        raise InternalError(
+            f"FSx filesystem '{fsx_id}' did not become available after "
+            f"{poll_count} attempts (status: {status}). "
+            "Cluster creation timed out waiting for FSx."
+        )
 
     return {
         **event,
         "fsxAvailable": status == "AVAILABLE",
         "fsxDnsName": dns_name,
         "fsxMountName": mount_name,
+        "fsxPollCount": poll_count,
     }
 
 

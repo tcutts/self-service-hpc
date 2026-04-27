@@ -7,7 +7,7 @@ Comprehensive unit tests should be written.  Try to keep tests short-running.  I
 
 Property based tests can run very slowly; keep the number of examples low, and make sure the hypotheses are limited to those combinations which are needed to sufficiently test the functionality being added.
 
-When creating files, always use the file-writing tools (fsWrite, fsAppend, strReplace) instead of pasting large content into shell commands (e.g. cat << 'EOF', echo, printf). Large pastes into the terminal are unreliable and will fail silently or corrupt content. Reserve shell commands for running builds, tests, and short CLI operations only.
+When creating files, ALWAYS use the file-writing tools (fsWrite, fsAppend, strReplace). NEVER paste large content into shell commands (e.g. cat << 'EOF', echo, printf). Large pastes into the terminal are unreliable and will fail silently or corrupt content. Reserve shell commands for running builds, tests, and short CLI operations (<1024 characters) only.
 
 <!------------------------------------------------------------------------------------
    Add rules to this file or a short description and have Kiro refine them for you.

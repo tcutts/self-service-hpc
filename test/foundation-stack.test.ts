@@ -572,6 +572,92 @@ describe('FoundationStack', () => {
         },
       });
     });
+
+    it('all state machine definitions have valid Catch blocks (States.ALL must appear alone and at end)', () => {
+      const stateMachines = template.findResources('AWS::StepFunctions::StateMachine');
+
+      for (const [logicalId, resource] of Object.entries(stateMachines)) {
+        const definitionString = (resource as any).Properties?.DefinitionString;
+        if (!definitionString) continue;
+
+        // The DefinitionString is typically a Fn::Join — resolve it to a string.
+        // Non-string parts (Ref, Fn::GetAtt) are ARN-like values that appear as
+        // JSON string values, so we replace them with a valid placeholder string.
+        let definition: any;
+        if (typeof definitionString === 'string') {
+          definition = JSON.parse(definitionString);
+        } else if (definitionString['Fn::Join']) {
+          const separator: string = definitionString['Fn::Join'][0];
+          const parts: any[] = definitionString['Fn::Join'][1];
+          const joined = parts
+            .map((p: any) => (typeof p === 'string' ? p : 'arn:aws:placeholder:us-east-1:123456789012:placeholder'))
+            .join(separator);
+          definition = JSON.parse(joined);
+        } else {
+          continue;
+        }
+
+        // Recursively walk all states and validate Catch blocks
+        const validateStates = (states: Record<string, any>, path: string) => {
+          for (const [stateName, state] of Object.entries(states)) {
+            const statePath = `${path}/States/${stateName}`;
+
+            if (state.Catch && Array.isArray(state.Catch)) {
+              const errorEqualsLists = state.Catch.map(
+                (c: any) => c.ErrorEquals,
+              );
+
+              for (let i = 0; i < errorEqualsLists.length; i++) {
+                const errorEquals: string[] = errorEqualsLists[i];
+
+                // States.ALL must be the sole entry in its ErrorEquals array
+                if (errorEquals.includes('States.ALL')) {
+                  expect(errorEquals).toHaveLength(1);
+                }
+
+                // States.ALL must only appear in the last Catch entry
+                if (errorEquals.includes('States.ALL') && i !== errorEqualsLists.length - 1) {
+                  throw new Error(
+                    `${logicalId} at ${statePath}/Catch[${i}]: ` +
+                    `States.ALL must appear only in the last Catch entry`,
+                  );
+                }
+              }
+
+              // No duplicate Catch entries with identical ErrorEquals
+              const serialised = errorEqualsLists.map((e: string[]) =>
+                JSON.stringify(e.slice().sort()),
+              );
+              const uniqueSerialised = new Set(serialised);
+              if (serialised.length !== uniqueSerialised.size) {
+                throw new Error(
+                  `${logicalId} at ${statePath}: ` +
+                  `duplicate Catch ErrorEquals entries detected`,
+                );
+              }
+            }
+
+            // Recurse into Parallel branches
+            if (state.Branches && Array.isArray(state.Branches)) {
+              for (const branch of state.Branches) {
+                if (branch.States) {
+                  validateStates(branch.States, `${statePath}/Branch`);
+                }
+              }
+            }
+
+            // Recurse into Map iterator
+            if (state.Iterator?.States) {
+              validateStates(state.Iterator.States, `${statePath}/Iterator`);
+            }
+          }
+        };
+
+        if (definition.States) {
+          validateStates(definition.States, logicalId);
+        }
+      }
+    });
   });
 
   // ---------------------------------------------------------------------------
@@ -1311,6 +1397,102 @@ describe('FoundationStack', () => {
       });
       // Previous count was ≥25, adding update POST = ≥26
       expect(Object.keys(methods).length).toBeGreaterThanOrEqual(26);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // FSx Cleanup Lambda and EventBridge Schedule
+  // Validates: Requirements 1.1, 7.1–7.5
+  // ---------------------------------------------------------------------------
+  describe('FSx Cleanup Lambda', () => {
+    it('creates a Python 3.13 Lambda with correct handler and 5-minute timeout', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-fsx-cleanup',
+        Runtime: 'python3.13',
+        Handler: 'handler.handler',
+        Timeout: 300,
+      });
+    });
+
+    it('sets CLUSTERS_TABLE_NAME and SNS_TOPIC_ARN environment variables', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-fsx-cleanup',
+        Environment: {
+          Variables: {
+            CLUSTERS_TABLE_NAME: Match.anyValue(),
+            SNS_TOPIC_ARN: Match.anyValue(),
+          },
+        },
+      });
+    });
+
+    it('creates an EventBridge rule with rate(6 hours) schedule', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        Name: 'hpc-fsx-cleanup-schedule',
+        ScheduleExpression: 'rate(6 hours)',
+      });
+    });
+
+    it('grants FSx describe and delete permissions', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: [
+                'fsx:DescribeFileSystems',
+                'fsx:DescribeDataRepositoryAssociations',
+                'fsx:DeleteDataRepositoryAssociation',
+                'fsx:DeleteFileSystem',
+              ],
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
+    });
+
+    it('does not grant DynamoDB write permissions on the Clusters table', () => {
+      const policies = template.findResources('AWS::IAM::Policy');
+      const writeActions = [
+        'dynamodb:PutItem',
+        'dynamodb:UpdateItem',
+        'dynamodb:DeleteItem',
+        'dynamodb:BatchWriteItem',
+      ];
+
+      // Find policies attached to the FSx cleanup Lambda's role (logical ID
+      // contains "FsxCleanupLambda"). Other Lambdas may have read/write on
+      // the Clusters table, so we must scope to the cleanup Lambda only.
+      for (const [logicalId, policy] of Object.entries(policies)) {
+        const roles: any[] = (policy as any).Properties?.Roles ?? [];
+        const attachedToFsxCleanup = roles.some((role: any) => {
+          const ref = role.Ref ?? '';
+          return ref.includes('FsxCleanupLambda');
+        });
+        if (!attachedToFsxCleanup) continue;
+
+        const statements: any[] = (policy as any).Properties?.PolicyDocument?.Statement ?? [];
+        for (const stmt of statements) {
+          if (stmt.Effect !== 'Allow') continue;
+          const actions: string[] = Array.isArray(stmt.Action) ? stmt.Action : [stmt.Action];
+          for (const writeAction of writeActions) {
+            expect(actions).not.toContain(writeAction);
+          }
+        }
+      }
+    });
+
+    it('grants SNS publish permission on the cluster lifecycle topic', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: 'sns:Publish',
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
     });
   });
 

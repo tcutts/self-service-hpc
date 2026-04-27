@@ -225,6 +225,28 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
     # Look up project infrastructure details
     infra = _lookup_project_infrastructure(project_id)
 
+    # Create the initial CREATING record in DynamoDB so the UI can
+    # immediately show the cluster with progress tracking.  This also
+    # ensures the record exists even if the Step Functions execution
+    # fails before the first step runs.
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    clusters_table.put_item(
+        Item={
+            "PK": f"PROJECT#{project_id}",
+            "SK": f"CLUSTER#{cluster_name}",
+            "clusterName": cluster_name,
+            "projectId": project_id,
+            "templateId": template_id,
+            "createdBy": caller,
+            "status": "CREATING",
+            "currentStep": 0,
+            "totalSteps": 10,
+            "stepDescription": "Starting cluster creation",
+            "createdAt": now,
+        },
+    )
+
     # Start the creation Step Functions execution
     timestamp = int(time.time())
     payload = {
@@ -371,6 +393,26 @@ def _handle_recreate_cluster(
 
     # Look up project infrastructure details
     infra = _lookup_project_infrastructure(project_id)
+
+    # Reset the cluster record to CREATING status so the UI can
+    # immediately show progress tracking for the recreation.
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    clusters_table.put_item(
+        Item={
+            "PK": f"PROJECT#{project_id}",
+            "SK": f"CLUSTER#{cluster_name}",
+            "clusterName": cluster_name,
+            "projectId": project_id,
+            "templateId": template_id,
+            "createdBy": caller,
+            "status": "CREATING",
+            "currentStep": 0,
+            "totalSteps": 10,
+            "stepDescription": "Starting cluster creation",
+            "createdAt": now,
+        },
+    )
 
     # Start the creation Step Functions execution
     timestamp = int(time.time())

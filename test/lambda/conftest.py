@@ -42,6 +42,7 @@ _TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "template_management")
 _CLUSTER_OPS_DIR = os.path.join(_LAMBDA_ROOT, "cluster_operations")
 _ACCOUNTING_DIR = os.path.join(_LAMBDA_ROOT, "accounting")
 _BUDGET_NOTIFICATION_DIR = os.path.join(_LAMBDA_ROOT, "budget_notification")
+_FSX_CLEANUP_DIR = os.path.join(_LAMBDA_ROOT, "fsx_cleanup")
 
 
 def _load_module_from(directory: str, module_name: str):
@@ -275,6 +276,18 @@ def reload_budget_notification_modules():
     """
     handler_mod = _load_module_from(_BUDGET_NOTIFICATION_DIR, "handler")
     return (handler_mod,)
+
+
+def reload_fsx_cleanup_modules():
+    """Load FSx cleanup Lambda modules so boto3 clients bind to moto.
+
+    Uses explicit file-path loading to avoid collisions with other
+    Lambda packages which have identically-named files.
+    Loads cleanup first (dependency), then handler.
+    """
+    cleanup_mod = _load_module_from(_FSX_CLEANUP_DIR, "cleanup")
+    handler_mod = _load_module_from(_FSX_CLEANUP_DIR, "handler")
+    return handler_mod, cleanup_mod
 
 
 # ---------------------------------------------------------------------------

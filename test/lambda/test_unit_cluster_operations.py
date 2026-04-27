@@ -591,6 +591,117 @@ class TestClusterCreationWorkflow:
         tags = _env["tagging_mod"].tags_as_dict("proj-x", "cluster-y")
         assert tags == {"Project": "proj-x", "ClusterName": "cluster-y"}
 
+    def test_step4_check_fsx_status_returns_available(self, _env):
+        """check_fsx_status returns fsxAvailable=True when filesystem is AVAILABLE."""
+        creation_mod = _env["creation_mod"]
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{
+                "Lifecycle": "AVAILABLE",
+                "DNSName": "fs-123.fsx.us-east-1.amazonaws.com",
+                "LustreConfiguration": {"MountName": "abcdef"},
+            }],
+        }):
+            result = creation_mod.check_fsx_status({
+                "fsxFilesystemId": "fs-123",
+                "projectId": "proj-wf",
+                "clusterName": "fsx-cl",
+            })
+        assert result["fsxAvailable"] is True
+        assert result["fsxDnsName"] == "fs-123.fsx.us-east-1.amazonaws.com"
+        assert result["fsxMountName"] == "abcdef"
+        assert result["fsxPollCount"] == 1
+
+    def test_step4_check_fsx_status_returns_not_available_when_creating(self, _env):
+        """check_fsx_status returns fsxAvailable=False when filesystem is still CREATING."""
+        creation_mod = _env["creation_mod"]
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{
+                "Lifecycle": "CREATING",
+                "LustreConfiguration": {},
+            }],
+        }):
+            result = creation_mod.check_fsx_status({
+                "fsxFilesystemId": "fs-123",
+                "projectId": "proj-wf",
+                "clusterName": "fsx-cl",
+            })
+        assert result["fsxAvailable"] is False
+        assert result["fsxPollCount"] == 1
+
+    def test_step4_check_fsx_status_raises_on_failed_state(self, _env):
+        """check_fsx_status raises InternalError when filesystem enters FAILED state."""
+        creation_mod = _env["creation_mod"]
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{"Lifecycle": "FAILED", "LustreConfiguration": {}}],
+        }):
+            with pytest.raises(_env["errors_mod"].InternalError, match="terminal state 'FAILED'"):
+                creation_mod.check_fsx_status({
+                    "fsxFilesystemId": "fs-123",
+                    "projectId": "proj-wf",
+                    "clusterName": "fsx-cl",
+                })
+
+    def test_step4_check_fsx_status_raises_on_misconfigured_state(self, _env):
+        """check_fsx_status raises InternalError when filesystem is MISCONFIGURED."""
+        creation_mod = _env["creation_mod"]
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{"Lifecycle": "MISCONFIGURED", "LustreConfiguration": {}}],
+        }):
+            with pytest.raises(_env["errors_mod"].InternalError, match="terminal state"):
+                creation_mod.check_fsx_status({
+                    "fsxFilesystemId": "fs-123",
+                    "projectId": "proj-wf",
+                    "clusterName": "fsx-cl",
+                })
+
+    def test_step4_check_fsx_status_raises_on_max_poll_exceeded(self, _env):
+        """check_fsx_status raises InternalError when max poll attempts exceeded."""
+        creation_mod = _env["creation_mod"]
+        max_polls = creation_mod._FSX_MAX_POLL_ATTEMPTS
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{"Lifecycle": "CREATING", "LustreConfiguration": {}}],
+        }):
+            with pytest.raises(_env["errors_mod"].InternalError, match="timed out"):
+                creation_mod.check_fsx_status({
+                    "fsxFilesystemId": "fs-123",
+                    "projectId": "proj-wf",
+                    "clusterName": "fsx-cl",
+                    "fsxPollCount": max_polls - 1,
+                })
+
+    def test_step4_check_fsx_status_increments_poll_count(self, _env):
+        """check_fsx_status increments fsxPollCount across calls."""
+        creation_mod = _env["creation_mod"]
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{"Lifecycle": "CREATING", "LustreConfiguration": {}}],
+        }):
+            result = creation_mod.check_fsx_status({
+                "fsxFilesystemId": "fs-123",
+                "projectId": "proj-wf",
+                "clusterName": "fsx-cl",
+                "fsxPollCount": 5,
+            })
+        assert result["fsxPollCount"] == 6
+
+    def test_step4_check_fsx_status_available_at_max_polls_succeeds(self, _env):
+        """check_fsx_status succeeds if filesystem becomes AVAILABLE at the last poll."""
+        creation_mod = _env["creation_mod"]
+        max_polls = creation_mod._FSX_MAX_POLL_ATTEMPTS
+        with patch.object(creation_mod.fsx_client, "describe_file_systems", return_value={
+            "FileSystems": [{
+                "Lifecycle": "AVAILABLE",
+                "DNSName": "fs-123.fsx.us-east-1.amazonaws.com",
+                "LustreConfiguration": {"MountName": "xyz"},
+            }],
+        }):
+            result = creation_mod.check_fsx_status({
+                "fsxFilesystemId": "fs-123",
+                "projectId": "proj-wf",
+                "clusterName": "fsx-cl",
+                "fsxPollCount": max_polls - 1,
+            })
+        assert result["fsxAvailable"] is True
+
 
 # ---------------------------------------------------------------------------
 # Cluster destruction workflow with FSx export
@@ -1006,7 +1117,36 @@ class TestClusterCreationStartsSFN:
 
             yield {
                 "handler_mod": handler_mod,
+                "clusters_table": clusters_table,
             }
+
+    def test_creation_writes_initial_creating_record(self, _env):
+        """Handler must write a CREATING record to DynamoDB before starting SFN."""
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST", "/projects/{projectId}/clusters", "proj-sfn",
+                body={"clusterName": "init-record-cl", "templateId": "tpl-1"},
+                path_parameters={"projectId": "proj-sfn"},
+            )
+            response = _env["handler_mod"].handler(event, None)
+
+            assert response["statusCode"] == 202
+
+        # Verify the DynamoDB record was created with all required fields
+        item = _env["clusters_table"].get_item(
+            Key={"PK": "PROJECT#proj-sfn", "SK": "CLUSTER#init-record-cl"}
+        ).get("Item")
+        assert item is not None
+        assert item["status"] == "CREATING"
+        assert item["clusterName"] == "init-record-cl"
+        assert item["projectId"] == "proj-sfn"
+        assert item["templateId"] == "tpl-1"
+        assert item["createdBy"] == "proj-user"
+        assert "createdAt" in item
+        assert item["currentStep"] == 0
+        assert item["totalSteps"] == 10
 
     def test_creation_calls_sfn_start_execution(self, _env):
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
@@ -1707,6 +1847,9 @@ class TestClusterRecreation:
 
     def test_successful_recreation_returns_202(self, _env):
         """Seed a DESTROYED cluster and non-breached project, mock SFN, verify 202."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1726,6 +1869,9 @@ class TestClusterRecreation:
 
     def test_successful_recreation_calls_sfn(self, _env):
         """Verify SFN start_execution is called with correct payload."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1749,6 +1895,9 @@ class TestClusterRecreation:
 
     def test_recreation_with_template_override(self, _env):
         """Send recreate with templateId override, verify response uses new template."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-old-tpl",
+                      status="DESTROYED", templateId="tpl-old")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1769,6 +1918,9 @@ class TestClusterRecreation:
 
     def test_recreation_with_empty_body_uses_stored_template(self, _env):
         """Send recreate with no body, verify stored templateId is used."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1787,6 +1939,9 @@ class TestClusterRecreation:
 
     def test_recreation_with_empty_template_id_uses_stored_template(self, _env):
         """Send recreate with empty templateId in body, verify stored templateId is used."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1904,6 +2059,9 @@ class TestClusterRecreation:
 
     def test_administrator_can_recreate(self, _env):
         """Platform Administrator (Administrators group) can recreate clusters."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 
@@ -1920,6 +2078,9 @@ class TestClusterRecreation:
 
     def test_project_admin_can_recreate(self, _env):
         """Project Administrator (ProjectAdmin-{projectId} group) can recreate clusters."""
+        # Re-seed in case a prior test mutated this record
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
 

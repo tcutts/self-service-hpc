@@ -16,6 +16,8 @@ import * as s3assets from 'aws-cdk-lib/aws-s3-assets';
 import * as s3deploy from 'aws-cdk-lib/aws-s3-deployment';
 import * as cloudfront from 'aws-cdk-lib/aws-cloudfront';
 import * as cloudfrontOrigins from 'aws-cdk-lib/aws-cloudfront-origins';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as path from 'path';
 import { Construct } from 'constructs';
 
@@ -80,6 +82,10 @@ export class FoundationStack extends cdk.Stack {
   public readonly accountingQueryLambda: lambda.Function;
   /** Lambda function: Budget Notification handler. */
   public readonly budgetNotificationLambda: lambda.Function;
+  /** Lambda function: FSx Cleanup. */
+  public readonly fsxCleanupLambda: lambda.Function;
+  /** EventBridge rule: FSx Cleanup schedule. */
+  public readonly fsxCleanupScheduleRule: events.Rule;
   /** S3 bucket for static web portal assets. */
   public readonly webPortalBucket: s3.Bucket;
   /** CloudFront distribution for the web portal. */
@@ -1001,9 +1007,17 @@ export class FoundationStack extends cdk.Stack {
     const catchConfig: sfn.CatchProps = { resultPath: '$.error' };
     const failureChain = handleCreationFailure.next(creationFailed);
 
+    // If the rollback handler itself fails, go directly to the Fail
+    // state.  The initial CREATING record (written by the API handler)
+    // will remain, but the Step Functions execution will be in FAILED
+    // status so operators can investigate.
+    handleCreationFailure.addCatch(creationFailed, { resultPath: '$.error' });
+
     validateAndRegisterName.addCatch(failureChain, catchConfig);
     checkBudgetBreach.addCatch(failureChain, catchConfig);
     resolveTemplate.addCatch(failureChain, catchConfig);
+    // createFsxFilesystem, checkFsxStatus, createFsxDra, and createPcsCluster
+    // are inside the ParallelFsxAndPcs state which has its own addCatch below.
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
@@ -1037,7 +1051,8 @@ export class FoundationStack extends cdk.Stack {
         // Merge the two branch outputs into a single flat object.
         // Branch 0 (FSx) has fsxFilesystemId, fsxDnsName, fsxMountName, fsxDraId.
         // Branch 1 (PCS) has pcsClusterId, pcsClusterArn.
-        // Both branches carry the original event fields.
+        // Both branches carry the original event fields (including
+        // template-driven fields injected by ResolveTemplate).
         'projectId.$': '$[0].projectId',
         'clusterName.$': '$[0].clusterName',
         'templateId.$': '$[0].templateId',
@@ -1054,17 +1069,13 @@ export class FoundationStack extends cdk.Stack {
         'fsxDraId.$': '$[0].fsxDraId',
         'pcsClusterId.$': '$[1].pcsClusterId',
         'pcsClusterArn.$': '$[1].pcsClusterArn',
-        // Pass through template-driven fields from PCS branch
-        'loginInstanceType.$': '$[1].loginInstanceType',
-        'instanceTypes.$': '$[1].instanceTypes',
-        'maxNodes.$': '$[1].maxNodes',
-        'minNodes.$': '$[1].minNodes',
-        'purchaseOption.$': '$[1].purchaseOption',
-        'loginLaunchTemplateId.$': '$[1].loginLaunchTemplateId',
-        'loginLaunchTemplateVersion.$': '$[1].loginLaunchTemplateVersion',
-        'computeLaunchTemplateId.$': '$[1].computeLaunchTemplateId',
-        'computeLaunchTemplateVersion.$': '$[1].computeLaunchTemplateVersion',
-        'instanceProfileArn.$': '$[1].instanceProfileArn',
+        // Template-driven fields — present on both branches via the
+        // shared input from ResolveTemplate; read from branch 0.
+        'loginInstanceType.$': '$[0].loginInstanceType',
+        'instanceTypes.$': '$[0].instanceTypes',
+        'maxNodes.$': '$[0].maxNodes',
+        'minNodes.$': '$[0].minNodes',
+        'purchaseOption.$': '$[0].purchaseOption',
       },
       resultPath: '$',
     });
@@ -2020,6 +2031,52 @@ export class FoundationStack extends cdk.Stack {
     // Subscribe the Lambda to the budget notification SNS topic
     this.budgetNotificationTopic.addSubscription(
       new snsSubscriptions.LambdaSubscription(this.budgetNotificationLambda),
+    );
+
+    // ---------------------------------------------------------------
+    // FSx Cleanup Lambda Function (Scheduled)
+    // ---------------------------------------------------------------
+    this.fsxCleanupLambda = new lambda.Function(this, 'FsxCleanupLambda', {
+      functionName: 'hpc-fsx-cleanup',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', 'lambda', 'fsx_cleanup')),
+      layers: [sharedLayer],
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: this.clustersTable.tableName,
+        SNS_TOPIC_ARN: this.clusterLifecycleNotificationTopic.topicArn,
+      },
+      description: 'Detects and deletes orphaned FSx for Lustre filesystems on a schedule',
+    });
+
+    // Grant DynamoDB read-only access on Clusters table (no write permissions)
+    this.clustersTable.grantReadData(this.fsxCleanupLambda);
+
+    // Grant FSx permissions for describing and deleting filesystems and DRAs
+    this.fsxCleanupLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:DescribeFileSystems',
+        'fsx:DescribeDataRepositoryAssociations',
+        'fsx:DeleteDataRepositoryAssociation',
+        'fsx:DeleteFileSystem',
+      ],
+      resources: ['*'],
+    }));
+
+    // Grant SNS publish on the cluster lifecycle notification topic
+    this.clusterLifecycleNotificationTopic.grantPublish(this.fsxCleanupLambda);
+
+    // EventBridge rule to trigger FSx cleanup every 6 hours
+    this.fsxCleanupScheduleRule = new events.Rule(this, 'FsxCleanupScheduleRule', {
+      ruleName: 'hpc-fsx-cleanup-schedule',
+      description: 'Triggers the FSx cleanup Lambda every 6 hours to remove orphaned filesystems',
+      schedule: events.Schedule.rate(cdk.Duration.hours(6)),
+    });
+
+    this.fsxCleanupScheduleRule.addTarget(
+      new eventsTargets.LambdaFunction(this.fsxCleanupLambda),
     );
 
     // ---------------------------------------------------------------
