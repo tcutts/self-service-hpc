@@ -1662,7 +1662,7 @@ function renderClustersPage(container, params) {
       <div style="display:flex;gap:0.75rem;align-items:flex-end">
         <div class="form-group" style="flex:1;margin-bottom:0">
           <label for="cluster-project-id">Project ID</label>
-          <input type="text" id="cluster-project-id" placeholder="Enter project ID" value="${esc(projectId)}" />
+          <input type="text" id="cluster-project-id" placeholder="Enter project ID" value="${esc(projectId)}" autocomplete="off" />
         </div>
         <button class="btn btn-primary" id="btn-load-clusters">Load Clusters</button>
         <button class="btn btn-primary" id="btn-create-cluster">Create Cluster</button>
@@ -1789,8 +1789,7 @@ function renderClustersPage(container, params) {
     document.getElementById('template-preview').style.display = 'none';
     document.getElementById('lustre-capacity-group').style.display = 'none';
     // Reset storage mode to default
-    const mountpointRadio = document.querySelector('input[name="storage-mode"][value="mountpoint"]');
-    if (mountpointRadio) mountpointRadio.checked = true;
+    document.getElementById('new-cluster-storage-mode').value = 'mountpoint';
   });
   document.getElementById('btn-submit-cluster').addEventListener('click', async () => {
     const pid = document.getElementById('cluster-project-id').value.trim();
@@ -1799,7 +1798,7 @@ function renderClustersPage(container, params) {
     if (!clusterName) return showToast('Cluster name is required', 'error');
     if (!templateId) return showToast('Please select a template', 'error');
 
-    const storageMode = document.querySelector('input[name="storage-mode"]:checked').value;
+    const storageMode = document.getElementById('new-cluster-storage-mode').value;
     const body = { clusterName, templateId, storageMode };
 
     if (storageMode === 'lustre') {
@@ -1823,6 +1822,12 @@ function renderClustersPage(container, params) {
 
   // Auto-load if projectId was provided
   if (projectId) loadClusters(projectId);
+
+  // Lazy autocomplete for project ID
+  attachAutocomplete('cluster-project-id', async () => {
+    const data = await apiCall('GET', '/projects');
+    return (data.projects || []).map(p => ({ value: p.projectId, label: p.projectName || p.projectId }));
+  });
 }
 
 async function loadClusters(projectId) {
@@ -2159,7 +2164,7 @@ function renderMembersPage(container) {
       <h3>Add Member</h3>
       <div class="form-group">
         <label for="new-member-user-id">User ID</label>
-        <input type="text" id="new-member-user-id" placeholder="jsmith" />
+        <input type="text" id="new-member-user-id" placeholder="jsmith" autocomplete="off" />
       </div>
       <div class="form-group">
         <label for="new-member-role">Role</label>
@@ -2192,6 +2197,14 @@ function renderMembersPage(container) {
   });
 
   loadMembers(projectId);
+
+  // Lazy autocomplete for user ID (active users only)
+  attachAutocomplete('new-member-user-id', async () => {
+    const data = await apiCall('GET', '/users');
+    return (data.users || [])
+      .filter(u => u.status === 'ACTIVE')
+      .map(u => ({ value: u.userId, label: u.displayName || u.userId }));
+  });
 }
 
 async function loadMembers(projectId) {
@@ -2274,7 +2287,7 @@ function renderAccountingPage(container) {
       <div style="display:flex;gap:0.75rem;align-items:flex-end">
         <div class="form-group" style="flex:1;margin-bottom:0">
           <label for="acct-project-id">Project ID (optional — leave blank for all)</label>
-          <input type="text" id="acct-project-id" placeholder="Filter by project ID" />
+          <input type="text" id="acct-project-id" placeholder="Filter by project ID" autocomplete="off" />
         </div>
         <button class="btn btn-primary" id="btn-query-accounting">Query Jobs</button>
       </div>
@@ -2295,11 +2308,147 @@ function renderAccountingPage(container) {
       el.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
     }
   });
+
+  // Lazy autocomplete for project ID
+  attachAutocomplete('acct-project-id', async () => {
+    const data = await apiCall('GET', '/projects');
+    return (data.projects || []).map(p => ({ value: p.projectId, label: p.projectName || p.projectId }));
+  });
 }
 
 /* ============================================================
    Utility
    ============================================================ */
+
+/**
+ * Attach a lazy, debounced autocomplete dropdown to a text input.
+ *
+ * On the first keystroke the fetchFn is called to retrieve the full
+ * option list.  The result is cached so subsequent keystrokes filter
+ * locally without additional API calls.  The cache is per-input so
+ * navigating away and back triggers a fresh fetch.
+ *
+ * @param {string}   inputId   - DOM id of the text input
+ * @param {Function} fetchFn   - async () => Array<{value, label}>
+ * @param {number}   [delay=200] - debounce delay in ms
+ */
+function attachAutocomplete(inputId, fetchFn, delay = 200) {
+  const input = document.getElementById(inputId);
+  if (!input) return;
+
+  let cache = null;      // null = not yet fetched
+  let loading = false;
+  let timer = null;
+  let dropdown = null;
+  let selectedIdx = -1;
+
+  // Ensure the parent can anchor the absolute dropdown
+  const wrapper = input.parentElement;
+  if (wrapper) wrapper.style.position = 'relative';
+
+  function createDropdown() {
+    if (dropdown) return dropdown;
+    dropdown = document.createElement('ul');
+    dropdown.className = 'autocomplete-list';
+    dropdown.setAttribute('role', 'listbox');
+    dropdown.id = inputId + '-autocomplete-list';
+    input.setAttribute('aria-autocomplete', 'list');
+    input.setAttribute('aria-controls', dropdown.id);
+    input.parentElement.appendChild(dropdown);
+    return dropdown;
+  }
+
+  function hideDropdown() {
+    if (dropdown) {
+      dropdown.style.display = 'none';
+      input.removeAttribute('aria-activedescendant');
+    }
+    selectedIdx = -1;
+  }
+
+  function showFiltered(query) {
+    if (!cache) { hideDropdown(); return; }
+    const q = query.toLowerCase();
+    const matches = q
+      ? cache.filter(item =>
+          item.value.toLowerCase().includes(q) ||
+          item.label.toLowerCase().includes(q)
+        )
+      : [];
+    if (!matches.length) { hideDropdown(); return; }
+
+    const dl = createDropdown();
+    dl.innerHTML = matches.slice(0, 20).map((item, i) => {
+      const id = inputId + '-opt-' + i;
+      const primary = esc(item.value);
+      const secondary = item.label !== item.value ? ` <span class="autocomplete-label">${esc(item.label)}</span>` : '';
+      return `<li role="option" id="${id}" class="autocomplete-item" data-value="${esc(item.value)}">${primary}${secondary}</li>`;
+    }).join('');
+    dl.style.display = 'block';
+    selectedIdx = -1;
+
+    dl.querySelectorAll('.autocomplete-item').forEach(li => {
+      li.addEventListener('mousedown', (e) => {
+        e.preventDefault();          // keep focus on input
+        input.value = li.dataset.value;
+        hideDropdown();
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+      });
+    });
+  }
+
+  function updateHighlight() {
+    if (!dropdown) return;
+    const items = dropdown.querySelectorAll('.autocomplete-item');
+    items.forEach((li, i) => {
+      li.classList.toggle('autocomplete-item-active', i === selectedIdx);
+    });
+    if (selectedIdx >= 0 && items[selectedIdx]) {
+      input.setAttribute('aria-activedescendant', items[selectedIdx].id);
+      items[selectedIdx].scrollIntoView({ block: 'nearest' });
+    } else {
+      input.removeAttribute('aria-activedescendant');
+    }
+  }
+
+  input.addEventListener('input', () => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      if (!cache && !loading) {
+        loading = true;
+        try { cache = await fetchFn(); } catch (_) { cache = []; }
+        loading = false;
+      }
+      showFiltered(input.value.trim());
+    }, delay);
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (!dropdown || dropdown.style.display === 'none') return;
+    const items = dropdown.querySelectorAll('.autocomplete-item');
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      selectedIdx = Math.min(selectedIdx + 1, items.length - 1);
+      updateHighlight();
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      selectedIdx = Math.max(selectedIdx - 1, 0);
+      updateHighlight();
+    } else if (e.key === 'Enter' && selectedIdx >= 0) {
+      e.preventDefault();
+      input.value = items[selectedIdx].dataset.value;
+      hideDropdown();
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    } else if (e.key === 'Escape') {
+      hideDropdown();
+    }
+  });
+
+  input.addEventListener('blur', () => {
+    // Small delay so mousedown on dropdown items fires first
+    setTimeout(hideDropdown, 150);
+  });
+}
 
 function esc(str) {
   const div = document.createElement('div');

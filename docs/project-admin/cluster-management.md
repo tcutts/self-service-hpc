@@ -22,6 +22,8 @@ Clusters are created from predefined **cluster templates** that specify instance
 
 Before creating a cluster, review the available templates:
 
+> **Tip:** The Project ID field on the Clusters page provides autocomplete suggestions from your existing projects. Start typing to see matching project IDs.
+
 ### Response (200 OK)
 
 ```json

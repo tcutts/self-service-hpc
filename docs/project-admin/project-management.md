@@ -55,6 +55,8 @@ Each member entry includes:
 **Endpoint:** `POST /projects/{projectId}/members`
 **Required role:** Project Administrator (for this project)
 
+> **Tip:** The User ID field provides autocomplete suggestions from active platform users. Start typing to see matching user IDs.
+
 #### Request
 
 ```json
