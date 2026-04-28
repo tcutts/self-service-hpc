@@ -1,0 +1,844 @@
+import * as cdk from 'aws-cdk-lib';
+import * as apigateway from 'aws-cdk-lib/aws-apigateway';
+import * as cognito from 'aws-cdk-lib/aws-cognito';
+import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as iam from 'aws-cdk-lib/aws-iam';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
+import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
+import * as tasks from 'aws-cdk-lib/aws-stepfunctions-tasks';
+import * as sns from 'aws-cdk-lib/aws-sns';
+import * as path from 'path';
+import { Construct } from 'constructs';
+
+export interface ClusterOperationsProps {
+  clustersTable: dynamodb.Table;
+  projectsTable: dynamodb.Table;
+  clusterNameRegistryTable: dynamodb.Table;
+  platformUsersTable: dynamodb.Table;
+  clusterTemplatesTable: dynamodb.Table;
+  userPool: cognito.UserPool;
+  cognitoAuthorizer: apigateway.CognitoUserPoolsAuthorizer;
+  sharedLayer: lambda.LayerVersion;
+  clusterLifecycleNotificationTopic: sns.Topic;
+  projectIdResource: apigateway.Resource;
+}
+
+/**
+ * Encapsulates the cluster operations Lambda, cluster creation/destruction
+ * step Lambdas, both state machines, all associated IAM policies, and the
+ * cluster API routes for the HPC platform.
+ */
+export class ClusterOperations extends Construct {
+  /** The cluster operations Lambda function. */
+  public readonly clusterOperationsLambda: lambda.Function;
+  /** The cluster creation state machine. */
+  public readonly clusterCreationStateMachine: sfn.StateMachine;
+  /** The cluster destruction state machine. */
+  public readonly clusterDestructionStateMachine: sfn.StateMachine;
+
+  constructor(scope: Construct, id: string, props: ClusterOperationsProps) {
+    super(scope, id);
+
+    // ---------------------------------------------------------------
+    // Cluster Operations Lambda Function
+    // ---------------------------------------------------------------
+    this.clusterOperationsLambda = new lambda.Function(this, 'ClusterOperationsLambda', {
+      functionName: 'hpc-cluster-operations',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'handler.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      layers: [props.sharedLayer],
+      timeout: cdk.Duration.seconds(60),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+        PROJECTS_TABLE_NAME: props.projectsTable.tableName,
+        CLUSTER_NAME_REGISTRY_TABLE_NAME: props.clusterNameRegistryTable.tableName,
+        USERS_TABLE_NAME: props.platformUsersTable.tableName,
+        CREATION_STATE_MACHINE_ARN: '', // set after state machine creation by orchestrator
+        DESTRUCTION_STATE_MACHINE_ARN: '', // set after state machine creation by orchestrator
+        CLUSTER_LIFECYCLE_SNS_TOPIC_ARN: props.clusterLifecycleNotificationTopic.topicArn,
+        USER_POOL_ID: props.userPool.userPoolId,
+      },
+      description: 'Handles cluster CRUD operations and orchestrates creation/destruction via Step Functions',
+    });
+
+    // Grant DynamoDB read/write on Clusters, Projects, ClusterNameRegistry, and PlatformUsers tables
+    props.clustersTable.grantReadWriteData(this.clusterOperationsLambda);
+    props.projectsTable.grantReadData(this.clusterOperationsLambda);
+    props.clusterNameRegistryTable.grantReadWriteData(this.clusterOperationsLambda);
+    props.platformUsersTable.grantReadData(this.clusterOperationsLambda);
+
+    // Grant SNS publish for cluster lifecycle notifications
+    props.clusterLifecycleNotificationTopic.grantPublish(this.clusterOperationsLambda);
+
+    // Grant Cognito read for authorisation checks
+    this.clusterOperationsLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'cognito-idp:AdminListGroupsForUser',
+        'cognito-idp:AdminGetUser',
+      ],
+      resources: [props.userPool.userPoolArn],
+    }));
+
+    // ---------------------------------------------------------------
+    // Step Functions — Cluster Creation Step Lambda
+    // ---------------------------------------------------------------
+    const clusterCreationStepLambda = new lambda.Function(this, 'ClusterCreationStepLambda', {
+      functionName: 'hpc-cluster-creation-steps',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'cluster_creation.step_handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+        PROJECTS_TABLE_NAME: props.projectsTable.tableName,
+        CLUSTER_NAME_REGISTRY_TABLE_NAME: props.clusterNameRegistryTable.tableName,
+        USERS_TABLE_NAME: props.platformUsersTable.tableName,
+        CLUSTER_LIFECYCLE_SNS_TOPIC_ARN: props.clusterLifecycleNotificationTopic.topicArn,
+        TEMPLATES_TABLE_NAME: props.clusterTemplatesTable.tableName,
+      },
+      description: 'Executes individual steps of the cluster creation workflow',
+    });
+
+    // Grant creation step Lambda broad permissions for PCS, FSx, DynamoDB, SNS, tagging
+    props.clustersTable.grantReadWriteData(clusterCreationStepLambda);
+    props.projectsTable.grantReadData(clusterCreationStepLambda);
+    props.clusterNameRegistryTable.grantReadWriteData(clusterCreationStepLambda);
+    props.platformUsersTable.grantReadData(clusterCreationStepLambda);
+    props.clusterTemplatesTable.grantReadData(clusterCreationStepLambda);
+    props.clusterLifecycleNotificationTopic.grantPublish(clusterCreationStepLambda);
+
+    // SNS subscribe permission for lifecycle notifications
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['sns:Subscribe'],
+      resources: [props.clusterLifecycleNotificationTopic.topicArn],
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'pcs:GetCluster',
+        'pcs:CreateCluster',
+        'pcs:CreateComputeNodeGroup',
+        'pcs:CreateQueue',
+        'pcs:DescribeCluster',
+        'pcs:DescribeComputeNodeGroup',
+        'pcs:DescribeQueue',
+        'pcs:DeleteCluster',
+        'pcs:DeleteComputeNodeGroup',
+        'pcs:DeleteQueue',
+        'pcs:TagResource',
+      ],
+      resources: ['*'],
+    }));
+
+    // PCS CreateCluster creates a Secrets Manager secret for the Slurm auth
+    // key using the caller's credentials, so the Lambda needs these permissions.
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: ['arn:aws:secretsmanager:*:*:secret:pcs!slurm-secret-*'],
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:CreateFileSystem',
+        'fsx:DescribeFileSystems',
+        'fsx:DeleteFileSystem',
+        'fsx:TagResource',
+        'fsx:CreateDataRepositoryAssociation',
+        'fsx:DescribeDataRepositoryAssociations',
+      ],
+      resources: ['*'],
+    }));
+
+    // S3 permissions required by FSx
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        's3:Get*',
+        's3:List*',
+        's3:PutObject',
+      ],
+      resources: ['*'],
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeSubnets',
+        'ec2:DescribeSecurityGroups',
+        'ec2:GetSecurityGroupsForVpc',
+        'ec2:DescribeVpcs',
+        'ec2:CreateNetworkInterface',
+        'ec2:DescribeNetworkInterfaces',
+        'ec2:CreateTags',
+      ],
+      resources: ['*'],
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'tag:TagResources',
+        'tag:UntagResources',
+      ],
+      resources: ['*'],
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:PassRole',
+        'iam:GetRole',
+      ],
+      resources: ['*'],
+    }));
+
+    // FSx for Lustre service-linked roles
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:CreateServiceLinkedRole'],
+      resources: ['arn:aws:iam::*:role/aws-service-role/fsx.amazonaws.com/*'],
+      conditions: {
+        'StringLike': {
+          'iam:AWSServiceName': 'fsx.amazonaws.com',
+        },
+      },
+    }));
+
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateServiceLinkedRole',
+        'iam:AttachRolePolicy',
+        'iam:PutRolePolicy',
+      ],
+      resources: ['arn:aws:iam::*:role/aws-service-role/s3.data-source.lustre.fsx.amazonaws.com/*'],
+      conditions: {
+        'StringLike': {
+          'iam:AWSServiceName': 's3.data-source.lustre.fsx.amazonaws.com',
+        },
+      },
+    }));
+
+    // IAM management permissions for per-cluster instance profile lifecycle
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateRole',
+        'iam:DeleteRole',
+        'iam:TagRole',
+        'iam:UntagRole',
+        'iam:AttachRolePolicy',
+        'iam:DetachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:DeleteRolePolicy',
+        'iam:CreateInstanceProfile',
+        'iam:DeleteInstanceProfile',
+        'iam:TagInstanceProfile',
+        'iam:AddRoleToInstanceProfile',
+        'iam:RemoveRoleFromInstanceProfile',
+        'iam:PassRole',
+        'iam:GetInstanceProfile',
+      ],
+      resources: [
+        'arn:aws:iam::*:role/AWSPCS-*',
+        'arn:aws:iam::*:instance-profile/AWSPCS-*',
+      ],
+    }));
+
+    // ---------------------------------------------------------------
+    // Step Functions — Cluster Destruction Step Lambda
+    // ---------------------------------------------------------------
+    const clusterDestructionStepLambda = new lambda.Function(this, 'ClusterDestructionStepLambda', {
+      functionName: 'hpc-cluster-destruction-steps',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'cluster_destruction.step_handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 512,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+      },
+      description: 'Executes individual steps of the cluster destruction workflow',
+    });
+
+    // Grant destruction step Lambda permissions
+    props.clustersTable.grantReadWriteData(clusterDestructionStepLambda);
+
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'pcs:DeleteCluster',
+        'pcs:DeleteComputeNodeGroup',
+        'pcs:DeleteQueue',
+        'pcs:DescribeCluster',
+      ],
+      resources: ['*'],
+    }));
+
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:CreateDataRepositoryTask',
+        'fsx:DescribeDataRepositoryTasks',
+        'fsx:DeleteFileSystem',
+        'fsx:DescribeFileSystems',
+      ],
+      resources: ['*'],
+    }));
+
+    // IAM management permissions for per-cluster instance profile cleanup
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'iam:CreateRole',
+        'iam:DeleteRole',
+        'iam:TagRole',
+        'iam:UntagRole',
+        'iam:AttachRolePolicy',
+        'iam:DetachRolePolicy',
+        'iam:PutRolePolicy',
+        'iam:DeleteRolePolicy',
+        'iam:CreateInstanceProfile',
+        'iam:DeleteInstanceProfile',
+        'iam:AddRoleToInstanceProfile',
+        'iam:RemoveRoleFromInstanceProfile',
+        'iam:PassRole',
+        'iam:GetInstanceProfile',
+      ],
+      resources: [
+        'arn:aws:iam::*:role/AWSPCS-*',
+        'arn:aws:iam::*:instance-profile/AWSPCS-*',
+      ],
+    }));
+
+    // ---------------------------------------------------------------
+    // Cluster Creation State Machine Definition
+    // ---------------------------------------------------------------
+
+    // Step 1: Validate and register cluster name
+    const validateAndRegisterName = new tasks.LambdaInvoke(this, 'ValidateAndRegisterName', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'validate_and_register_name',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2: Check budget breach
+    const checkBudgetBreach = new tasks.LambdaInvoke(this, 'CheckBudgetBreach', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_budget_breach',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2b: Resolve template fields from ClusterTemplates table
+    const resolveTemplate = new tasks.LambdaInvoke(this, 'ResolveTemplate', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'resolve_template',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2c: Create per-cluster IAM resources (roles + instance profiles)
+    const createIamResources = new tasks.LambdaInvoke(this, 'CreateIamResources', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_iam_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2d: Wait for instance profiles to propagate
+    const waitForInstanceProfiles = new tasks.LambdaInvoke(this, 'WaitForInstanceProfiles', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'wait_for_instance_profiles',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForInstanceProfilesPropagation = new sfn.Wait(this, 'WaitForInstanceProfilesPropagation', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(10)),
+    });
+
+    // Step 3: Create FSx filesystem
+    const createFsxFilesystem = new tasks.LambdaInvoke(this, 'CreateFsxFilesystem', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_fsx_filesystem',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 4: Check FSx status (with wait loop)
+    const checkFsxStatus = new tasks.LambdaInvoke(this, 'CheckFsxStatus', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_fsx_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForFsx = new sfn.Wait(this, 'WaitForFsx', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
+    // Step 4b: Create Data Repository Association (after FSx is available)
+    const createFsxDra = new tasks.LambdaInvoke(this, 'CreateFsxDra', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_fsx_dra',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 5: Create PCS cluster
+    const createPcsCluster = new tasks.LambdaInvoke(this, 'CreatePcsCluster', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_pcs_cluster',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 5b: Check PCS cluster status (with wait loop)
+    const checkPcsClusterStatus = new tasks.LambdaInvoke(this, 'CheckPcsClusterStatus', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_pcs_cluster_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForPcsCluster = new sfn.Wait(this, 'WaitForPcsCluster', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
+    // Step 6: Create login node group
+    const createLoginNodeGroup = new tasks.LambdaInvoke(this, 'CreateLoginNodeGroup', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_login_node_group',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 7: Create compute node group
+    const createComputeNodeGroup = new tasks.LambdaInvoke(this, 'CreateComputeNodeGroup', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_compute_node_group',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 8: Create PCS queue
+    const createPcsQueue = new tasks.LambdaInvoke(this, 'CreatePcsQueue', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_pcs_queue',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 9: Tag resources
+    const tagResources = new tasks.LambdaInvoke(this, 'TagResources', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'tag_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 10: Record cluster in DynamoDB
+    const recordCluster = new tasks.LambdaInvoke(this, 'RecordCluster', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'record_cluster',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Rollback handler on failure
+    const handleCreationFailure = new tasks.LambdaInvoke(this, 'HandleCreationFailure', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'handle_creation_failure',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const creationFailed = new sfn.Fail(this, 'CreationFailed', {
+      cause: 'Cluster creation failed',
+      error: 'ClusterCreationError',
+    });
+
+    // Last-resort DynamoDB UpdateItem task: when the rollback handler
+    // itself fails, this direct SDK call marks the cluster as FAILED
+    // so the record never stays stuck in CREATING.
+    const markClusterFailed = new tasks.CallAwsService(this, 'MarkClusterFailed', {
+      service: 'dynamodb',
+      action: 'updateItem',
+      parameters: {
+        TableName: props.clustersTable.tableName,
+        Key: {
+          PK: { S: sfn.JsonPath.format('PROJECT#{}', sfn.JsonPath.stringAt('$.projectId')) },
+          SK: { S: sfn.JsonPath.format('CLUSTER#{}', sfn.JsonPath.stringAt('$.clusterName')) },
+        },
+        UpdateExpression: 'SET #s = :status, #err = :errorMsg, #ua = :updatedAt',
+        ExpressionAttributeNames: {
+          '#s': 'status',
+          '#err': 'errorMessage',
+          '#ua': 'updatedAt',
+        },
+        ExpressionAttributeValues: {
+          ':status': { S: 'FAILED' },
+          ':errorMsg': { S: 'Cluster creation failed \u2014 rollback handler encountered an error' },
+          ':updatedAt': { S: sfn.JsonPath.stringAt('$.State.EnteredTime') },
+        },
+      },
+      iamResources: [props.clustersTable.tableArn],
+      resultPath: '$.markFailedResult',
+    });
+
+    // If the MarkClusterFailed SDK call itself fails, proceed to the Fail state anyway
+    markClusterFailed.addCatch(creationFailed, { resultPath: '$.error' });
+    markClusterFailed.next(creationFailed);
+
+    const creationSuccess = new sfn.Succeed(this, 'CreationSucceeded');
+
+    // Add catch to all steps for rollback
+    const catchConfig: sfn.CatchProps = { resultPath: '$.error' };
+    const failureChain = handleCreationFailure.next(creationFailed);
+
+    // If the rollback handler itself fails, route through MarkClusterFailed
+    handleCreationFailure.addCatch(markClusterFailed, { resultPath: '$.error' });
+
+    validateAndRegisterName.addCatch(failureChain, catchConfig);
+    checkBudgetBreach.addCatch(failureChain, catchConfig);
+    resolveTemplate.addCatch(failureChain, catchConfig);
+    createIamResources.addCatch(failureChain, catchConfig);
+    waitForInstanceProfiles.addCatch(failureChain, catchConfig);
+    createLoginNodeGroup.addCatch(failureChain, catchConfig);
+    createComputeNodeGroup.addCatch(failureChain, catchConfig);
+    createPcsQueue.addCatch(failureChain, catchConfig);
+    tagResources.addCatch(failureChain, catchConfig);
+    recordCluster.addCatch(failureChain, catchConfig);
+
+    // FSx wait loop: check status → if not available, wait → check again
+    const fsxWaitLoop = waitForFsx.next(checkFsxStatus);
+    const isFsxAvailable = new sfn.Choice(this, 'IsFsxAvailable')
+      .when(sfn.Condition.booleanEquals('$.fsxAvailable', true), createFsxDra)
+      .otherwise(fsxWaitLoop);
+
+    // PCS cluster wait loop: check status → if not active, wait → check again
+    const pcsWaitLoop = waitForPcsCluster.next(checkPcsClusterStatus);
+    const isPcsClusterActive = new sfn.Choice(this, 'IsPcsClusterActive')
+      .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), new sfn.Pass(this, 'PcsClusterReady'))
+      .otherwise(pcsWaitLoop);
+
+    // --- Parallel execution: FSx branch and PCS branch run concurrently ---
+
+    // FSx branch: create filesystem → wait for available → create DRA
+    const fsxBranch = createFsxFilesystem
+      .next(checkFsxStatus)
+      .next(isFsxAvailable);
+
+    // PCS branch: create cluster → wait for active
+    const pcsBranch = createPcsCluster
+      .next(checkPcsClusterStatus)
+      .next(isPcsClusterActive);
+
+    const parallelFsxAndPcs = new sfn.Parallel(this, 'ParallelFsxAndPcs', {
+      comment: 'Create FSx filesystem and PCS cluster in parallel',
+      resultSelector: {
+        'projectId.$': '$[0].projectId',
+        'clusterName.$': '$[0].clusterName',
+        'templateId.$': '$[0].templateId',
+        'createdBy.$': '$[0].createdBy',
+        'vpcId.$': '$[0].vpcId',
+        'efsFileSystemId.$': '$[0].efsFileSystemId',
+        's3BucketName.$': '$[0].s3BucketName',
+        'publicSubnetIds.$': '$[0].publicSubnetIds',
+        'privateSubnetIds.$': '$[0].privateSubnetIds',
+        'securityGroupIds.$': '$[0].securityGroupIds',
+        'fsxFilesystemId.$': '$[0].fsxFilesystemId',
+        'fsxDnsName.$': '$[0].fsxDnsName',
+        'fsxMountName.$': '$[0].fsxMountName',
+        'fsxDraId.$': '$[0].fsxDraId',
+        'pcsClusterId.$': '$[1].pcsClusterId',
+        'pcsClusterArn.$': '$[1].pcsClusterArn',
+        // Template-driven fields
+        'loginInstanceType.$': '$[0].loginInstanceType',
+        'instanceTypes.$': '$[0].instanceTypes',
+        'maxNodes.$': '$[0].maxNodes',
+        'minNodes.$': '$[0].minNodes',
+        'purchaseOption.$': '$[0].purchaseOption',
+        // PCS compute node group fields
+        'loginInstanceProfileArn.$': '$[0].loginInstanceProfileArn',
+        'computeInstanceProfileArn.$': '$[0].computeInstanceProfileArn',
+        'loginLaunchTemplateId.$': '$[0].loginLaunchTemplateId',
+        'computeLaunchTemplateId.$': '$[0].computeLaunchTemplateId',
+      },
+      resultPath: '$',
+    });
+
+    parallelFsxAndPcs.branch(fsxBranch, pcsBranch);
+    parallelFsxAndPcs.addCatch(failureChain, catchConfig);
+
+    // Instance profile wait loop: check ready → if not ready, wait → check again
+    const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
+    const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
+      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), parallelFsxAndPcs)
+      .otherwise(instanceProfileWaitLoop);
+
+    // Chain: validate → budget → resolve template → create IAM resources → wait for instance profiles (loop) → parallel(FSx, PCS) → login nodes → compute → queue → tag → record → success
+    const creationDefinition = validateAndRegisterName
+      .next(checkBudgetBreach)
+      .next(resolveTemplate)
+      .next(createIamResources)
+      .next(waitForInstanceProfiles)
+      .next(areInstanceProfilesReady);
+
+    // Post-parallel chain
+    parallelFsxAndPcs
+      .next(createLoginNodeGroup)
+      .next(createComputeNodeGroup)
+      .next(createPcsQueue)
+      .next(tagResources)
+      .next(recordCluster)
+      .next(creationSuccess);
+
+    this.clusterCreationStateMachine = new sfn.StateMachine(this, 'ClusterCreationStateMachine', {
+      stateMachineName: 'hpc-cluster-creation',
+      definitionBody: sfn.DefinitionBody.fromChainable(creationDefinition),
+      timeout: cdk.Duration.hours(2),
+      tracingEnabled: true,
+    });
+
+    // ---------------------------------------------------------------
+    // Cluster Destruction State Machine Definition
+    // ---------------------------------------------------------------
+
+    // Step 1: Create FSx export task
+    const createFsxExportTask = new tasks.LambdaInvoke(this, 'CreateFsxExportTask', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_fsx_export_task',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 2: Check FSx export status (with wait loop)
+    const checkFsxExportStatus = new tasks.LambdaInvoke(this, 'CheckFsxExportStatus', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_fsx_export_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForExport = new sfn.Wait(this, 'WaitForExport', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(60)),
+    });
+
+    // Step 3: Delete PCS resources
+    const deletePcsResources = new tasks.LambdaInvoke(this, 'DeletePcsResources', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_pcs_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 4: Delete FSx filesystem
+    const deleteFsxFilesystem = new tasks.LambdaInvoke(this, 'DeleteFsxFilesystem', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_fsx_filesystem',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 5: Record cluster as destroyed
+    const recordClusterDestroyed = new tasks.LambdaInvoke(this, 'RecordClusterDestroyed', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'record_cluster_destroyed',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const destructionSuccess = new sfn.Succeed(this, 'DestructionSucceeded');
+
+    // Step 5b: Delete per-cluster IAM resources (roles + instance profiles)
+    const deleteIamResources = new tasks.LambdaInvoke(this, 'DeleteIamResources', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_iam_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Export wait loop: check status → if not complete, wait → check again
+    const exportWaitLoop = waitForExport.next(checkFsxExportStatus);
+    const isExportComplete = new sfn.Choice(this, 'IsExportComplete')
+      .when(sfn.Condition.booleanEquals('$.exportComplete', true), deletePcsResources)
+      .otherwise(exportWaitLoop);
+
+    // Chain: steps 1-2 → export wait loop → steps 3-5 → success
+    const destructionDefinition = createFsxExportTask
+      .next(checkFsxExportStatus)
+      .next(isExportComplete);
+
+    // Post-export chain
+    deletePcsResources
+      .next(deleteFsxFilesystem)
+      .next(deleteIamResources)
+      .next(recordClusterDestroyed)
+      .next(destructionSuccess);
+
+    this.clusterDestructionStateMachine = new sfn.StateMachine(this, 'ClusterDestructionStateMachine', {
+      stateMachineName: 'hpc-cluster-destruction',
+      definitionBody: sfn.DefinitionBody.fromChainable(destructionDefinition),
+      timeout: cdk.Duration.hours(2),
+      tracingEnabled: true,
+    });
+
+    // Grant Step Functions execution roles permissions for PCS, FSx, EC2, tagging, DynamoDB
+    this.clusterCreationStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'pcs:CreateCluster',
+        'pcs:CreateComputeNodeGroup',
+        'pcs:CreateQueue',
+        'pcs:DescribeCluster',
+        'pcs:DeleteCluster',
+        'pcs:DeleteComputeNodeGroup',
+        'pcs:DeleteQueue',
+        'pcs:TagResource',
+      ],
+      resources: ['*'],
+    }));
+
+    this.clusterCreationStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:CreateFileSystem',
+        'fsx:DescribeFileSystems',
+        'fsx:DeleteFileSystem',
+        'fsx:TagResource',
+        'fsx:CreateDataRepositoryAssociation',
+        'fsx:DescribeDataRepositoryAssociations',
+      ],
+      resources: ['*'],
+    }));
+
+    this.clusterCreationStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeSubnets',
+        'ec2:DescribeSecurityGroups',
+        'ec2:DescribeVpcs',
+        'ec2:CreateTags',
+      ],
+      resources: ['*'],
+    }));
+
+    this.clusterCreationStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'tag:TagResources',
+        'tag:UntagResources',
+      ],
+      resources: ['*'],
+    }));
+
+    this.clusterDestructionStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'pcs:DeleteCluster',
+        'pcs:DeleteComputeNodeGroup',
+        'pcs:DeleteQueue',
+        'pcs:DescribeCluster',
+      ],
+      resources: ['*'],
+    }));
+
+    this.clusterDestructionStateMachine.role.addToPrincipalPolicy(new iam.PolicyStatement({
+      actions: [
+        'fsx:CreateDataRepositoryTask',
+        'fsx:DescribeDataRepositoryTasks',
+        'fsx:DeleteFileSystem',
+        'fsx:DescribeFileSystems',
+      ],
+      resources: ['*'],
+    }));
+
+    // ---------------------------------------------------------------
+    // API Gateway — Cluster Operations Resources
+    // ---------------------------------------------------------------
+    const clustersResource = props.projectIdResource.addResource('clusters');
+    const clusterNameResource = clustersResource.addResource('{clusterName}');
+
+    const clusterOperationsIntegration = new apigateway.LambdaIntegration(this.clusterOperationsLambda);
+
+    const cognitoMethodOptions: apigateway.MethodOptions = {
+      authorizationType: apigateway.AuthorizationType.COGNITO,
+      authorizer: props.cognitoAuthorizer,
+    };
+
+    // POST /projects/{projectId}/clusters — create cluster
+    clustersResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
+    // GET /projects/{projectId}/clusters — list clusters
+    clustersResource.addMethod('GET', clusterOperationsIntegration, cognitoMethodOptions);
+    // GET /projects/{projectId}/clusters/{clusterName} — get cluster details
+    clusterNameResource.addMethod('GET', clusterOperationsIntegration, cognitoMethodOptions);
+    // DELETE /projects/{projectId}/clusters/{clusterName} — destroy cluster
+    clusterNameResource.addMethod('DELETE', clusterOperationsIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/clusters/{clusterName}/recreate — recreate destroyed cluster
+    const recreateResource = clusterNameResource.addResource('recreate');
+    recreateResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/clusters/{clusterName}/fail — force-fail stuck cluster
+    const failResource = clusterNameResource.addResource('fail');
+    failResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
+  }
+}
