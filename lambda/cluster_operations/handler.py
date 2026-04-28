@@ -194,6 +194,138 @@ def _lookup_project_infrastructure(project_id: str) -> dict[str, Any]:
     return infra
 
 
+def _validate_storage_and_scaling(
+    body: dict[str, Any],
+    storage_mode_default: str = "mountpoint",
+) -> tuple[str, int, int | None, int | None]:
+    """Validate storage mode, Lustre capacity, and node scaling from a request body.
+
+    Returns ``(storage_mode, lustre_capacity_gib, min_nodes, max_nodes)``.
+    ``min_nodes`` and ``max_nodes`` are ``None`` when not supplied (meaning
+    "use template default").
+    """
+    storage_mode = body.get("storageMode", storage_mode_default)
+    if storage_mode not in ("lustre", "mountpoint"):
+        raise ValidationError(
+            f"Invalid storageMode '{storage_mode}'. Must be 'lustre' or 'mountpoint'.",
+            {"field": "storageMode"},
+        )
+
+    lustre_capacity_gib = body.get("lustreCapacityGiB", 1200)
+    if storage_mode == "lustre":
+        if not isinstance(lustre_capacity_gib, int) or lustre_capacity_gib < 1200:
+            raise ValidationError(
+                "Lustre capacity must be at least 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+        if lustre_capacity_gib % 1200 != 0:
+            raise ValidationError(
+                "Lustre capacity must be a multiple of 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+
+    min_nodes = body.get("minNodes")
+    max_nodes = body.get("maxNodes")
+    if min_nodes is not None:
+        if not isinstance(min_nodes, int) or min_nodes < 0:
+            raise ValidationError(
+                "minNodes must be a non-negative integer.",
+                {"field": "minNodes"},
+            )
+    if max_nodes is not None:
+        if not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                "maxNodes must be a positive integer.",
+                {"field": "maxNodes"},
+            )
+    if min_nodes is not None and max_nodes is not None and min_nodes > max_nodes:
+        raise ValidationError(
+            "minNodes cannot exceed maxNodes.",
+            {"fields": ["minNodes", "maxNodes"]},
+        )
+
+    return storage_mode, lustre_capacity_gib, min_nodes, max_nodes
+
+
+def _start_cluster_creation(
+    *,
+    project_id: str,
+    cluster_name: str,
+    template_id: str,
+    caller: str,
+    storage_mode: str,
+    lustre_capacity_gib: int,
+    min_nodes: int | None,
+    max_nodes: int | None,
+    action_label: str = "creation",
+) -> dict[str, Any]:
+    """Write the initial CREATING record and start the creation Step Functions execution.
+
+    Shared by both create and recreate flows.  Returns the 202 API response.
+    """
+    infra = _lookup_project_infrastructure(project_id)
+
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    clusters_table.put_item(
+        Item={
+            "PK": f"PROJECT#{project_id}",
+            "SK": f"CLUSTER#{cluster_name}",
+            "clusterName": cluster_name,
+            "projectId": project_id,
+            "templateId": template_id,
+            "storageMode": storage_mode,
+            "createdBy": caller,
+            "status": "CREATING",
+            "currentStep": 0,
+            "totalSteps": 12,
+            "stepDescription": "Starting cluster creation",
+            "createdAt": now,
+        },
+    )
+
+    timestamp = int(time.time())
+    payload = {
+        "projectId": project_id,
+        "clusterName": cluster_name,
+        "templateId": template_id,
+        "createdBy": caller,
+        "storageMode": storage_mode,
+        "lustreCapacityGiB": lustre_capacity_gib if storage_mode == "lustre" else None,
+        "minNodes": min_nodes,
+        "maxNodes": max_nodes,
+        "vpcId": infra["vpcId"],
+        "efsFileSystemId": infra["efsFileSystemId"],
+        "s3BucketName": infra["s3BucketName"],
+        "publicSubnetIds": infra["publicSubnetIds"],
+        "privateSubnetIds": infra["privateSubnetIds"],
+        "securityGroupIds": infra["securityGroupIds"],
+    }
+
+    sfn_client.start_execution(
+        stateMachineArn=CREATION_STATE_MACHINE_ARN,
+        name=f"{project_id}-{cluster_name}-{timestamp}",
+        input=json.dumps(payload),
+    )
+
+    logger.info(
+        "Cluster %s started: %s in project %s by %s",
+        action_label,
+        cluster_name,
+        project_id,
+        caller,
+    )
+    return _response(
+        202,
+        {
+            "message": f"Cluster '{cluster_name}' {action_label} started.",
+            "projectId": project_id,
+            "clusterName": cluster_name,
+            "templateId": template_id,
+        },
+    )
+
+
 def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, Any]:
     """Handle POST /projects/{projectId}/clusters — create a new cluster.
 
@@ -222,50 +354,10 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
             {"clusterName": cluster_name},
         )
 
-    # Storage mode validation
-    storage_mode = body.get("storageMode", "mountpoint")
-    if storage_mode not in ("lustre", "mountpoint"):
-        raise ValidationError(
-            f"Invalid storageMode '{storage_mode}'. Must be 'lustre' or 'mountpoint'.",
-            {"field": "storageMode"},
-        )
+    storage_mode, lustre_capacity_gib, min_nodes, max_nodes = (
+        _validate_storage_and_scaling(body)
+    )
 
-    # Lustre capacity validation (only when lustre mode)
-    lustre_capacity_gib = body.get("lustreCapacityGiB", 1200)
-    if storage_mode == "lustre":
-        if not isinstance(lustre_capacity_gib, int) or lustre_capacity_gib < 1200:
-            raise ValidationError(
-                "Lustre capacity must be at least 1200 GiB.",
-                {"field": "lustreCapacityGiB"},
-            )
-        if lustre_capacity_gib % 1200 != 0:
-            raise ValidationError(
-                "Lustre capacity must be a multiple of 1200 GiB.",
-                {"field": "lustreCapacityGiB"},
-            )
-
-    # Node scaling overrides (None means "use template default")
-    min_nodes = body.get("minNodes")
-    max_nodes = body.get("maxNodes")
-    if min_nodes is not None:
-        if not isinstance(min_nodes, int) or min_nodes < 0:
-            raise ValidationError(
-                "minNodes must be a non-negative integer.",
-                {"field": "minNodes"},
-            )
-    if max_nodes is not None:
-        if not isinstance(max_nodes, int) or max_nodes < 1:
-            raise ValidationError(
-                "maxNodes must be a positive integer.",
-                {"field": "maxNodes"},
-            )
-    if min_nodes is not None and max_nodes is not None and min_nodes > max_nodes:
-        raise ValidationError(
-            "minNodes cannot exceed maxNodes.",
-            {"fields": ["minNodes", "maxNodes"]},
-        )
-
-    # Check budget breach before starting creation
     if check_budget_breach(PROJECTS_TABLE_NAME, project_id):
         raise BudgetExceededError(
             f"Project '{project_id}' budget has been exceeded. "
@@ -273,71 +365,16 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
             {"projectId": project_id},
         )
 
-    # Look up project infrastructure details
-    infra = _lookup_project_infrastructure(project_id)
-
-    # Create the initial CREATING record in DynamoDB so the UI can
-    # immediately show the cluster with progress tracking.  This also
-    # ensures the record exists even if the Step Functions execution
-    # fails before the first step runs.
-    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
-    clusters_table.put_item(
-        Item={
-            "PK": f"PROJECT#{project_id}",
-            "SK": f"CLUSTER#{cluster_name}",
-            "clusterName": cluster_name,
-            "projectId": project_id,
-            "templateId": template_id,
-            "storageMode": storage_mode,
-            "createdBy": caller,
-            "status": "CREATING",
-            "currentStep": 0,
-            "totalSteps": 12,
-            "stepDescription": "Starting cluster creation",
-            "createdAt": now,
-        },
-    )
-
-    # Start the creation Step Functions execution
-    timestamp = int(time.time())
-    payload = {
-        "projectId": project_id,
-        "clusterName": cluster_name,
-        "templateId": template_id,
-        "createdBy": caller,
-        "storageMode": storage_mode,
-        "lustreCapacityGiB": lustre_capacity_gib if storage_mode == "lustre" else None,
-        "minNodes": min_nodes,
-        "maxNodes": max_nodes,
-        "vpcId": infra["vpcId"],
-        "efsFileSystemId": infra["efsFileSystemId"],
-        "s3BucketName": infra["s3BucketName"],
-        "publicSubnetIds": infra["publicSubnetIds"],
-        "privateSubnetIds": infra["privateSubnetIds"],
-        "securityGroupIds": infra["securityGroupIds"],
-    }
-
-    sfn_client.start_execution(
-        stateMachineArn=CREATION_STATE_MACHINE_ARN,
-        name=f"{project_id}-{cluster_name}-{timestamp}",
-        input=json.dumps(payload),
-    )
-
-    logger.info(
-        "Cluster creation started: %s in project %s by %s",
-        cluster_name,
-        project_id,
-        caller,
-    )
-    return _response(
-        202,
-        {
-            "message": f"Cluster '{cluster_name}' creation started.",
-            "projectId": project_id,
-            "clusterName": cluster_name,
-            "templateId": template_id,
-        },
+    return _start_cluster_creation(
+        project_id=project_id,
+        cluster_name=cluster_name,
+        template_id=template_id,
+        caller=caller,
+        storage_mode=storage_mode,
+        lustre_capacity_gib=lustre_capacity_gib,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        action_label="creation",
     )
 
 
@@ -455,52 +492,13 @@ def _handle_recreate_cluster(
     if not template_id:
         template_id = cluster.get("templateId", "")
 
-    # Storage mode: use request body override, or fall back to destroyed cluster record
-    storage_mode = body.get("storageMode") if body else None
-    if storage_mode is None:
-        storage_mode = cluster.get("storageMode", "mountpoint")
-    if storage_mode not in ("lustre", "mountpoint"):
-        raise ValidationError(
-            f"Invalid storageMode '{storage_mode}'. Must be 'lustre' or 'mountpoint'.",
-            {"field": "storageMode"},
-        )
+    # For storage mode, fall back to the stored value (or "mountpoint") when
+    # the request body doesn't supply one.
+    storage_mode_default = cluster.get("storageMode", "mountpoint")
+    storage_mode, lustre_capacity_gib, min_nodes, max_nodes = (
+        _validate_storage_and_scaling(body, storage_mode_default=storage_mode_default)
+    )
 
-    # Lustre capacity validation (only when lustre mode)
-    lustre_capacity_gib = body.get("lustreCapacityGiB", 1200) if body else 1200
-    if storage_mode == "lustre":
-        if not isinstance(lustre_capacity_gib, int) or lustre_capacity_gib < 1200:
-            raise ValidationError(
-                "Lustre capacity must be at least 1200 GiB.",
-                {"field": "lustreCapacityGiB"},
-            )
-        if lustre_capacity_gib % 1200 != 0:
-            raise ValidationError(
-                "Lustre capacity must be a multiple of 1200 GiB.",
-                {"field": "lustreCapacityGiB"},
-            )
-
-    # Node scaling overrides (None means "use template default")
-    min_nodes = body.get("minNodes") if body else None
-    max_nodes = body.get("maxNodes") if body else None
-    if min_nodes is not None:
-        if not isinstance(min_nodes, int) or min_nodes < 0:
-            raise ValidationError(
-                "minNodes must be a non-negative integer.",
-                {"field": "minNodes"},
-            )
-    if max_nodes is not None:
-        if not isinstance(max_nodes, int) or max_nodes < 1:
-            raise ValidationError(
-                "maxNodes must be a positive integer.",
-                {"field": "maxNodes"},
-            )
-    if min_nodes is not None and max_nodes is not None and min_nodes > max_nodes:
-        raise ValidationError(
-            "minNodes cannot exceed maxNodes.",
-            {"fields": ["minNodes", "maxNodes"]},
-        )
-
-    # Check budget breach before starting recreation
     if check_budget_breach(PROJECTS_TABLE_NAME, project_id):
         raise BudgetExceededError(
             f"Project '{project_id}' budget has been exceeded. "
@@ -508,69 +506,16 @@ def _handle_recreate_cluster(
             {"projectId": project_id},
         )
 
-    # Look up project infrastructure details
-    infra = _lookup_project_infrastructure(project_id)
-
-    # Reset the cluster record to CREATING status so the UI can
-    # immediately show progress tracking for the recreation.
-    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
-    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
-    clusters_table.put_item(
-        Item={
-            "PK": f"PROJECT#{project_id}",
-            "SK": f"CLUSTER#{cluster_name}",
-            "clusterName": cluster_name,
-            "projectId": project_id,
-            "templateId": template_id,
-            "storageMode": storage_mode,
-            "createdBy": caller,
-            "status": "CREATING",
-            "currentStep": 0,
-            "totalSteps": 12,
-            "stepDescription": "Starting cluster creation",
-            "createdAt": now,
-        },
-    )
-
-    # Start the creation Step Functions execution
-    timestamp = int(time.time())
-    payload = {
-        "projectId": project_id,
-        "clusterName": cluster_name,
-        "templateId": template_id,
-        "createdBy": caller,
-        "storageMode": storage_mode,
-        "lustreCapacityGiB": lustre_capacity_gib if storage_mode == "lustre" else None,
-        "minNodes": min_nodes,
-        "maxNodes": max_nodes,
-        "vpcId": infra["vpcId"],
-        "efsFileSystemId": infra["efsFileSystemId"],
-        "s3BucketName": infra["s3BucketName"],
-        "publicSubnetIds": infra["publicSubnetIds"],
-        "privateSubnetIds": infra["privateSubnetIds"],
-        "securityGroupIds": infra["securityGroupIds"],
-    }
-
-    sfn_client.start_execution(
-        stateMachineArn=CREATION_STATE_MACHINE_ARN,
-        name=f"{project_id}-{cluster_name}-{timestamp}",
-        input=json.dumps(payload),
-    )
-
-    logger.info(
-        "Cluster recreation started: %s in project %s by %s",
-        cluster_name,
-        project_id,
-        caller,
-    )
-    return _response(
-        202,
-        {
-            "message": f"Cluster '{cluster_name}' recreation started.",
-            "projectId": project_id,
-            "clusterName": cluster_name,
-            "templateId": template_id,
-        },
+    return _start_cluster_creation(
+        project_id=project_id,
+        cluster_name=cluster_name,
+        template_id=template_id,
+        caller=caller,
+        storage_mode=storage_mode,
+        lustre_capacity_gib=lustre_capacity_gib,
+        min_nodes=min_nodes,
+        max_nodes=max_nodes,
+        action_label="recreation",
     )
 
 
