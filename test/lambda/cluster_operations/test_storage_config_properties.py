@@ -50,6 +50,7 @@ from conftest import (
     reload_cluster_ops_handler_modules,
     _CLUSTER_OPS_DIR,
     _load_module_from,
+    _ensure_shared_modules,
 )
 
 
@@ -247,6 +248,7 @@ def test_valid_capacity_flows_to_fsx(capacity):
     os.environ["TEMPLATES_TABLE_NAME"] = "ClusterTemplates"
 
     # Load the cluster_creation module inside the mock context
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -397,6 +399,7 @@ def test_s3_iam_policy_scoped_to_bucket(bucket_name):
     _setup_env()
 
     # Load modules inside mock context
+    _ensure_shared_modules()
     _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -586,6 +589,7 @@ def test_resolve_template_preserves_overrides(user_min, user_max, storage_mode):
     })
 
     # Load modules inside mock context
+    _ensure_shared_modules()
     _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -650,6 +654,7 @@ def test_cluster_record_round_trip(storage_mode, capacity):
     clusters_table = create_clusters_table()
 
     # Load modules inside mock context
+    _ensure_shared_modules()
     _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")

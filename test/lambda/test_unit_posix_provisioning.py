@@ -286,6 +286,60 @@ class TestGenerateUserDataScript:
         )
         assert "2 user(s)" in script
 
+    def test_mountpoint_storage_includes_s3_mount_commands(self, _env):
+        """When storage_mode is 'mountpoint', the script includes S3 mount commands."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+            storage_mode="mountpoint",
+            s3_bucket_name="hpc-proj-alpha-storage",
+        )
+        assert "mount-s3 hpc-proj-alpha-storage /data" in script
+        assert "mountpoint-s3" in script
+        # Should NOT contain lustre commands
+        assert "lustre" not in script.lower() or "lustre" not in script.split("mount-s3")[0].lower()
+
+    def test_lustre_storage_includes_fsx_mount_commands(self, _env):
+        """When storage_mode is 'lustre', the script includes FSx mount commands."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+            storage_mode="lustre",
+            fsx_dns_name="fs-abc123.fsx.eu-west-1.amazonaws.com",
+            fsx_mount_name="abcdef",
+        )
+        assert "mount -t lustre" in script
+        assert "fs-abc123.fsx.eu-west-1.amazonaws.com" in script
+        assert "abcdef" in script
+        assert "/data" in script
+        # Should NOT contain mountpoint-s3 commands
+        assert "mount-s3" not in script
+
+    def test_no_storage_mode_omits_mount_commands(self, _env):
+        """When storage_mode is empty, no mount commands are generated."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+        )
+        assert "mount-s3" not in script
+        assert "mount -t lustre" not in script
+
+    def test_mountpoint_without_bucket_omits_mount_commands(self, _env):
+        """When storage_mode is 'mountpoint' but bucket is empty, no mount commands."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+            storage_mode="mountpoint",
+            s3_bucket_name="",
+        )
+        assert "mount-s3" not in script
+
+    def test_lustre_without_dns_omits_mount_commands(self, _env):
+        """When storage_mode is 'lustre' but FSx fields are empty, no mount commands."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+            storage_mode="lustre",
+            fsx_dns_name="",
+            fsx_mount_name="",
+        )
+        assert "mount -t lustre" not in script
+
 
 # ---------------------------------------------------------------------------
 # SSM propagation with retry logic

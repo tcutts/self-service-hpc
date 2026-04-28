@@ -43,6 +43,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__)))
 from conftest import (  # noqa: E402
     _CLUSTER_OPS_DIR,
     _load_module_from,
+    _ensure_shared_modules,
     create_clusters_table,
     create_projects_table,
 )
@@ -50,6 +51,7 @@ from conftest import (  # noqa: E402
 
 def _load_cluster_creation_module():
     """Load cluster_creation and all its intra-package dependencies."""
+    _ensure_shared_modules()
     _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -61,6 +63,7 @@ def _load_cluster_creation_module():
 
 def _load_handler_module():
     """Load the cluster operations handler and its dependencies."""
+    _ensure_shared_modules()
     _load_module_from(_CLUSTER_OPS_DIR, "errors")
     _load_module_from(_CLUSTER_OPS_DIR, "auth")
     _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")

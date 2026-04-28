@@ -179,6 +179,9 @@ export class ClusterOperations extends Construct {
         'ec2:CreateLaunchTemplate',
         'ec2:DeleteLaunchTemplate',
         'ec2:DescribeLaunchTemplates',
+        'ec2:DescribeLaunchTemplateVersions',
+        'ec2:DescribeInstanceTypes',
+        'ec2:DescribeInstanceTypeOfferings',
       ],
       resources: ['*'],
     }));
@@ -284,6 +287,15 @@ export class ClusterOperations extends Construct {
         'fsx:DescribeDataRepositoryTasks',
         'fsx:DeleteFileSystem',
         'fsx:DescribeFileSystems',
+      ],
+      resources: ['*'],
+    }));
+
+    // EC2 launch template cleanup permissions
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DeleteLaunchTemplate',
+        'ec2:DescribeLaunchTemplates',
       ],
       resources: ['*'],
     }));
@@ -585,32 +597,7 @@ export class ClusterOperations extends Construct {
       .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), new sfn.Pass(this, 'PcsClusterReady'))
       .otherwise(pcsWaitLoop);
 
-    // --- Mountpoint branch: PCS-only path + ConfigureMountpointS3Iam ---
-
-    // Separate PCS steps for the mountpoint branch (states can only appear once in a definition)
-    const mountpointCreatePcsCluster = new tasks.LambdaInvoke(this, 'MountpointCreatePcsCluster', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'create_pcs_cluster',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    const mountpointCheckPcsClusterStatus = new tasks.LambdaInvoke(this, 'MountpointCheckPcsClusterStatus', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'check_pcs_cluster_status',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    const mountpointWaitForPcsCluster = new sfn.Wait(this, 'MountpointWaitForPcsCluster', {
-      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
-    });
+    // --- Storage branch: choice between lustre (FSx) and mountpoint (S3 IAM) ---
 
     const configureMountpointS3Iam = new tasks.LambdaInvoke(this, 'ConfigureMountpointS3Iam', {
       lambdaFunction: clusterCreationStepLambda,
@@ -622,36 +609,28 @@ export class ClusterOperations extends Construct {
       resultPath: '$',
     });
 
-    // Add catch handlers for mountpoint branch steps
-    mountpointCreatePcsCluster.addCatch(failureChain, catchConfig);
-    mountpointCheckPcsClusterStatus.addCatch(failureChain, catchConfig);
-    configureMountpointS3Iam.addCatch(failureChain, catchConfig);
+    // Catch handlers for states inside the Parallel are not needed —
+    // the Parallel state's own addCatch covers errors from all branches.
 
-    // Mountpoint PCS wait loop
-    const mountpointPcsWaitLoop = mountpointWaitForPcsCluster.next(mountpointCheckPcsClusterStatus);
-    const mountpointIsPcsClusterActive = new sfn.Choice(this, 'MountpointIsPcsClusterActive')
-      .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), configureMountpointS3Iam)
-      .otherwise(mountpointPcsWaitLoop);
-
-    // Mountpoint branch: create PCS cluster → wait for active → configure S3 IAM
-    const mountpointPcsBranch = mountpointCreatePcsCluster
-      .next(mountpointCheckPcsClusterStatus)
-      .next(mountpointIsPcsClusterActive);
-
-    // --- Parallel execution: FSx branch and PCS branch run concurrently ---
-
-    // FSx branch: create filesystem → wait for available → create DRA
-    const fsxBranch = createFsxFilesystem
+    // Lustre storage sub-branch: create FSx → wait for available → create DRA
+    const lustreStorageBranch = createFsxFilesystem
       .next(checkFsxStatus)
       .next(isFsxAvailable);
 
-    // PCS branch: create cluster → wait for active
+    // Storage mode choice within the storage branch of the Parallel state
+    const storageModeChoice = new sfn.Choice(this, 'StorageModeChoice')
+      .when(sfn.Condition.stringEquals('$.storageMode', 'lustre'), lustreStorageBranch)
+      .otherwise(configureMountpointS3Iam);
+
+    // PCS branch: create cluster → wait for active (shared by both storage modes)
     const pcsBranch = createPcsCluster
       .next(checkPcsClusterStatus)
       .next(isPcsClusterActive);
 
-    const parallelFsxAndPcs = new sfn.Parallel(this, 'ParallelFsxAndPcs', {
-      comment: 'Create FSx filesystem and PCS cluster in parallel',
+    // --- Parallel execution: storage provisioning and PCS cluster creation run concurrently ---
+
+    const parallelStorageAndPcs = new sfn.Parallel(this, 'ParallelStorageAndPcs', {
+      comment: 'Provision storage and create PCS cluster in parallel',
       resultSelector: {
         'projectId.$': '$[0].projectId',
         'clusterName.$': '$[0].clusterName',
@@ -686,22 +665,18 @@ export class ClusterOperations extends Construct {
       resultPath: '$',
     });
 
-    parallelFsxAndPcs.branch(fsxBranch, pcsBranch);
-    parallelFsxAndPcs.addCatch(failureChain, catchConfig);
-
-    // Storage mode choice: branch on $.storageMode after instance profiles are ready
-    const storageModeChoice = new sfn.Choice(this, 'StorageModeChoice')
-      .when(sfn.Condition.stringEquals('$.storageMode', 'lustre'), parallelFsxAndPcs)
-      .otherwise(mountpointPcsBranch);
+    parallelStorageAndPcs.branch(storageModeChoice, pcsBranch);
+    parallelStorageAndPcs.addCatch(failureChain, catchConfig);
 
     // Instance profile wait loop: check ready → if not ready, wait → check again
     const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
-    createLaunchTemplates.next(storageModeChoice);
+    createLaunchTemplates.next(parallelStorageAndPcs);
     const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
       .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), createLaunchTemplates)
       .otherwise(instanceProfileWaitLoop);
 
-    // Chain: validate → budget → resolve template → create IAM resources → wait for instance profiles (loop) → StorageModeChoice → (lustre: parallel | mountpoint: PCS-only) → login nodes → compute → queue → tag → record → success
+    // Chain: validate → budget → resolve template → create IAM → wait for instance profiles (loop)
+    //   → launch templates → parallel(storage + PCS) → login nodes → compute → queue → tag → record → success
     const creationDefinition = validateAndRegisterName
       .next(checkBudgetBreach)
       .next(resolveTemplate)
@@ -709,7 +684,7 @@ export class ClusterOperations extends Construct {
       .next(waitForInstanceProfiles)
       .next(areInstanceProfilesReady);
 
-    // Post-branch chain: both lustre and mountpoint branches converge here
+    // Post-parallel chain: both storage modes converge here
     const postBranchChain = createLoginNodeGroup
       .next(createComputeNodeGroup)
       .next(createPcsQueue)
@@ -717,11 +692,7 @@ export class ClusterOperations extends Construct {
       .next(recordCluster)
       .next(creationSuccess);
 
-    // Lustre branch → createLoginNodeGroup
-    parallelFsxAndPcs.next(createLoginNodeGroup);
-
-    // Mountpoint branch → createLoginNodeGroup (via ConfigureMountpointS3Iam)
-    configureMountpointS3Iam.next(createLoginNodeGroup);
+    parallelStorageAndPcs.next(createLoginNodeGroup);
 
     this.clusterCreationStateMachine = new sfn.StateMachine(this, 'ClusterCreationStateMachine', {
       stateMachineName: 'hpc-cluster-creation',
@@ -806,6 +777,17 @@ export class ClusterOperations extends Construct {
       resultPath: '$',
     });
 
+    // Step 5c: Delete per-cluster launch templates
+    const deleteLaunchTemplates = new tasks.LambdaInvoke(this, 'DeleteLaunchTemplates', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_launch_templates',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Step: Remove Mountpoint S3 inline policy (mountpoint clusters only)
     const removeMountpointS3Policy = new tasks.LambdaInvoke(this, 'RemoveMountpointS3Policy', {
       lambdaFunction: clusterDestructionStepLambda,
@@ -841,6 +823,7 @@ export class ClusterOperations extends Construct {
     // Both branches converge at deleteIamResources
     removeMountpointS3Policy.next(deleteIamResources);
     deleteIamResources
+      .next(deleteLaunchTemplates)
       .next(recordClusterDestroyed)
       .next(destructionSuccess);
 

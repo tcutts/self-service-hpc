@@ -259,6 +259,10 @@ def generate_user_data_script(
     project_id: str,
     users_table_name: str,
     projects_table_name: str,
+    storage_mode: str = "",
+    s3_bucket_name: str = "",
+    fsx_dns_name: str = "",
+    fsx_mount_name: str = "",
 ) -> str:
     """Generate a bash user data script for EC2 launch templates.
 
@@ -268,6 +272,7 @@ def generate_user_data_script(
     3. Creates POSIX user accounts with the correct UID/GID.
     4. Sets home directory ownership.
     5. Disables interactive login for generic accounts.
+    6. Mounts project storage at ``/data`` based on the storage mode.
 
     Parameters
     ----------
@@ -277,6 +282,15 @@ def generate_user_data_script(
         The DynamoDB PlatformUsers table name.
     projects_table_name : str
         The DynamoDB Projects table name.
+    storage_mode : str
+        ``"mountpoint"`` for Mountpoint for S3, ``"lustre"`` for FSx for
+        Lustre.  When empty, no storage mount commands are generated.
+    s3_bucket_name : str
+        The S3 bucket name (required when *storage_mode* is ``"mountpoint"``).
+    fsx_dns_name : str
+        The FSx DNS name (required when *storage_mode* is ``"lustre"``).
+    fsx_mount_name : str
+        The FSx mount name (required when *storage_mode* is ``"lustre"``).
 
     Returns
     -------
@@ -317,6 +331,16 @@ def generate_user_data_script(
     lines.append("")
     for cmd in generate_cloudwatch_agent_commands(project_id):
         lines.append(cmd)
+
+    # --- Storage mount ---
+    if storage_mode == "mountpoint" and s3_bucket_name:
+        lines.append("")
+        for cmd in generate_mountpoint_s3_commands(s3_bucket_name):
+            lines.append(cmd)
+    elif storage_mode == "lustre" and fsx_dns_name and fsx_mount_name:
+        lines.append("")
+        for cmd in generate_fsx_lustre_mount_commands(fsx_dns_name, fsx_mount_name):
+            lines.append(cmd)
 
     lines.append("")
     lines.append("echo 'POSIX user provisioning complete.'")

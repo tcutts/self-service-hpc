@@ -370,6 +370,9 @@ def _create_role_and_instance_profile(
     managed policies, adds the PCS inline policy, creates an instance
     profile with the same name, and adds the role to the profile.
 
+    If the role or instance profile already exists (from a previous
+    failed attempt), the existing resources are adopted.
+
     Returns the instance profile ARN.
     """
     tags = [
@@ -377,40 +380,59 @@ def _create_role_and_instance_profile(
         for tag in build_resource_tags(project_id, cluster_name)
     ]
 
-    # 1. Create IAM role
-    iam_client.create_role(
-        RoleName=role_name,
-        AssumeRolePolicyDocument=json.dumps(_EC2_TRUST_POLICY),
-        Tags=tags,
-    )
-    logger.info("Created IAM role '%s'", role_name)
+    # 1. Create IAM role (or adopt existing)
+    try:
+        iam_client.create_role(
+            RoleName=role_name,
+            AssumeRolePolicyDocument=json.dumps(_EC2_TRUST_POLICY),
+            Tags=tags,
+        )
+        logger.info("Created IAM role '%s'", role_name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "EntityAlreadyExists":
+            logger.info("Adopted existing IAM role '%s'", role_name)
+        else:
+            raise
 
-    # 2. Add inline policy
+    # 2. Add inline policy (idempotent — overwrites if exists)
     iam_client.put_role_policy(
         RoleName=role_name,
         PolicyName=_PCS_INLINE_POLICY_NAME,
         PolicyDocument=json.dumps(_PCS_INLINE_POLICY_DOCUMENT),
     )
 
-    # 3. Attach managed policies
+    # 3. Attach managed policies (idempotent)
     for policy_arn in _PCS_MANAGED_POLICIES:
         iam_client.attach_role_policy(
             RoleName=role_name,
             PolicyArn=policy_arn,
         )
 
-    # 4. Create instance profile
-    iam_client.create_instance_profile(
-        InstanceProfileName=role_name,
-        Tags=tags,
-    )
-    logger.info("Created instance profile '%s'", role_name)
+    # 4. Create instance profile (or adopt existing)
+    try:
+        iam_client.create_instance_profile(
+            InstanceProfileName=role_name,
+            Tags=tags,
+        )
+        logger.info("Created instance profile '%s'", role_name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "EntityAlreadyExists":
+            logger.info("Adopted existing instance profile '%s'", role_name)
+        else:
+            raise
 
-    # 5. Add role to instance profile
-    response = iam_client.add_role_to_instance_profile(
-        InstanceProfileName=role_name,
-        RoleName=role_name,
-    )
+    # 5. Add role to instance profile (idempotent — ignored if already added)
+    try:
+        iam_client.add_role_to_instance_profile(
+            InstanceProfileName=role_name,
+            RoleName=role_name,
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "LimitExceeded":
+            # Role is already in the instance profile
+            logger.info("Role '%s' already in instance profile", role_name)
+        else:
+            raise
 
     # Retrieve the instance profile ARN
     ip_response = iam_client.get_instance_profile(
@@ -583,9 +605,29 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
                 cluster_name,
             )
         except ClientError as exc:
-            raise InternalError(
-                f"Failed to create launch template '{template_name}': {exc}"
-            )
+            error_code = exc.response["Error"]["Code"]
+            if error_code == "InvalidLaunchTemplateName.AlreadyExistsException":
+                # Adopt the existing template from a previous attempt
+                try:
+                    desc = ec2_client.describe_launch_templates(
+                        LaunchTemplateNames=[template_name],
+                    )
+                    template_id = desc["LaunchTemplates"][0]["LaunchTemplateId"]
+                    result[event_key] = template_id
+                    logger.info(
+                        "Adopted existing launch template '%s' (%s) for cluster '%s'",
+                        template_name,
+                        template_id,
+                        cluster_name,
+                    )
+                except ClientError as desc_exc:
+                    raise InternalError(
+                        f"Launch template '{template_name}' exists but could not be described: {desc_exc}"
+                    )
+            else:
+                raise InternalError(
+                    f"Failed to create launch template '{template_name}': {exc}"
+                )
 
     return result
 
@@ -837,15 +879,50 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
         except ClientError as exc:
             error_code = exc.response["Error"]["Code"]
-            if error_code == "ConflictException" and attempt < _PCS_MAX_RETRIES - 1:
-                delay = _PCS_BASE_DELAY_SECONDS * (2 ** attempt)
-                logger.warning(
-                    "PCS ConflictException on attempt %d — retrying in %ds",
-                    attempt + 1,
-                    delay,
-                )
-                last_exc = exc
-                time.sleep(delay)
+            error_message = exc.response["Error"].get("Message", "")
+            if error_code == "ConflictException":
+                # "already exists" means a cluster with this name was created
+                # in a previous attempt — adopt it instead of retrying.
+                if "already exists" in error_message:
+                    logger.info(
+                        "PCS cluster '%s' already exists — adopting",
+                        cluster_name,
+                    )
+                    try:
+                        existing = pcs_client.get_cluster(
+                            clusterIdentifier=cluster_name,
+                        )
+                        cluster_info = existing.get("cluster", {})
+                        pcs_cluster_id = cluster_info.get("id", "")
+                        pcs_cluster_arn = cluster_info.get("arn", "")
+                        logger.info(
+                            "Adopted existing PCS cluster '%s' (%s)",
+                            cluster_name,
+                            pcs_cluster_id,
+                        )
+                        return {
+                            **event,
+                            "pcsClusterId": pcs_cluster_id,
+                            "pcsClusterArn": pcs_cluster_arn,
+                        }
+                    except ClientError as get_exc:
+                        raise InternalError(
+                            f"PCS cluster '{cluster_name}' exists but could not be described: {get_exc}"
+                        )
+                # Otherwise it's a "only one Creating at a time" conflict — retry
+                elif attempt < _PCS_MAX_RETRIES - 1:
+                    delay = _PCS_BASE_DELAY_SECONDS * (2 ** attempt)
+                    logger.warning(
+                        "PCS ConflictException on attempt %d — retrying in %ds",
+                        attempt + 1,
+                        delay,
+                    )
+                    last_exc = exc
+                    time.sleep(delay)
+                else:
+                    raise InternalError(
+                        f"Failed to create PCS cluster after {attempt + 1} attempts: {exc}"
+                    )
             else:
                 raise InternalError(
                     f"Failed to create PCS cluster after {attempt + 1} attempts: {exc}"
@@ -960,6 +1037,10 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
         project_id=project_id,
         users_table_name=USERS_TABLE_NAME,
         projects_table_name=PROJECTS_TABLE_NAME,
+        storage_mode=event.get("storageMode", ""),
+        s3_bucket_name=event.get("s3BucketName", ""),
+        fsx_dns_name=event.get("fsxDnsName", ""),
+        fsx_mount_name=event.get("fsxMountName", ""),
     )
     logger.info(
         "Generated POSIX user data script for login nodes (%d bytes)",
@@ -983,7 +1064,7 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
             ],
             customLaunchTemplate={
                 "id": event.get("loginLaunchTemplateId", ""),
-                "version": event.get("loginLaunchTemplateVersion", "$Default"),
+                "version": event.get("loginLaunchTemplateVersion", "1"),
             },
             iamInstanceProfileArn=event.get("loginInstanceProfileArn", ""),
             tags=tags,
@@ -1039,6 +1120,10 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
         project_id=project_id,
         users_table_name=USERS_TABLE_NAME,
         projects_table_name=PROJECTS_TABLE_NAME,
+        storage_mode=event.get("storageMode", ""),
+        s3_bucket_name=event.get("s3BucketName", ""),
+        fsx_dns_name=event.get("fsxDnsName", ""),
+        fsx_mount_name=event.get("fsxMountName", ""),
     )
     logger.info(
         "Generated POSIX user data script for compute nodes (%d bytes)",
@@ -1062,7 +1147,7 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
             instanceConfigs=instance_configs,
             customLaunchTemplate={
                 "id": event.get("computeLaunchTemplateId", ""),
-                "version": event.get("computeLaunchTemplateVersion", "$Default"),
+                "version": event.get("computeLaunchTemplateVersion", "1"),
             },
             iamInstanceProfileArn=event.get("computeInstanceProfileArn", ""),
             tags=tags,
@@ -1353,7 +1438,10 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
 
     # 7. Record FAILED status in DynamoDB
     if project_id and cluster_name:
-        _record_failed_cluster(project_id, cluster_name, error_message)
+        _record_failed_cluster(
+            project_id, cluster_name, error_message,
+            created_by=event.get("createdBy", ""),
+        )
 
     logger.info(
         "Rollback complete for cluster '%s': %s",
@@ -1575,7 +1663,8 @@ def _cleanup_fsx_filesystem(fsx_id: str) -> str:
 
 
 def _record_failed_cluster(
-    project_id: str, cluster_name: str, error_message: str
+    project_id: str, cluster_name: str, error_message: str,
+    created_by: str = "",
 ) -> None:
     """Record a FAILED cluster status in DynamoDB."""
     now = datetime.now(timezone.utc).isoformat()
@@ -1590,6 +1679,7 @@ def _record_failed_cluster(
                 "projectId": project_id,
                 "status": "FAILED",
                 "errorMessage": error_message,
+                "createdBy": created_by,
                 "createdAt": now,
             },
         )
@@ -1661,6 +1751,13 @@ def configure_mountpoint_s3_iam(event: dict[str, Any]) -> dict[str, Any]:
             raise InternalError(
                 f"Failed to attach MountpointS3Access policy to role '{role_name}': {exc}"
             )
+
+    # Ensure FSx-related fields exist with empty defaults so the Parallel
+    # state's resultSelector can reference them without JSONPath errors.
+    event.setdefault("fsxFilesystemId", "")
+    event.setdefault("fsxDnsName", "")
+    event.setdefault("fsxMountName", "")
+    event.setdefault("fsxDraId", "")
 
     return event
 
@@ -1838,7 +1935,10 @@ def mark_cluster_failed_from_event(event: dict[str, Any], context: Any = None) -
     error_message = (
         f"Cluster creation failed — Step Functions execution {execution_status.lower()}"
     )
-    _record_failed_cluster(project_id, cluster_name, error_message)
+    _record_failed_cluster(
+        project_id, cluster_name, error_message,
+        created_by=payload.get("createdBy", ""),
+    )
 
     logger.info(
         "Cluster '%s/%s' marked as FAILED due to execution %s",
