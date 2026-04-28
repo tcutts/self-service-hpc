@@ -100,7 +100,7 @@ export class ApiGateway extends Construct {
     // copy the files into the required python/ directory structure.
     this.sharedLayer = new lambda.LayerVersion(this, 'SharedUtilsLayer', {
       layerVersionName: 'hpc-shared-utils',
-      description: 'Shared utilities (api_logging) for HPC platform Lambda functions',
+      description: 'Shared utilities (api_logging, authorization) for HPC platform Lambda functions',
       compatibleRuntimes: [lambda.Runtime.PYTHON_3_13],
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'shared'), {
         bundling: {

@@ -12,6 +12,42 @@ Platform users are managed through the REST API. Each user receives:
 
 Users are not deleted — they are **deactivated**. Deactivation revokes all active sessions and prevents further login, but preserves the user record and POSIX identity for audit purposes.
 
+## Role Model
+
+The platform uses a three-tier role model. Each role is defined by membership in a Cognito group
+
+### Roles
+
+| Role | Cognito Group | Scope |
+|------|--------------|-------|
+| Platform Administrator | `Administrators` | Full access to all platform operations across all projects |
+| Project Administrator | `ProjectAdmin-{projectId}` | Manage membership and settings for a specific project |
+| End User | `ProjectUser-{projectId}` | Create, update, destroy, and use clusters within a specific project |
+
+- **Platform Administrator** — A member of the `Administrators` Cognito group. Can create and destroy projects, manage membership on any project, and perform all cluster operations across the entire platform.
+- **Project Administrator** — A member of a `ProjectAdmin-{projectId}` Cognito group. Can add and remove members, change member roles, set budgets, and perform all cluster operations within the assigned project. Cannot access other projects.
+- **End User** — A member of a `ProjectUser-{projectId}` Cognito group. Can create, list, update, and destroy clusters within the assigned project. Cannot manage project membership.
+
+A user can hold roles in multiple projects simultaneously (e.g. Project Administrator on one project and End User on another).
+
+### Cognito Groups as the Authoritative Source
+
+All authorization decisions are derived from the `cognito:groups` claim in the caller's JWT token. When a user authenticates, Cognito includes their group memberships in the token, and the platform's authorization module inspects this claim on every API request.
+
+The DynamoDB `role` field in the PlatformUsers table is retained for display purposes only. It is never read when making access-control decisions. When a user's platform role is changed (e.g. from User to Administrator), the platform updates the user's Cognito group membership as the authoritative change and updates the DynamoDB `role` field for display consistency.
+
+This design allows role management to be delegated to an external identity provider (e.g. Active Directory federation) in the future without changing the authorization logic.
+
+### Role Hierarchy
+
+The roles form a strict hierarchy:
+
+1. **Platform Administrator** access is a superset of Project Administrator access for all projects.
+2. **Project Administrator** access is a superset of End User access within the same project.
+3. A user with no Cognito group membership for a given project is denied access to all resources within that project.
+
+This means a Platform Administrator can perform any action a Project Administrator or End User can, on any project. A Project Administrator can perform any action an End User can, within their assigned project.
+
 ## Creating a User
 
 **Endpoint:** `POST /users`
@@ -138,10 +174,10 @@ The user's POSIX UID/GID and project memberships are preserved for audit and fil
 
 ### Error Cases
 
-| Scenario | Error Code | HTTP Status |
-|----------|-----------|-------------|
-| User does not exist | `NOT_FOUND` | 404 |
-| Caller is not an Administrator | `AUTHORISATION_ERROR` | 403 |
+| Scenario                       | Error Code            | HTTP Status |
+| --------------------------------| -----------------------| -------------|
+| User does not exist            | `NOT_FOUND`           | 404         |
+| Caller is not an Administrator | `AUTHORISATION_ERROR` | 403         |
 
 ## Reactivating a User
 

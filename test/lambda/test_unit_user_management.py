@@ -136,6 +136,41 @@ class TestUserCreationDuplicate:
         assert body["error"]["code"] == "DUPLICATE_ERROR"
         assert "dup-user" in body["error"]["message"]
 
+    def test_pre_existing_cognito_user_adopted_into_platform(self, user_mgmt_env):
+        """When a Cognito user exists but has no DynamoDB record, create_user
+        should adopt the existing Cognito user and create the DynamoDB record."""
+        handler_mod, _, _ = user_mgmt_env["modules"]
+        table = user_mgmt_env["table"]
+        pool_id = user_mgmt_env["pool_id"]
+
+        # Pre-create a Cognito user directly (simulating console/CLI creation)
+        cog = boto3.client("cognito-idp", region_name=AWS_REGION)
+        cog.admin_create_user(
+            UserPoolId=pool_id,
+            Username="pre-existing",
+            UserAttributes=[{"Name": "email", "Value": "pre@example.com"}],
+            MessageAction="SUPPRESS",
+        )
+
+        # Now create the platform user — should succeed by adopting the Cognito user
+        event = build_admin_event("POST", "/users", body={
+            "userId": "pre-existing",
+            "displayName": "Pre Existing",
+            "email": "pre@example.com",
+        })
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 201
+        body = json.loads(response["body"])
+        assert body["userId"] == "pre-existing"
+        assert body["status"] == "ACTIVE"
+        assert "posixUid" in body
+        assert "cognitoSub" in body
+
+        # Verify DynamoDB record was created
+        item = table.get_item(Key={"PK": "USER#pre-existing", "SK": "PROFILE"})
+        assert "Item" in item
+
 
 # ---------------------------------------------------------------------------
 # User creation – missing fields

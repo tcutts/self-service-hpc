@@ -22,6 +22,7 @@ import json
 from unittest.mock import patch, MagicMock
 
 import boto3
+from botocore.exceptions import ClientError
 import pytest
 
 from conftest import (
@@ -473,6 +474,270 @@ class TestMembershipManagement:
         assert body["error"]["code"] == "NOT_FOUND"
 
 
+class TestRemoveMemberDeprovisioning:
+    """Validates: Requirements 8.2, 8.4 — POSIX de-provisioning on member removal."""
+
+    def test_remove_member_calls_deprovision(self, project_mgmt_env):
+        """Removing a member triggers deprovision_user_from_clusters."""
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-deprov-call")
+        _seed_platform_user(users_table, pool_id, "deprov-user")
+        members_mod.add_member(
+            PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id,
+            "proj-deprov-call", "deprov-user", "PROJECT_USER",
+        )
+
+        with patch.object(members_mod, "deprovision_user_from_clusters", return_value="NO_ACTIVE_CLUSTERS") as mock_deprov:
+            members_mod.remove_member(
+                PROJECTS_TABLE_NAME, pool_id, "proj-deprov-call", "deprov-user",
+            )
+            mock_deprov.assert_called_once_with("deprov-user", "proj-deprov-call", CLUSTERS_TABLE_NAME)
+
+        # Membership record should be deleted
+        item = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-deprov-call", "SK": "MEMBER#deprov-user"}
+        )
+        assert "Item" not in item
+
+    def test_remove_member_continues_on_partial_failure(self, project_mgmt_env):
+        """Partial deprovisioning failure logs warning but removal still succeeds (Req 8.4)."""
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-deprov-partial")
+        _seed_platform_user(users_table, pool_id, "partial-user")
+        members_mod.add_member(
+            PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id,
+            "proj-deprov-partial", "partial-user", "PROJECT_USER",
+        )
+
+        with patch.object(members_mod, "deprovision_user_from_clusters", return_value="PARTIAL_FAILURE"):
+            members_mod.remove_member(
+                PROJECTS_TABLE_NAME, pool_id, "proj-deprov-partial", "partial-user",
+            )
+
+        # Membership record should still be deleted despite partial failure
+        item = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-deprov-partial", "SK": "MEMBER#partial-user"}
+        )
+        assert "Item" not in item
+
+    def test_remove_member_continues_on_deprovision_exception(self, project_mgmt_env):
+        """If deprovisioning raises an exception, removal still succeeds (Req 8.4)."""
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-deprov-exc")
+        _seed_platform_user(users_table, pool_id, "exc-user")
+        members_mod.add_member(
+            PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id,
+            "proj-deprov-exc", "exc-user", "PROJECT_USER",
+        )
+
+        with patch.object(members_mod, "deprovision_user_from_clusters", side_effect=RuntimeError("SSM boom")):
+            members_mod.remove_member(
+                PROJECTS_TABLE_NAME, pool_id, "proj-deprov-exc", "exc-user",
+            )
+
+        # Membership record should still be deleted despite exception
+        item = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-deprov-exc", "SK": "MEMBER#exc-user"}
+        )
+        assert "Item" not in item
+
+
+class TestListMembers:
+    """Validates: Requirement 7.1"""
+
+    def test_list_members_returns_all_members(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-list-all")
+        _seed_platform_user(users_table, pool_id, "list-user-a")
+        _seed_platform_user(users_table, pool_id, "list-user-b")
+
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-list-all", "list-user-a", "PROJECT_USER")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-list-all", "list-user-b", "PROJECT_ADMIN")
+
+        result = members_mod.list_members(PROJECTS_TABLE_NAME, "proj-list-all")
+
+        assert len(result) == 2
+        user_ids = {m["userId"] for m in result}
+        assert user_ids == {"list-user-a", "list-user-b"}
+
+    def test_list_members_returns_correct_fields(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-list-fields")
+        _seed_platform_user(users_table, pool_id, "list-fields-user")
+
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-list-fields", "list-fields-user", "PROJECT_ADMIN")
+
+        result = members_mod.list_members(PROJECTS_TABLE_NAME, "proj-list-fields")
+
+        assert len(result) == 1
+        member = result[0]
+        assert member["userId"] == "list-fields-user"
+        assert member["displayName"] == "Display list-fields-user"
+        assert member["role"] == "PROJECT_ADMIN"
+        assert member["addedAt"] != ""
+
+    def test_list_members_empty_project(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project(projects_table, "proj-list-empty")
+
+        result = members_mod.list_members(PROJECTS_TABLE_NAME, "proj-list-empty")
+
+        assert result == []
+
+    def test_list_members_nonexistent_project_returns_404(self, project_mgmt_env):
+        _, _, members_mod, errors_mod = project_mgmt_env["modules"]
+
+        with pytest.raises(errors_mod.NotFoundError):
+            members_mod.list_members(PROJECTS_TABLE_NAME, "proj-does-not-exist")
+
+    def test_list_members_sorted_by_added_at(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-list-sort")
+        _seed_platform_user(users_table, pool_id, "sort-user-1")
+        _seed_platform_user(users_table, pool_id, "sort-user-2")
+
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-list-sort", "sort-user-1", "PROJECT_USER")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-list-sort", "sort-user-2", "PROJECT_USER")
+
+        result = members_mod.list_members(PROJECTS_TABLE_NAME, "proj-list-sort")
+
+        assert len(result) == 2
+        assert result[0]["addedAt"] <= result[1]["addedAt"]
+
+
+# ---------------------------------------------------------------------------
+# Change member role
+# ---------------------------------------------------------------------------
+
+class TestChangeMemberRole:
+    """Validates: Requirement 6.4"""
+
+    def test_change_role_from_user_to_admin(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-up")
+        _seed_platform_user(users_table, pool_id, "role-up-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-role-up", "role-up-user", "PROJECT_USER")
+
+        result = members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-up", "role-up-user", "PROJECT_ADMIN")
+
+        assert result["role"] == "PROJECT_ADMIN"
+        assert result["userId"] == "role-up-user"
+        assert result["projectId"] == "proj-role-up"
+
+    def test_change_role_from_admin_to_user(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-down")
+        _seed_platform_user(users_table, pool_id, "role-down-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-role-down", "role-down-user", "PROJECT_ADMIN")
+
+        result = members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-down", "role-down-user", "PROJECT_USER")
+
+        assert result["role"] == "PROJECT_USER"
+
+    def test_change_role_updates_dynamodb(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-db")
+        _seed_platform_user(users_table, pool_id, "role-db-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-role-db", "role-db-user", "PROJECT_USER")
+
+        members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-db", "role-db-user", "PROJECT_ADMIN")
+
+        item = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-role-db", "SK": "MEMBER#role-db-user"}
+        )
+        assert item["Item"]["role"] == "PROJECT_ADMIN"
+
+    def test_change_role_noop_same_role(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-noop")
+        _seed_platform_user(users_table, pool_id, "role-noop-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-role-noop", "role-noop-user", "PROJECT_USER")
+
+        result = members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-noop", "role-noop-user", "PROJECT_USER")
+
+        assert result["role"] == "PROJECT_USER"
+
+    def test_change_role_nonexistent_member_returns_404(self, project_mgmt_env):
+        _, _, members_mod, errors_mod = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-ghost")
+
+        with pytest.raises(errors_mod.NotFoundError):
+            members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-ghost", "ghost-user", "PROJECT_ADMIN")
+
+    def test_change_role_invalid_role_returns_400(self, project_mgmt_env):
+        _, _, members_mod, errors_mod = project_mgmt_env["modules"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        with pytest.raises(errors_mod.ValidationError):
+            members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "any-proj", "any-user", "INVALID_ROLE")
+
+    def test_change_role_updates_cognito_groups(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-role-cog")
+        _seed_platform_user(users_table, pool_id, "role-cog-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-role-cog", "role-cog-user", "PROJECT_USER")
+
+        members_mod.change_member_role(PROJECTS_TABLE_NAME, pool_id, "proj-role-cog", "role-cog-user", "PROJECT_ADMIN")
+
+        # Verify user is in the new Cognito group
+        cog = boto3.client("cognito-idp", region_name=AWS_REGION)
+        groups_resp = cog.admin_list_groups_for_user(
+            UserPoolId=pool_id, Username="role-cog-user",
+        )
+        group_names = [g["GroupName"] for g in groups_resp["Groups"]]
+        assert "ProjectAdmin-proj-role-cog" in group_names
+        assert "ProjectUser-proj-role-cog" not in group_names
+
+
 # ---------------------------------------------------------------------------
 # Budget management
 # ---------------------------------------------------------------------------
@@ -585,19 +850,27 @@ class TestProjectAuthorisation:
         body = json.loads(response["body"])
         assert body["error"]["code"] == "AUTHORISATION_ERROR"
 
-    def test_non_admin_cannot_list_projects(self, project_mgmt_env):
+    def test_non_admin_list_projects_returns_scoped_results(self, project_mgmt_env):
+        """Non-admin users get 200 with only their member projects."""
         handler_mod, _, _, _ = project_mgmt_env["modules"]
 
         event = build_non_admin_event("GET", "/projects")
         response = handler_mod.handler(event, None)
 
-        assert response["statusCode"] == 403
+        assert response["statusCode"] == 200
         body = json.loads(response["body"])
-        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+        assert "projects" in body
+        # The non-admin event has ProjectUser-alpha group, so only project "alpha"
+        # would be returned if it exists. Since it likely doesn't exist in this
+        # test class, we just verify the response shape is correct.
+        assert isinstance(body["projects"], list)
 
-    def test_non_admin_cannot_get_project(self, project_mgmt_env):
+    def test_non_member_cannot_get_project(self, project_mgmt_env):
+        """A user with no membership for a project gets 403."""
         handler_mod, _, _, _ = project_mgmt_env["modules"]
 
+        # build_non_admin_event creates a user with ProjectUser-alpha group
+        # so accessing "some-proj" (not alpha) should be denied
         event = build_non_admin_event(
             "GET", "/projects/{projectId}",
             path_parameters={"projectId": "some-proj"},
@@ -804,20 +1077,26 @@ class TestLifecycleValidateTransition:
         with pytest.raises(ConflictError):
             validate_transition("ACTIVE", "CREATED")
 
-    def test_active_to_archived_raises_conflict(self, project_mgmt_env):
+    def test_active_to_archived_is_valid(self, project_mgmt_env):
+        from lifecycle import validate_transition
+
+        # Should not raise — ACTIVE → ARCHIVED is now a valid deactivation transition
+        validate_transition("ACTIVE", "ARCHIVED")
+
+    def test_archived_to_invalid_raises_conflict(self, project_mgmt_env):
         from lifecycle import validate_transition
         from errors import ConflictError
 
-        with pytest.raises(ConflictError):
-            validate_transition("ACTIVE", "ARCHIVED")
-
-    def test_archived_to_any_raises_conflict(self, project_mgmt_env):
-        from lifecycle import validate_transition
-        from errors import ConflictError
-
-        for target in ("CREATED", "DEPLOYING", "ACTIVE", "DESTROYING"):
+        # ARCHIVED → ACTIVE is now valid (reactivation), but others are not
+        for target in ("CREATED", "DEPLOYING", "DESTROYING"):
             with pytest.raises(ConflictError):
                 validate_transition("ARCHIVED", target)
+
+    def test_archived_to_active_is_valid(self, project_mgmt_env):
+        from lifecycle import validate_transition
+
+        # Should not raise — ARCHIVED → ACTIVE is a valid reactivation transition
+        validate_transition("ARCHIVED", "ACTIVE")
 
     def test_deploying_to_destroying_raises_conflict(self, project_mgmt_env):
         from lifecycle import validate_transition
@@ -859,7 +1138,7 @@ class TestLifecycleValidateTransition:
             validate_transition("ACTIVE", "CREATED")
         assert exc_info.value.details["currentStatus"] == "ACTIVE"
         assert exc_info.value.details["targetStatus"] == "CREATED"
-        assert exc_info.value.details["validTransitions"] == ["DESTROYING", "UPDATING"]
+        assert exc_info.value.details["validTransitions"] == ["DESTROYING", "UPDATING", "ARCHIVED"]
 
 
 # ---------------------------------------------------------------------------
@@ -1802,3 +2081,857 @@ class TestGetProjectUpdateProgress:
         assert body["progress"]["currentStep"] == 3
         assert body["progress"]["totalSteps"] == 5
         assert body["progress"]["stepDescription"] == "Extracting stack outputs"
+
+
+# ---------------------------------------------------------------------------
+# Deprovision user from clusters
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestDeprovisionUserFromClusters:
+    """Validates: Requirement 8.2"""
+
+    def test_no_active_clusters_returns_no_active_clusters(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project(projects_table, "proj-deprov-empty")
+
+        result = members_mod.deprovision_user_from_clusters(
+            "some-user", "proj-deprov-empty", CLUSTERS_TABLE_NAME,
+        )
+        assert result == "NO_ACTIVE_CLUSTERS"
+
+    def test_destroyed_clusters_returns_no_active_clusters(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project(projects_table, "proj-deprov-destroyed")
+        _seed_active_cluster(clusters_table, "proj-deprov-destroyed", "dead-cluster", status="DESTROYED")
+
+        result = members_mod.deprovision_user_from_clusters(
+            "some-user", "proj-deprov-destroyed", CLUSTERS_TABLE_NAME,
+        )
+        assert result == "NO_ACTIVE_CLUSTERS"
+
+    @patch("members.boto3.client")
+    def test_active_cluster_sends_ssm_command(self, mock_boto_client, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project(projects_table, "proj-deprov-ssm")
+        clusters_table.put_item(Item={
+            "PK": "PROJECT#proj-deprov-ssm",
+            "SK": "CLUSTER#my-cluster",
+            "clusterName": "my-cluster",
+            "projectId": "proj-deprov-ssm",
+            "status": "ACTIVE",
+            "loginNodeInstanceId": "i-1234567890abcdef0",
+            "createdAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        mock_ssm = MagicMock()
+        mock_boto_client.return_value = mock_ssm
+
+        result = members_mod.deprovision_user_from_clusters(
+            "target-user", "proj-deprov-ssm", CLUSTERS_TABLE_NAME,
+        )
+
+        assert result == "DEPROVISIONED"
+        mock_ssm.send_command.assert_called_once_with(
+            InstanceIds=["i-1234567890abcdef0"],
+            DocumentName="AWS-RunShellScript",
+            Parameters={"commands": ["usermod --lock --expiredate 1 target-user"]},
+            Comment="Deprovision user 'target-user' from cluster 'my-cluster'",
+        )
+
+    @patch("members.boto3.client")
+    def test_ssm_failure_returns_partial_failure(self, mock_boto_client, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project(projects_table, "proj-deprov-fail")
+        clusters_table.put_item(Item={
+            "PK": "PROJECT#proj-deprov-fail",
+            "SK": "CLUSTER#fail-cluster",
+            "clusterName": "fail-cluster",
+            "projectId": "proj-deprov-fail",
+            "status": "ACTIVE",
+            "loginNodeInstanceId": "i-failinstance",
+            "createdAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        mock_ssm = MagicMock()
+        mock_ssm.send_command.side_effect = ClientError(
+            {"Error": {"Code": "InvalidInstanceId", "Message": "Instance not found"}},
+            "SendCommand",
+        )
+        mock_boto_client.return_value = mock_ssm
+
+        result = members_mod.deprovision_user_from_clusters(
+            "target-user", "proj-deprov-fail", CLUSTERS_TABLE_NAME,
+        )
+
+        assert result == "PARTIAL_FAILURE"
+
+    def test_cluster_without_instance_id_returns_partial_failure(self, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project(projects_table, "proj-deprov-noid")
+        clusters_table.put_item(Item={
+            "PK": "PROJECT#proj-deprov-noid",
+            "SK": "CLUSTER#no-id-cluster",
+            "clusterName": "no-id-cluster",
+            "projectId": "proj-deprov-noid",
+            "status": "ACTIVE",
+            "createdAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        result = members_mod.deprovision_user_from_clusters(
+            "target-user", "proj-deprov-noid", CLUSTERS_TABLE_NAME,
+        )
+
+        assert result == "PARTIAL_FAILURE"
+
+    @patch("members.boto3.client")
+    def test_multiple_clusters_all_succeed(self, mock_boto_client, project_mgmt_env):
+        _, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project(projects_table, "proj-deprov-multi")
+        for i in range(3):
+            clusters_table.put_item(Item={
+                "PK": "PROJECT#proj-deprov-multi",
+                "SK": f"CLUSTER#cluster-{i}",
+                "clusterName": f"cluster-{i}",
+                "projectId": "proj-deprov-multi",
+                "status": "ACTIVE",
+                "loginNodeInstanceId": f"i-instance{i}",
+                "createdAt": "2024-01-01T00:00:00+00:00",
+            })
+
+        mock_ssm = MagicMock()
+        mock_boto_client.return_value = mock_ssm
+
+        result = members_mod.deprovision_user_from_clusters(
+            "multi-user", "proj-deprov-multi", CLUSTERS_TABLE_NAME,
+        )
+
+        assert result == "DEPROVISIONED"
+        assert mock_ssm.send_command.call_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Handler-level tests for GET /projects/{projectId}/members
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestListMembersHandler:
+    """Validates: Requirements 4.1, 7.1, 11.2 — list members via handler route."""
+
+    def test_list_members_returns_200_with_members(self, project_mgmt_env):
+        handler_mod, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-hlist")
+        _seed_platform_user(users_table, pool_id, "hlist-user-a")
+        _seed_platform_user(users_table, pool_id, "hlist-user-b")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-hlist", "hlist-user-a", "PROJECT_USER")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-hlist", "hlist-user-b", "PROJECT_ADMIN")
+
+        event = _project_admin_event(
+            "GET", "/projects/{projectId}/members", "proj-hlist",
+            path_parameters={"projectId": "proj-hlist"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert "members" in body
+        assert len(body["members"]) == 2
+        user_ids = {m["userId"] for m in body["members"]}
+        assert user_ids == {"hlist-user-a", "hlist-user-b"}
+
+    def test_list_members_admin_can_list_any_project(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project(projects_table, "proj-hlist-admin")
+
+        event = build_admin_event(
+            "GET", "/projects/{projectId}/members",
+            path_parameters={"projectId": "proj-hlist-admin"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert "members" in body
+        assert body["members"] == []
+
+    def test_list_members_non_project_admin_returns_403(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = build_non_admin_event(
+            "GET", "/projects/{projectId}/members",
+            path_parameters={"projectId": "proj-hlist-noauth"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+    def test_list_members_project_user_returns_403(self, project_mgmt_env):
+        """A ProjectUser (not ProjectAdmin) cannot list members."""
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = {
+            "httpMethod": "GET",
+            "resource": "/projects/{projectId}/members",
+            "pathParameters": {"projectId": "proj-hlist-pu"},
+            "requestContext": {
+                "authorizer": {
+                    "claims": {
+                        "cognito:username": "proj-user",
+                        "sub": "sub-proj-user",
+                        "cognito:groups": "ProjectUser-proj-hlist-pu",
+                    }
+                }
+            },
+            "body": None,
+        }
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+
+# ---------------------------------------------------------------------------
+# Handler-level tests for PUT /projects/{projectId}/members/{userId}
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestChangeMemberRoleHandler:
+    """Validates: Requirements 4.2, 6.4, 11.2 — change member role via handler route."""
+
+    def test_change_role_via_handler_returns_200(self, project_mgmt_env):
+        handler_mod, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-hrole")
+        _seed_platform_user(users_table, pool_id, "hrole-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-hrole", "hrole-user", "PROJECT_USER")
+
+        event = _project_admin_event(
+            "PUT", "/projects/{projectId}/members/{userId}", "proj-hrole",
+            body={"role": "PROJECT_ADMIN"},
+            path_parameters={"projectId": "proj-hrole", "userId": "hrole-user"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["userId"] == "hrole-user"
+        assert body["role"] == "PROJECT_ADMIN"
+
+    def test_change_role_admin_can_change_any_project(self, project_mgmt_env):
+        handler_mod, _, members_mod, _ = project_mgmt_env["modules"]
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project(projects_table, "proj-hrole-adm")
+        _seed_platform_user(users_table, pool_id, "hrole-adm-user")
+        members_mod.add_member(PROJECTS_TABLE_NAME, USERS_TABLE_NAME, pool_id, "proj-hrole-adm", "hrole-adm-user", "PROJECT_USER")
+
+        event = build_admin_event(
+            "PUT", "/projects/{projectId}/members/{userId}",
+            body={"role": "PROJECT_ADMIN"},
+            path_parameters={"projectId": "proj-hrole-adm", "userId": "hrole-adm-user"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert body["role"] == "PROJECT_ADMIN"
+
+    def test_change_role_non_project_admin_returns_403(self, project_mgmt_env):
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = build_non_admin_event(
+            "PUT", "/projects/{projectId}/members/{userId}",
+            body={"role": "PROJECT_ADMIN"},
+            path_parameters={"projectId": "proj-hrole-noauth", "userId": "someone"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+    def test_change_role_project_user_returns_403(self, project_mgmt_env):
+        """A ProjectUser (not ProjectAdmin) cannot change member roles."""
+        handler_mod, _, _, _ = project_mgmt_env["modules"]
+
+        event = {
+            "httpMethod": "PUT",
+            "resource": "/projects/{projectId}/members/{userId}",
+            "pathParameters": {"projectId": "proj-hrole-pu", "userId": "someone"},
+            "requestContext": {
+                "authorizer": {
+                    "claims": {
+                        "cognito:username": "proj-user",
+                        "sub": "sub-proj-user",
+                        "cognito:groups": "ProjectUser-proj-hrole-pu",
+                    }
+                }
+            },
+            "body": json.dumps({"role": "PROJECT_ADMIN"}),
+        }
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "AUTHORISATION_ERROR"
+
+# ---------------------------------------------------------------------------
+# Reactivate project — lifecycle.reactivate_project
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestReactivateProject:
+    """Validates: Requirements 14.4, 14.5, 14.7
+
+    Tests the reactivate_project function which recreates Cognito groups,
+    restores membership records, and transitions ARCHIVED → ACTIVE.
+    """
+
+    def test_reactivate_archived_project_transitions_to_active(self, project_mgmt_env):
+        """Reactivating an ARCHIVED project should transition it to ACTIVE."""
+        from lifecycle import reactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-ok", "ARCHIVED")
+
+        result = reactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-react-ok",
+        )
+
+        assert result["status"] == "ACTIVE"
+
+    def test_reactivate_recreates_cognito_groups(self, project_mgmt_env):
+        """Reactivation should recreate ProjectAdmin and ProjectUser Cognito groups (Req 14.4)."""
+        from lifecycle import reactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-groups", "ARCHIVED")
+
+        reactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-react-groups",
+        )
+
+        # Verify groups were created
+        cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
+        groups_resp = cognito_client.list_groups(UserPoolId=pool_id)
+        group_names = [g["GroupName"] for g in groups_resp["Groups"]]
+        assert "ProjectAdmin-proj-react-groups" in group_names
+        assert "ProjectUser-proj-react-groups" in group_names
+
+    def test_reactivate_restores_members_to_cognito_groups(self, project_mgmt_env):
+        """Reactivation should add each preserved member to the appropriate Cognito group (Req 14.5)."""
+        from lifecycle import reactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        users_table = project_mgmt_env["users_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-members", "ARCHIVED")
+
+        # Seed platform users in Cognito
+        _seed_platform_user(users_table, pool_id, "admin-member")
+        _seed_platform_user(users_table, pool_id, "user-member")
+
+        # Seed preserved membership records
+        projects_table.put_item(Item={
+            "PK": "PROJECT#proj-react-members",
+            "SK": "MEMBER#admin-member",
+            "userId": "admin-member",
+            "projectId": "proj-react-members",
+            "role": "PROJECT_ADMIN",
+            "addedAt": "2024-01-01T00:00:00+00:00",
+        })
+        projects_table.put_item(Item={
+            "PK": "PROJECT#proj-react-members",
+            "SK": "MEMBER#user-member",
+            "userId": "user-member",
+            "projectId": "proj-react-members",
+            "role": "PROJECT_USER",
+            "addedAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        reactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-react-members",
+        )
+
+        # Verify members were added to the correct groups
+        cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
+
+        admin_users = cognito_client.list_users_in_group(
+            UserPoolId=pool_id,
+            GroupName="ProjectAdmin-proj-react-members",
+        )
+        admin_usernames = [u["Username"] for u in admin_users["Users"]]
+        assert "admin-member" in admin_usernames
+
+        user_users = cognito_client.list_users_in_group(
+            UserPoolId=pool_id,
+            GroupName="ProjectUser-proj-react-members",
+        )
+        user_usernames = [u["Username"] for u in user_users["Users"]]
+        assert "user-member" in user_usernames
+
+    def test_reactivate_nonexistent_project_raises_not_found(self, project_mgmt_env):
+        """Reactivating a project that doesn't exist should raise NotFoundError."""
+        from lifecycle import reactivate_project
+        from errors import NotFoundError
+
+        pool_id = project_mgmt_env["pool_id"]
+
+        with pytest.raises(NotFoundError):
+            reactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-react-ghost",
+            )
+
+    def test_reactivate_active_project_raises_conflict(self, project_mgmt_env):
+        """Reactivating a project that is ACTIVE should raise ConflictError."""
+        from lifecycle import reactivate_project
+        from errors import ConflictError
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-active", "ACTIVE")
+
+        with pytest.raises(ConflictError) as exc_info:
+            reactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-react-active",
+            )
+        assert "ARCHIVED" in str(exc_info.value)
+
+    def test_reactivate_marks_failed_restoration_as_pending(self, project_mgmt_env):
+        """If adding a member to Cognito fails, the record should be marked PENDING_RESTORATION (Req 14.7)."""
+        from lifecycle import reactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-fail", "ARCHIVED")
+
+        # Seed a membership record for a user that does NOT exist in Cognito
+        # (admin_add_user_to_group will fail for a non-existent user)
+        projects_table.put_item(Item={
+            "PK": "PROJECT#proj-react-fail",
+            "SK": "MEMBER#nonexistent-user",
+            "userId": "nonexistent-user",
+            "projectId": "proj-react-fail",
+            "role": "PROJECT_USER",
+            "addedAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        # Should not raise — failures are logged and marked
+        result = reactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-react-fail",
+        )
+
+        # Project should still transition to ACTIVE
+        assert result["status"] == "ACTIVE"
+
+        # The failed member should be marked PENDING_RESTORATION
+        member = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-react-fail", "SK": "MEMBER#nonexistent-user"}
+        )["Item"]
+        assert member.get("propagationStatus") == "PENDING_RESTORATION"
+
+    def test_reactivate_with_no_members_succeeds(self, project_mgmt_env):
+        """Reactivating a project with no membership records should succeed."""
+        from lifecycle import reactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-react-empty", "ARCHIVED")
+
+        result = reactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-react-empty",
+        )
+
+        assert result["status"] == "ACTIVE"
+
+# ---------------------------------------------------------------------------
+# Deactivate project — lifecycle.deactivate_project
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestDeactivateProject:
+    """Validates: Requirements 14.1, 14.2, 14.3, 14.6
+
+    Tests the deactivate_project function which deletes Cognito groups,
+    preserves membership records, and transitions ACTIVE → ARCHIVED.
+    """
+
+    def test_deactivate_active_project_transitions_to_archived(self, project_mgmt_env):
+        """Deactivating an ACTIVE project with no clusters should transition to ARCHIVED (Req 14.1)."""
+        from lifecycle import deactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-deact-ok", "ACTIVE")
+
+        result = deactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-deact-ok",
+            clusters_table_name=CLUSTERS_TABLE_NAME,
+        )
+
+        assert result["status"] == "ARCHIVED"
+
+    def test_deactivate_blocked_by_active_clusters(self, project_mgmt_env):
+        """Deactivation should be blocked when active clusters exist (Req 14.1)."""
+        from lifecycle import deactivate_project
+        from errors import ConflictError
+
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-deact-clust", "ACTIVE")
+        _seed_active_cluster(clusters_table, "proj-deact-clust", "running-cluster", status="ACTIVE")
+
+        with pytest.raises(ConflictError) as exc_info:
+            deactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-deact-clust",
+                clusters_table_name=CLUSTERS_TABLE_NAME,
+            )
+        assert "active clusters" in str(exc_info.value).lower()
+
+    def test_deactivate_non_active_project_raises_conflict(self, project_mgmt_env):
+        """Deactivating a project that is not ACTIVE should raise ConflictError."""
+        from lifecycle import deactivate_project
+        from errors import ConflictError
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-deact-created", "CREATED")
+
+        with pytest.raises(ConflictError) as exc_info:
+            deactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-deact-created",
+                clusters_table_name=CLUSTERS_TABLE_NAME,
+            )
+        assert "ACTIVE" in str(exc_info.value)
+
+    def test_deactivate_deletes_cognito_groups(self, project_mgmt_env):
+        """Deactivation should delete ProjectAdmin and ProjectUser Cognito groups (Req 14.2)."""
+        from lifecycle import deactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+        cognito_client = boto3.client("cognito-idp", region_name=AWS_REGION)
+
+        _seed_project_with_status(projects_table, "proj-deact-cog", "ACTIVE")
+
+        # Create the Cognito groups first
+        for group_name in ("ProjectAdmin-proj-deact-cog", "ProjectUser-proj-deact-cog"):
+            try:
+                cognito_client.create_group(GroupName=group_name, UserPoolId=pool_id)
+            except cognito_client.exceptions.GroupExistsException:
+                pass
+
+        deactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-deact-cog",
+            clusters_table_name=CLUSTERS_TABLE_NAME,
+        )
+
+        # Verify groups were deleted
+        groups_resp = cognito_client.list_groups(UserPoolId=pool_id)
+        group_names = [g["GroupName"] for g in groups_resp["Groups"]]
+        assert "ProjectAdmin-proj-deact-cog" not in group_names
+        assert "ProjectUser-proj-deact-cog" not in group_names
+
+    def test_deactivate_preserves_membership_records(self, project_mgmt_env):
+        """Deactivation should preserve membership records in DynamoDB (Req 14.3)."""
+        from lifecycle import deactivate_project
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-deact-mem", "ACTIVE")
+
+        # Seed membership records
+        projects_table.put_item(Item={
+            "PK": "PROJECT#proj-deact-mem",
+            "SK": "MEMBER#kept-user",
+            "userId": "kept-user",
+            "projectId": "proj-deact-mem",
+            "role": "PROJECT_ADMIN",
+            "addedAt": "2024-01-01T00:00:00+00:00",
+        })
+
+        deactivate_project(
+            table_name=PROJECTS_TABLE_NAME,
+            user_pool_id=pool_id,
+            project_id="proj-deact-mem",
+            clusters_table_name=CLUSTERS_TABLE_NAME,
+        )
+
+        # Verify membership record is still present
+        member = projects_table.get_item(
+            Key={"PK": "PROJECT#proj-deact-mem", "SK": "MEMBER#kept-user"}
+        )
+        assert "Item" in member
+        assert member["Item"]["userId"] == "kept-user"
+        assert member["Item"]["role"] == "PROJECT_ADMIN"
+
+    def test_deactivate_continues_on_cognito_group_deletion_failure(self, project_mgmt_env):
+        """Cognito group deletion failure should be logged but not block deactivation (Req 14.6)."""
+        from lifecycle import deactivate_project
+        from unittest.mock import patch
+
+        projects_table = project_mgmt_env["projects_table"]
+        pool_id = project_mgmt_env["pool_id"]
+
+        _seed_project_with_status(projects_table, "proj-deact-cogfail", "ACTIVE")
+
+        # Patch cognito.delete_group to raise an exception
+        with patch("lifecycle.cognito.delete_group", side_effect=Exception("Cognito unavailable")):
+            result = deactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-deact-cogfail",
+                clusters_table_name=CLUSTERS_TABLE_NAME,
+            )
+
+        # Should still transition to ARCHIVED despite Cognito failure
+        assert result["status"] == "ARCHIVED"
+
+    def test_deactivate_nonexistent_project_raises_not_found(self, project_mgmt_env):
+        """Deactivating a project that doesn't exist should raise NotFoundError."""
+        from lifecycle import deactivate_project
+        from errors import NotFoundError
+
+        pool_id = project_mgmt_env["pool_id"]
+
+        with pytest.raises(NotFoundError):
+            deactivate_project(
+                table_name=PROJECTS_TABLE_NAME,
+                user_pool_id=pool_id,
+                project_id="proj-deact-ghost",
+                clusters_table_name=CLUSTERS_TABLE_NAME,
+            )
+
+
+# ---------------------------------------------------------------------------
+# Deactivate route — POST /projects/{projectId}/deactivate
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestDeactivateRoute:
+    """Handler-level tests for POST /projects/{projectId}/deactivate.
+
+    Validates: Requirements 14.1, 14.2, 14.3
+    """
+
+    def test_admin_can_deactivate_active_project(self, project_mgmt_env):
+        """Platform Admin can deactivate an ACTIVE project with no clusters."""
+        handler_mod = project_mgmt_env["modules"][0]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-deact-route", "ACTIVE")
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/deactivate",
+            path_parameters={"projectId": "proj-deact-route"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert "deactivated" in body["message"].lower()
+        assert body["project"]["status"] == "ARCHIVED"
+
+    def test_non_admin_cannot_deactivate(self, project_mgmt_env):
+        """Non-admin callers should receive 403 when attempting deactivation."""
+        handler_mod = project_mgmt_env["modules"][0]
+
+        event = build_non_admin_event(
+            "POST",
+            "/projects/{projectId}/deactivate",
+            path_parameters={"projectId": "proj-deact-noauth"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+
+    def test_deactivate_nonexistent_project_returns_404(self, project_mgmt_env):
+        """Deactivating a project that doesn't exist should return 404."""
+        handler_mod = project_mgmt_env["modules"][0]
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/deactivate",
+            path_parameters={"projectId": "proj-deact-missing"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 404
+
+    def test_deactivate_blocked_by_active_clusters_returns_409(self, project_mgmt_env):
+        """Deactivation via route should return 409 when active clusters exist (Req 14.1)."""
+        handler_mod = project_mgmt_env["modules"][0]
+        projects_table = project_mgmt_env["projects_table"]
+        clusters_table = project_mgmt_env["clusters_table"]
+
+        _seed_project_with_status(projects_table, "proj-deact-rt-clust", "ACTIVE")
+        _seed_active_cluster(clusters_table, "proj-deact-rt-clust", "busy-cluster", status="ACTIVE")
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/deactivate",
+            path_parameters={"projectId": "proj-deact-rt-clust"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+
+    def test_deactivate_non_active_project_returns_409(self, project_mgmt_env):
+        """Deactivating a project that is not ACTIVE should return 409."""
+        handler_mod = project_mgmt_env["modules"][0]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-deact-rt-created", "CREATED")
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/deactivate",
+            path_parameters={"projectId": "proj-deact-rt-created"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "CONFLICT"
+
+
+# ---------------------------------------------------------------------------
+# Reactivate route — POST /projects/{projectId}/reactivate
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("project_mgmt_env")
+class TestReactivateRoute:
+    """Handler-level tests for POST /projects/{projectId}/reactivate.
+
+    Validates: Requirements 14.4, 14.5
+    """
+
+    def test_admin_can_reactivate_archived_project(self, project_mgmt_env):
+        """Platform Admin can reactivate an ARCHIVED project."""
+        handler_mod = project_mgmt_env["modules"][0]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-react-route", "ARCHIVED")
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/reactivate",
+            path_parameters={"projectId": "proj-react-route"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 200
+        body = json.loads(response["body"])
+        assert "reactivated" in body["message"].lower()
+        assert body["project"]["status"] == "ACTIVE"
+
+    def test_non_admin_cannot_reactivate(self, project_mgmt_env):
+        """Non-admin callers should receive 403 when attempting reactivation."""
+        handler_mod = project_mgmt_env["modules"][0]
+
+        event = build_non_admin_event(
+            "POST",
+            "/projects/{projectId}/reactivate",
+            path_parameters={"projectId": "proj-react-noauth"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 403
+
+    def test_reactivate_nonexistent_project_returns_404(self, project_mgmt_env):
+        """Reactivating a project that doesn't exist should return 404."""
+        handler_mod = project_mgmt_env["modules"][0]
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/reactivate",
+            path_parameters={"projectId": "proj-react-missing"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 404
+
+    def test_reactivate_active_project_returns_conflict(self, project_mgmt_env):
+        """Reactivating an ACTIVE project should return 409 conflict."""
+        handler_mod = project_mgmt_env["modules"][0]
+        projects_table = project_mgmt_env["projects_table"]
+
+        _seed_project_with_status(projects_table, "proj-react-active", "ACTIVE")
+
+        event = build_admin_event(
+            "POST",
+            "/projects/{projectId}/reactivate",
+            path_parameters={"projectId": "proj-react-active"},
+        )
+        response = handler_mod.handler(event, None)
+
+        assert response["statusCode"] == 409

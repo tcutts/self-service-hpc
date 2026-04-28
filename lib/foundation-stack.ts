@@ -176,6 +176,7 @@ export class FoundationStack extends cdk.Stack {
       budgetNotificationTopic: notificationTopics.budgetNotificationTopic,
       clusterLifecycleNotificationTopic: notificationTopics.clusterLifecycleNotificationTopic,
       clusterCreationStateMachine: clusterOperations.clusterCreationStateMachine,
+      posixReconciliationLambda: clusterOperations.posixReconciliationLambda,
     });
 
     // 12. WebPortal — depends on CognitoAuth, ApiGateway

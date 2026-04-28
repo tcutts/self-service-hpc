@@ -31,6 +31,8 @@ export interface ClusterOperationsProps {
 export class ClusterOperations extends Construct {
   /** The cluster operations Lambda function. */
   public readonly clusterOperationsLambda: lambda.Function;
+  /** The POSIX reconciliation Lambda function. */
+  public readonly posixReconciliationLambda: lambda.Function;
   /** The cluster creation state machine. */
   public readonly clusterCreationStateMachine: sfn.StateMachine;
   /** The cluster destruction state machine. */
@@ -925,5 +927,38 @@ export class ClusterOperations extends Construct {
     // POST /projects/{projectId}/clusters/{clusterName}/fail — force-fail stuck cluster
     const failResource = clusterNameResource.addResource('fail');
     failResource.addMethod('POST', clusterOperationsIntegration, cognitoMethodOptions);
+
+    // ---------------------------------------------------------------
+    // POSIX Reconciliation Lambda Function
+    // ---------------------------------------------------------------
+    this.posixReconciliationLambda = new lambda.Function(this, 'PosixReconciliationLambda', {
+      functionName: 'hpc-posix-reconciliation',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'posix_reconciliation.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      layers: [props.sharedLayer],
+      timeout: cdk.Duration.minutes(5),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+        PROJECTS_TABLE_NAME: props.projectsTable.tableName,
+        USERS_TABLE_NAME: props.platformUsersTable.tableName,
+      },
+      description: 'Daily POSIX reconciliation — audits Linux accounts on active clusters against project membership',
+    });
+
+    // Grant DynamoDB read access on Clusters, Projects, and PlatformUsers tables
+    props.clustersTable.grantReadData(this.posixReconciliationLambda);
+    props.projectsTable.grantReadWriteData(this.posixReconciliationLambda);
+    props.platformUsersTable.grantReadData(this.posixReconciliationLambda);
+
+    // Grant SSM permissions for querying and managing accounts on cluster nodes
+    this.posixReconciliationLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ssm:SendCommand',
+        'ssm:GetCommandInvocation',
+      ],
+      resources: ['*'],
+    }));
   }
 }

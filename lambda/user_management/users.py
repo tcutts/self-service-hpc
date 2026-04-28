@@ -264,7 +264,12 @@ def _allocate_posix_uid(table_name: str) -> int:
 def _create_cognito_user(
     user_pool_id: str, user_id: str, email: str
 ) -> str:
-    """Create a Cognito user and return the sub (subject ID)."""
+    """Create a Cognito user and return the sub (subject ID).
+
+    If the Cognito user already exists (e.g. created via the console or
+    CLI before the platform was set up), the existing user's ``sub`` is
+    returned so the caller can proceed with creating the DynamoDB record.
+    """
     try:
         response = cognito.admin_create_user(
             UserPoolId=user_pool_id,
@@ -278,10 +283,8 @@ def _create_cognito_user(
         return response["User"]["Attributes"][0]["Value"]
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "UsernameExistsException":
-            raise DuplicateError(
-                f"User '{user_id}' already exists in Cognito.",
-                {"userId": user_id},
-            )
+            # Adopt the pre-existing Cognito user instead of failing
+            return _get_cognito_sub(user_pool_id, user_id)
         raise InternalError(f"Failed to create Cognito user: {exc}")
 
 
@@ -310,6 +313,27 @@ def _delete_cognito_user(user_pool_id: str, user_id: str) -> None:
         )
     except ClientError:
         logger.warning("Failed to clean up Cognito user %s", user_id)
+
+
+def _get_cognito_sub(user_pool_id: str, user_id: str) -> str:
+    """Look up the ``sub`` attribute of an existing Cognito user.
+
+    Used when adopting a pre-existing Cognito user into the platform.
+    """
+    try:
+        response = cognito.admin_get_user(
+            UserPoolId=user_pool_id,
+            Username=user_id,
+        )
+        for attr in response.get("UserAttributes", []):
+            if attr["Name"] == "sub":
+                return attr["Value"]
+        # Fallback: use the Username (which is the sub for email-based pools)
+        return response.get("Username", user_id)
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to look up existing Cognito user '{user_id}': {exc}"
+        )
 
 
 def _sanitise_record(item: dict[str, Any]) -> dict[str, Any]:

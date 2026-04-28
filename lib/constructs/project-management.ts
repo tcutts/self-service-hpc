@@ -66,6 +66,7 @@ export class ProjectManagement extends Construct {
         'cognito-idp:CreateGroup',
         'cognito-idp:DeleteGroup',
         'cognito-idp:GetGroup',
+        'cognito-idp:ListUsersInGroup',
       ],
       resources: [props.userPool.userPoolArn],
     }));
@@ -118,14 +119,24 @@ export class ProjectManagement extends Construct {
     this.projectIdResource.addMethod('GET', projectManagementIntegration, cognitoMethodOptions);
     // DELETE /projects/{projectId} — delete project
     this.projectIdResource.addMethod('DELETE', projectManagementIntegration, cognitoMethodOptions);
+    // GET /projects/{projectId}/members — list members
+    membersResource.addMethod('GET', projectManagementIntegration, cognitoMethodOptions);
     // POST /projects/{projectId}/members — add member
     membersResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+    // PUT /projects/{projectId}/members/{userId} — change member role
+    memberUserIdResource.addMethod('PUT', projectManagementIntegration, cognitoMethodOptions);
     // DELETE /projects/{projectId}/members/{userId} — remove member
     memberUserIdResource.addMethod('DELETE', projectManagementIntegration, cognitoMethodOptions);
     // PUT /projects/{projectId}/budget — set budget
     budgetResource.addMethod('PUT', projectManagementIntegration, cognitoMethodOptions);
     // PUT /projects/{projectId} — edit project (budget only)
     this.projectIdResource.addMethod('PUT', projectManagementIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/deactivate — deactivate project
+    const deactivateResource = this.projectIdResource.addResource('deactivate');
+    deactivateResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
+    // POST /projects/{projectId}/reactivate — reactivate project
+    const reactivateResource = this.projectIdResource.addResource('reactivate');
+    reactivateResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);
     // POST /projects/{projectId}/deploy — deploy project infrastructure
     const deployResource = this.projectIdResource.addResource('deploy');
     deployResource.addMethod('POST', projectManagementIntegration, cognitoMethodOptions);

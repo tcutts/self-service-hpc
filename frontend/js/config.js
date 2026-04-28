@@ -1,17 +1,18 @@
 /**
  * Configuration for the HPC Self-Service Portal.
  *
- * Replace these placeholder values with actual deployment outputs
- * after running `cdk deploy`.
+ * These placeholder values are overwritten at deploy time by CDK
+ * (see lib/constructs/web-portal.ts). For local development, replace
+ * them with actual deployment outputs from `cdk deploy`.
  */
 const CONFIG = {
   // Amazon Cognito
-  cognitoUserPoolId: 'REPLACE_WITH_USER_POOL_ID',
-  cognitoClientId: 'REPLACE_WITH_CLIENT_ID',
-  cognitoRegion: 'us-east-1',
+  cognitoUserPoolId: 'eu-west-1_ZKt3BRqeD',
+  cognitoClientId: '45o67luv69t9p1eis6af0qjfa7',
+  cognitoRegion: 'eu-west-1',
 
   // API Gateway
-  apiBaseUrl: 'REPLACE_WITH_API_GATEWAY_URL', // e.g. https://abc123.execute-api.us-east-1.amazonaws.com/prod
+  apiBaseUrl: 'https://x2lt96v82j.execute-api.eu-west-1.amazonaws.com/prod/',
 
   // Polling
   clusterPollIntervalMs: 5000, // poll every 5 seconds for CREATING clusters

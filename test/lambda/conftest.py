@@ -36,6 +36,7 @@ TEMPLATES_TABLE_NAME = "ClusterTemplates"
 CLUSTER_NAME_REGISTRY_TABLE_NAME = "ClusterNameRegistry"
 
 _LAMBDA_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
+_SHARED_DIR = os.path.join(_LAMBDA_ROOT, "shared")
 _USER_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "user_management")
 _PROJECT_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "project_management")
 _TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "template_management")
@@ -58,6 +59,18 @@ def _load_module_from(directory: str, module_name: str):
     sys.modules[module_name] = mod  # register so intra-package imports resolve
     spec.loader.exec_module(mod)
     return mod
+
+
+def _ensure_shared_modules():
+    """Pre-load shared Lambda Layer modules into sys.modules.
+
+    The per-package auth.py files re-export from the shared authorization
+    module (``from authorization import *``).  In production the Lambda Layer
+    puts ``lambda/shared/`` on the Python path.  In tests we replicate that
+    by loading the shared modules explicitly so they are importable.
+    """
+    if "authorization" not in sys.modules:
+        _load_module_from(_SHARED_DIR, "authorization")
 
 
 # ---------------------------------------------------------------------------
@@ -192,6 +205,7 @@ def reload_user_mgmt_modules():
     Uses explicit file-path loading to avoid collisions with the
     project_management package which has identically-named files.
     """
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_USER_MGMT_DIR, "errors")
     auth_mod = _load_module_from(_USER_MGMT_DIR, "auth")
     users_mod = _load_module_from(_USER_MGMT_DIR, "users")
@@ -205,6 +219,7 @@ def reload_project_mgmt_modules():
     Uses explicit file-path loading to avoid collisions with the
     user_management package which has identically-named files.
     """
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_PROJECT_MGMT_DIR, "errors")
     auth_mod = _load_module_from(_PROJECT_MGMT_DIR, "auth")
     lifecycle_mod = _load_module_from(_PROJECT_MGMT_DIR, "lifecycle")
@@ -221,6 +236,7 @@ def reload_template_mgmt_modules():
     Uses explicit file-path loading to avoid collisions with other
     Lambda packages which have identically-named files.
     """
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "errors")
     auth_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "auth")
     templates_mod = _load_module_from(_TEMPLATE_MGMT_DIR, "templates")
@@ -246,6 +262,7 @@ def reload_cluster_ops_handler_modules():
     Loads the full module graph needed for handler-level tests:
     errors, auth, cluster_names, clusters, tagging, and handler.
     """
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
     auth_mod = _load_module_from(_CLUSTER_OPS_DIR, "auth")
     cluster_names_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -261,6 +278,7 @@ def reload_accounting_modules():
     Uses explicit file-path loading to avoid collisions with other
     Lambda packages which have identically-named files.
     """
+    _ensure_shared_modules()
     errors_mod = _load_module_from(_ACCOUNTING_DIR, "errors")
     auth_mod = _load_module_from(_ACCOUNTING_DIR, "auth")
     accounting_mod = _load_module_from(_ACCOUNTING_DIR, "accounting")

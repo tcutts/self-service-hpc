@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
 import * as sns from 'aws-cdk-lib/aws-sns';
 import { Match, Template } from 'aws-cdk-lib/assertions';
@@ -37,6 +38,14 @@ describe('PlatformOperations', () => {
       stateMachineName: 'test-cluster-creation',
     });
 
+    // Create a minimal Lambda to serve as the POSIX reconciliation Lambda dependency
+    const posixReconciliationLambda = new lambda.Function(stack, 'TestReconciliationLambda', {
+      functionName: 'hpc-posix-reconciliation',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'posix_reconciliation.handler',
+      code: lambda.Code.fromInline('def handler(event, context): pass'),
+    });
+
     new PlatformOperations(stack, 'PlatformOperations', {
       clustersTable,
       projectsTable,
@@ -48,17 +57,18 @@ describe('PlatformOperations', () => {
       budgetNotificationTopic,
       clusterLifecycleNotificationTopic,
       clusterCreationStateMachine,
+      posixReconciliationLambda,
     });
 
     template = Template.fromStack(stack);
   });
 
-  it('creates 4 Lambda functions (accounting, budget notification, fsx cleanup, failure handler)', () => {
-    template.resourceCountIs('AWS::Lambda::Function', 4);
+  it('creates 5 Lambda functions (accounting, budget notification, fsx cleanup, failure handler, reconciliation)', () => {
+    template.resourceCountIs('AWS::Lambda::Function', 5);
   });
 
-  it('creates 2 EventBridge rules (fsx cleanup schedule + cluster creation failure)', () => {
-    template.resourceCountIs('AWS::Events::Rule', 2);
+  it('creates 3 EventBridge rules (fsx cleanup schedule, cluster creation failure, posix reconciliation schedule)', () => {
+    template.resourceCountIs('AWS::Events::Rule', 3);
   });
 
   it('creates 1 SNS subscription for budget notification Lambda', () => {
@@ -185,6 +195,13 @@ describe('PlatformOperations', () => {
     template.hasResourceProperties('AWS::Events::Rule', {
       Name: 'hpc-fsx-cleanup-schedule',
       ScheduleExpression: 'rate(6 hours)',
+    });
+  });
+
+  it('creates the POSIX reconciliation schedule rule with daily cron at 2 AM UTC', () => {
+    template.hasResourceProperties('AWS::Events::Rule', {
+      Name: 'hpc-posix-reconciliation-schedule',
+      ScheduleExpression: 'cron(0 2 * * ? *)',
     });
   });
 

@@ -439,6 +439,7 @@ function setProjectContext(projectId) {
     localStorage.removeItem('hpc_project_context');
   }
   updateProjectContextIndicator();
+  updateMembersTabVisibility();
 }
 
 function updateProjectContextIndicator() {
@@ -448,6 +449,65 @@ function updateProjectContextIndicator() {
     ? `Project: ${state.projectContext}`
     : 'No project selected';
   el.classList.toggle('no-project', !state.projectContext);
+}
+
+/**
+ * Show or hide the Members nav link based on the current user's role
+ * and the active project context. Called whenever the project context changes.
+ */
+function updateMembersTabVisibility() {
+  const nav = document.querySelector('nav[aria-label="Main navigation"]');
+  if (!nav) return;
+  const existing = nav.querySelector('a[data-page="members"]');
+  if (canSeeMembers()) {
+    if (!existing) {
+      const link = document.createElement('a');
+      link.href = '#';
+      link.dataset.page = 'members';
+      link.textContent = 'Members';
+      link.addEventListener('click', (e) => {
+        e.preventDefault();
+        navigate('members');
+      });
+      // Insert before the Accounting link
+      const accountingLink = nav.querySelector('a[data-page="accounting"]');
+      if (accountingLink) {
+        nav.insertBefore(link, accountingLink);
+      } else {
+        nav.appendChild(link);
+      }
+    }
+  } else {
+    if (existing) {
+      existing.remove();
+      // If user was on the members page, redirect to clusters
+      if (state.currentPage === 'members') {
+        navigate('clusters');
+      }
+    }
+  }
+}
+
+/* ============================================================
+   Role Helpers
+   ============================================================ */
+
+/** Returns true when the current user belongs to the Administrators group. */
+function isPlatformAdmin() {
+  return (state.user?.groups || []).includes('Administrators');
+}
+
+/** Returns true when the current user belongs to ProjectAdmin-{projectId}. */
+function isProjectAdmin(projectId) {
+  if (!projectId) return false;
+  return (state.user?.groups || []).includes(`ProjectAdmin-${projectId}`);
+}
+
+/** Returns true when the current user should see the Members tab for the active project context. */
+function canSeeMembers() {
+  if (isPlatformAdmin()) return true;
+  if (state.projectContext && isProjectAdmin(state.projectContext)) return true;
+  return false;
 }
 
 /* ============================================================
@@ -485,6 +545,7 @@ function renderPage(page, params = {}) {
     case 'clusters':   renderClustersPage(main, params); break;
     case 'cluster-detail': renderClusterDetailPage(main, params); break;
     case 'accounting': renderAccountingPage(main); break;
+    case 'members':    renderMembersPage(main); break;
     default:           renderClustersPage(main);
   }
 }
@@ -2075,6 +2136,140 @@ function startClusterDetailPolling(projectId, clusterName) {
 }
 
 /* ============================================================
+   Members Page
+   ============================================================ */
+
+function renderMembersPage(container) {
+  const projectId = state.projectContext;
+  if (!projectId) {
+    container.innerHTML = `
+      <div class="page-header"><h2>Members</h2></div>
+      <div class="info-box">Select a project first. Go to <a href="#" onclick="navigate('clusters');return false">Clusters</a> and enter a project ID.</div>
+    `;
+    return;
+  }
+
+  if (!canSeeMembers()) {
+    container.innerHTML = `
+      <div class="page-header"><h2>Members</h2></div>
+      <div class="error-box">You do not have permission to manage members for this project.</div>
+    `;
+    return;
+  }
+
+  container.innerHTML = `
+    <div class="page-header">
+      <h2>Members — ${esc(projectId)}</h2>
+      <button class="btn btn-primary" id="btn-add-member">Add Member</button>
+    </div>
+    <div id="members-list"><div class="empty-state"><span class="spinner"></span> Loading members…</div></div>
+    <div id="add-member-form" style="display:none" class="detail-panel">
+      <h3>Add Member</h3>
+      <div class="form-group">
+        <label for="new-member-user-id">User ID</label>
+        <input type="text" id="new-member-user-id" placeholder="jsmith" />
+      </div>
+      <div class="form-group">
+        <label for="new-member-role">Role</label>
+        <select id="new-member-role">
+          <option value="PROJECT_USER">End User</option>
+          <option value="PROJECT_ADMIN">Project Admin</option>
+        </select>
+      </div>
+      <button class="btn btn-primary" id="btn-submit-member">Add</button>
+      <button class="btn" id="btn-cancel-member" style="margin-left:0.5rem">Cancel</button>
+    </div>
+  `;
+
+  document.getElementById('btn-add-member').addEventListener('click', () => {
+    document.getElementById('add-member-form').style.display = 'block';
+  });
+  document.getElementById('btn-cancel-member').addEventListener('click', () => {
+    document.getElementById('add-member-form').style.display = 'none';
+  });
+  document.getElementById('btn-submit-member').addEventListener('click', async () => {
+    const userId = document.getElementById('new-member-user-id').value.trim();
+    const role = document.getElementById('new-member-role').value;
+    if (!userId) return showToast('User ID is required', 'error');
+    try {
+      await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/members`, { userId, role });
+      showToast(`Member '${userId}' added`);
+      document.getElementById('add-member-form').style.display = 'none';
+      loadMembers(projectId);
+    } catch (e) { showToast(e.message, 'error'); }
+  });
+
+  loadMembers(projectId);
+}
+
+async function loadMembers(projectId) {
+  try {
+    const data = await apiCall('GET', `/projects/${encodeURIComponent(projectId)}/members`);
+    const members = data.members || [];
+    const el = document.getElementById('members-list');
+    if (!el) return;
+
+    const membersTableConfig = {
+      columns: [
+        { key: 'userId', label: 'User ID', type: 'text', sortable: true },
+        { key: 'displayName', label: 'Display Name', type: 'text', sortable: true },
+        {
+          key: 'role', label: 'Role', type: 'text', sortable: true,
+          render: (row) => {
+            const roleLabel = row.role === 'PROJECT_ADMIN' ? 'Project Admin' : 'End User';
+            return `<select class="member-role-select" data-user-id="${esc(row.userId)}" aria-label="Change role for ${esc(row.userId)}">
+              <option value="PROJECT_USER"${row.role === 'PROJECT_USER' ? ' selected' : ''}>End User</option>
+              <option value="PROJECT_ADMIN"${row.role === 'PROJECT_ADMIN' ? ' selected' : ''}>Project Admin</option>
+            </select>`;
+          },
+        },
+        {
+          key: 'addedAt', label: 'Added', type: 'text', sortable: true,
+          render: (row) => esc(row.addedAt || '—'),
+        },
+        {
+          key: '_actions', label: 'Actions', type: 'custom', sortable: false,
+          render: (row) => `<button class="btn btn-danger btn-sm" onclick="removeMember('${esc(projectId)}','${esc(row.userId)}')">Remove</button>`,
+        },
+      ],
+      filterLabel: 'Filter members',
+      emptyMessage: 'No members found for this project.',
+      noMatchMessage: 'No matching members found.',
+    };
+
+    TableModule.render('members', membersTableConfig, members, el);
+
+    // Attach role-change handlers to the dropdowns
+    el.querySelectorAll('.member-role-select').forEach(select => {
+      select.addEventListener('change', async () => {
+        const userId = select.dataset.userId;
+        const newRole = select.value;
+        try {
+          await apiCall('PUT', `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`, { role: newRole });
+          showToast(`Role updated for '${userId}'`);
+          loadMembers(projectId);
+        } catch (e) {
+          showToast(e.message, 'error');
+          loadMembers(projectId); // reload to reset the dropdown
+        }
+      });
+    });
+  } catch (e) {
+    const el = document.getElementById('members-list');
+    if (el) el.innerHTML = `<div class="error-box">${esc(e.message)}</div>`;
+  }
+}
+
+async function removeMember(projectId, userId) {
+  if (!confirm(`Remove member '${userId}' from project '${projectId}'?`)) return;
+  try {
+    await apiCall('DELETE', `/projects/${encodeURIComponent(projectId)}/members/${encodeURIComponent(userId)}`);
+    showToast(`Member '${userId}' removed`);
+    loadMembers(projectId);
+  } catch (e) { showToast(e.message, 'error'); }
+}
+
+/* ============================================================
    Accounting Page
    ============================================================ */
 
@@ -2220,6 +2415,9 @@ function renderApp() {
     ? `Project: ${esc(state.projectContext)}`
     : 'No project selected';
   const ctxClass = state.projectContext ? '' : ' no-project';
+  const membersTab = canSeeMembers()
+    ? '<a href="#" data-page="members">Members</a>'
+    : '';
   app.innerHTML = `
     <header>
       <h1>HPC Self-Service Portal</h1>
@@ -2235,6 +2433,7 @@ function renderApp() {
         <a href="#" data-page="projects">Projects</a>
         <a href="#" data-page="templates">Templates</a>
         <a href="#" data-page="clusters">Clusters</a>
+        ${membersTab}
         <a href="#" data-page="accounting">Accounting</a>
       </nav>
       <main id="main-content"></main>

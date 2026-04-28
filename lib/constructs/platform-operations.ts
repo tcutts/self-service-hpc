@@ -23,6 +23,7 @@ export interface PlatformOperationsProps {
   budgetNotificationTopic: sns.Topic;
   clusterLifecycleNotificationTopic: sns.Topic;
   clusterCreationStateMachine: sfn.StateMachine;
+  posixReconciliationLambda: lambda.Function;
 }
 
 /**
@@ -39,6 +40,8 @@ export class PlatformOperations extends Construct {
   public readonly fsxCleanupLambda: lambda.Function;
   /** EventBridge rule: FSx Cleanup schedule. */
   public readonly fsxCleanupScheduleRule: events.Rule;
+  /** EventBridge rule: POSIX Reconciliation daily schedule. */
+  public readonly posixReconciliationScheduleRule: events.Rule;
 
   constructor(scope: Construct, id: string, props: PlatformOperationsProps) {
     super(scope, id);
@@ -171,6 +174,21 @@ export class PlatformOperations extends Construct {
 
     this.fsxCleanupScheduleRule.addTarget(
       new eventsTargets.LambdaFunction(this.fsxCleanupLambda),
+    );
+
+    // ---------------------------------------------------------------
+    // POSIX Reconciliation — Daily EventBridge Schedule
+    // Triggers the reconciliation Lambda daily at 2 AM UTC to audit
+    // POSIX user accounts on active clusters against project membership.
+    // ---------------------------------------------------------------
+    this.posixReconciliationScheduleRule = new events.Rule(this, 'PosixReconciliationScheduleRule', {
+      ruleName: 'hpc-posix-reconciliation-schedule',
+      description: 'Triggers the POSIX reconciliation Lambda daily at 2 AM UTC to audit cluster access',
+      schedule: events.Schedule.expression('cron(0 2 * * ? *)'),
+    });
+
+    this.posixReconciliationScheduleRule.addTarget(
+      new eventsTargets.LambdaFunction(props.posixReconciliationLambda),
     );
 
     // ---------------------------------------------------------------

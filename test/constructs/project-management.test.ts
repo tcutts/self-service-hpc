@@ -125,6 +125,7 @@ describe('ProjectManagement', () => {
               'cognito-idp:CreateGroup',
               'cognito-idp:DeleteGroup',
               'cognito-idp:GetGroup',
+              'cognito-idp:ListUsersInGroup',
             ]),
             Effect: 'Allow',
           }),
@@ -203,10 +204,11 @@ describe('ProjectManagement', () => {
   it('creates the expected number of API Gateway resources for project routes', () => {
     // /projects, /projects/{projectId}, /projects/{projectId}/members,
     // /projects/{projectId}/members/{userId}, /projects/{projectId}/budget,
+    // /projects/{projectId}/deactivate, /projects/{projectId}/reactivate,
     // /projects/{projectId}/deploy, /projects/{projectId}/destroy,
     // /projects/{projectId}/update, /projects/batch, /projects/batch/update,
     // /projects/batch/deploy, /projects/batch/destroy
-    // Plus /health from ApiGateway construct = 13 total
-    template.resourceCountIs('AWS::ApiGateway::Resource', 13);
+    // Plus /health from ApiGateway construct = 15 total
+    template.resourceCountIs('AWS::ApiGateway::Resource', 15);
   });
 });

@@ -27,7 +27,7 @@ import boto3
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
 from api_logging import log_api_action  # noqa: E402
 
-from auth import get_caller_identity, is_administrator, is_project_admin
+from auth import get_caller_identity, is_administrator, is_project_admin, is_project_user, get_member_project_ids
 from errors import (
     ApiError,
     AuthorisationError,
@@ -39,7 +39,7 @@ from errors import (
     build_error_response,
 )
 from projects import create_project, delete_project, get_foundation_timestamp, get_project, list_projects, _get_active_clusters
-from members import add_member, remove_member
+from members import add_member, change_member_role, list_members, remove_member
 from budget import set_budget
 import lifecycle
 
@@ -87,6 +87,16 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
         elif resource == "/projects/{projectId}/members" and http_method == "POST":
             project_id = path_parameters.get("projectId", "")
             response = _handle_add_member(event, project_id)
+        elif resource == "/projects/{projectId}/members" and http_method == "GET":
+            project_id = path_parameters.get("projectId", "")
+            response = _handle_list_members(event, project_id)
+        elif (
+            resource == "/projects/{projectId}/members/{userId}"
+            and http_method == "PUT"
+        ):
+            project_id = path_parameters.get("projectId", "")
+            user_id = path_parameters.get("userId", "")
+            response = _handle_change_member_role(event, project_id, user_id)
         elif (
             resource == "/projects/{projectId}/members/{userId}"
             and http_method == "DELETE"
@@ -122,6 +132,14 @@ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
             response = _handle_batch_deploy(event)
         elif resource == "/projects/batch/destroy" and http_method == "POST":
             response = _handle_batch_destroy(event)
+
+        # Deactivation / Reactivation routes
+        elif resource == "/projects/{projectId}/deactivate" and http_method == "POST":
+            project_id = path_parameters.get("projectId", "")
+            response = _handle_deactivate_project(event, project_id)
+        elif resource == "/projects/{projectId}/reactivate" and http_method == "POST":
+            project_id = path_parameters.get("projectId", "")
+            response = _handle_reactivate_project(event, project_id)
 
         # Edit route
         elif resource == "/projects/{projectId}" and http_method == "PUT":
@@ -177,19 +195,37 @@ def _handle_create_project(event: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle_list_projects(event: dict[str, Any]) -> dict[str, Any]:
-    """Handle GET /projects — list all projects."""
-    if not is_administrator(event):
-        raise AuthorisationError("Only administrators can list all projects.")
+    """Handle GET /projects — list projects scoped by caller role.
 
-    projects = list_projects(table_name=PROJECTS_TABLE_NAME)
+    Platform Administrators see all projects.
+    Project Admins and End Users see only projects they are members of.
+    """
     foundation_timestamp = get_foundation_timestamp(table_name=PROJECTS_TABLE_NAME)
+
+    if is_administrator(event):
+        projects = list_projects(table_name=PROJECTS_TABLE_NAME)
+        return _response(200, {"projects": projects, "foundationStackTimestamp": foundation_timestamp})
+
+    # Non-admin: return only projects the caller is a member of
+    member_project_ids = get_member_project_ids(event)
+    if not member_project_ids:
+        return _response(200, {"projects": [], "foundationStackTimestamp": foundation_timestamp})
+
+    projects = []
+    for project_id in member_project_ids:
+        try:
+            project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=project_id)
+            projects.append(project_record)
+        except NotFoundError:
+            # Membership exists but project was deleted — skip silently
+            logger.warning("Skipping project '%s': membership exists but project not found.", project_id)
     return _response(200, {"projects": projects, "foundationStackTimestamp": foundation_timestamp})
 
 
 def _handle_get_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
     """Handle GET /projects/{projectId} — get a single project."""
-    if not is_administrator(event):
-        raise AuthorisationError("Only administrators can view project details.")
+    if not is_project_user(event, project_id):
+        raise AuthorisationError("You do not have access to this project.")
 
     project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=project_id)
 
@@ -267,6 +303,50 @@ def _handle_remove_member(
     return _response(
         200, {"message": f"User '{user_id}' removed from project '{project_id}'."}
     )
+
+
+def _handle_list_members(event: dict[str, Any], project_id: str) -> dict[str, Any]:
+    """Handle GET /projects/{projectId}/members — list project members."""
+    if not is_project_admin(event, project_id):
+        raise AuthorisationError(
+            "Only project administrators can view membership."
+        )
+
+    members = list_members(
+        projects_table_name=PROJECTS_TABLE_NAME,
+        project_id=project_id,
+    )
+    return _response(200, {"members": members})
+
+
+def _handle_change_member_role(
+    event: dict[str, Any], project_id: str, user_id: str
+) -> dict[str, Any]:
+    """Handle PUT /projects/{projectId}/members/{userId} — change a member's role."""
+    caller = get_caller_identity(event)
+    if not is_project_admin(event, project_id):
+        raise AuthorisationError(
+            "Only project administrators can manage membership."
+        )
+
+    body = _parse_body(event)
+    role = body.get("role", "").strip()
+
+    updated_member = change_member_role(
+        projects_table_name=PROJECTS_TABLE_NAME,
+        user_pool_id=USER_POOL_ID,
+        project_id=project_id,
+        user_id=user_id,
+        new_role=role,
+    )
+    logger.info(
+        "Member role changed: %s in project %s to %s by %s",
+        user_id,
+        project_id,
+        role,
+        caller,
+    )
+    return _response(200, updated_member)
 
 
 def _handle_set_budget(event: dict[str, Any], project_id: str) -> dict[str, Any]:
@@ -704,6 +784,38 @@ def _handle_batch_destroy(event: dict[str, Any]) -> dict[str, Any]:
             results.append({"id": pid, "status": "error", "message": str(exc)})
 
     return _build_batch_response(results)
+
+
+def _handle_deactivate_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
+    """Handle POST /projects/{projectId}/deactivate — deactivate a project."""
+    caller = get_caller_identity(event)
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can deactivate projects.")
+
+    updated = lifecycle.deactivate_project(
+        PROJECTS_TABLE_NAME, USER_POOL_ID, project_id, CLUSTERS_TABLE_NAME
+    )
+    logger.info("Project deactivated: %s by %s", project_id, caller)
+    return _response(200, {
+        "message": f"Project '{project_id}' has been deactivated.",
+        "project": updated,
+    })
+
+
+def _handle_reactivate_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:
+    """Handle POST /projects/{projectId}/reactivate — reactivate an archived project."""
+    caller = get_caller_identity(event)
+    if not is_administrator(event):
+        raise AuthorisationError("Only administrators can reactivate projects.")
+
+    updated = lifecycle.reactivate_project(
+        PROJECTS_TABLE_NAME, USER_POOL_ID, project_id
+    )
+    logger.info("Project reactivated: %s by %s", project_id, caller)
+    return _response(200, {
+        "message": f"Project '{project_id}' has been reactivated.",
+        "project": updated,
+    })
 
 
 def _handle_edit_project(event: dict[str, Any], project_id: str) -> dict[str, Any]:

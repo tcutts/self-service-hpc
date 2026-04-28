@@ -263,6 +263,29 @@ class TestGenerateUserDataScript:
         )
         assert "groupadd" in script
 
+    def test_non_members_excluded_from_script(self, _env):
+        """Validates: Requirements 9.1, 9.2
+
+        carol exists in PlatformUsers with a POSIX identity but is NOT
+        a member of proj-alpha.  She must NOT appear in the user data script.
+        """
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+        )
+        assert "carol" not in script
+        assert "10003" not in script
+
+    def test_only_member_count_in_header(self, _env):
+        """Validates: Requirements 9.1, 9.2
+
+        The script header should report only the 2 members (alice, bob),
+        not all 3 platform users.
+        """
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+        )
+        assert "2 user(s)" in script
+
 
 # ---------------------------------------------------------------------------
 # SSM propagation with retry logic
@@ -270,7 +293,7 @@ class TestGenerateUserDataScript:
 
 @pytest.mark.usefixtures("_aws_env_vars")
 class TestPropagateUserToClusters:
-    """Validates: Requirements 17.5"""
+    """Validates: Requirements 9.3, 17.5"""
 
     @pytest.fixture(autouse=True, scope="class")
     def _env(self):
@@ -279,8 +302,10 @@ class TestPropagateUserToClusters:
             os.environ["AWS_ACCESS_KEY_ID"] = "testing"
             os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
             os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
 
             clusters_table = create_clusters_table()
+            projects_table = create_projects_table()
 
             # Seed active cluster with loginNodeInstanceId
             _seed_cluster(
@@ -295,11 +320,16 @@ class TestPropagateUserToClusters:
                 loginNodeInstanceId="i-def456",
             )
 
+            # Seed membership records so the membership check passes
+            _seed_project_member(projects_table, "proj-ssm", "alice")
+            _seed_project_member(projects_table, "proj-ssm", "bob")
+
             mod = _load_posix_module()
 
             yield {
                 "mod": mod,
                 "clusters_table": clusters_table,
+                "projects_table": projects_table,
             }
 
     def test_no_active_clusters_returns_success(self, _env):
@@ -420,6 +450,40 @@ class TestPropagateUserToClusters:
             "", 10001, 10001, "proj-ssm", CLUSTERS_TABLE_NAME,
         )
         assert status == _env["mod"].PROPAGATION_SUCCESS
+
+    def test_non_member_skips_propagation(self, _env):
+        """Validates: Requirement 9.3
+
+        A user who has no Membership_Record for the project should NOT
+        have SSM commands sent.  propagate_user_to_clusters returns
+        PROPAGATION_SUCCESS (no work needed) without calling SSM.
+        """
+        with patch.object(_env["mod"], "ssm_client") as mock_ssm:
+            mock_ssm.send_command = MagicMock(return_value={"Command": {"CommandId": "cmd-skip"}})
+
+            status = _env["mod"].propagate_user_to_clusters(
+                "non-member-user", 99999, 99999, "proj-ssm", CLUSTERS_TABLE_NAME,
+            )
+
+        assert status == _env["mod"].PROPAGATION_SUCCESS
+        mock_ssm.send_command.assert_not_called()
+
+    def test_member_proceeds_with_propagation(self, _env):
+        """Validates: Requirement 9.3
+
+        A user who holds a Membership_Record for the project should
+        have SSM commands sent to active clusters.
+        """
+        with patch.object(_env["mod"], "ssm_client") as mock_ssm:
+            mock_ssm.send_command = MagicMock(return_value={"Command": {"CommandId": "cmd-member"}})
+
+            status = _env["mod"].propagate_user_to_clusters(
+                "alice", 10001, 10001, "proj-ssm", CLUSTERS_TABLE_NAME,
+            )
+
+        assert status in (_env["mod"].PROPAGATION_SUCCESS, _env["mod"].PROPAGATION_PENDING)
+        # SSM should have been called at least once for the active cluster(s)
+        assert mock_ssm.send_command.call_count >= 1
 
 
 # ---------------------------------------------------------------------------

@@ -67,9 +67,9 @@ describe('ClusterOperations', () => {
     template = Template.fromStack(stack);
   });
 
-  it('creates 3 Lambda functions for cluster operations (operations + creation steps + destruction steps)', () => {
-    // 3 from ClusterOperations + 1 from ProjectManagement = 4 total
-    template.resourceCountIs('AWS::Lambda::Function', 4);
+  it('creates 4 Lambda functions for cluster operations (operations + creation steps + destruction steps + reconciliation)', () => {
+    // 4 from ClusterOperations + 1 from ProjectManagement = 5 total
+    template.resourceCountIs('AWS::Lambda::Function', 5);
   });
 
   it('creates 2 state machines (creation + destruction)', () => {
@@ -298,17 +298,34 @@ describe('ClusterOperations', () => {
     });
   });
 
+  it('grants SSM permissions to the reconciliation Lambda for POSIX account management', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              'ssm:SendCommand',
+              'ssm:GetCommandInvocation',
+            ]),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
   it('creates the expected number of API Gateway resources for cluster routes', () => {
     // From ProjectManagement: /projects, /projects/{projectId}, /projects/{projectId}/members,
     //   /projects/{projectId}/members/{userId}, /projects/{projectId}/budget,
     //   /projects/{projectId}/deploy, /projects/{projectId}/destroy,
     //   /projects/{projectId}/update, /projects/batch, /projects/batch/update,
-    //   /projects/batch/deploy, /projects/batch/destroy = 12
+    //   /projects/batch/deploy, /projects/batch/destroy,
+    //   /projects/{projectId}/deactivate, /projects/{projectId}/reactivate = 14
     // From ClusterOperations: /projects/{projectId}/clusters,
     //   /projects/{projectId}/clusters/{clusterName},
     //   .../recreate, .../fail = 4
     // From ApiGateway: /health = 1
-    // Total = 17
-    template.resourceCountIs('AWS::ApiGateway::Resource', 17);
+    // Total = 19
+    template.resourceCountIs('AWS::ApiGateway::Resource', 19);
   });
 });

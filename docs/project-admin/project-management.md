@@ -13,6 +13,43 @@ As a Project Administrator, you control:
 
 ## Managing Members
 
+Membership operations require the **Project Administrator** role for the target project. Platform Administrators can also manage members on any project. End Users cannot add, remove, or change member roles.
+
+### Listing Members
+
+**Endpoint:** `GET /projects/{projectId}/members`
+**Required role:** Project Administrator (for this project) or Platform Administrator
+
+Returns all current members of the project, sorted by the date they were added.
+
+#### Response (200 OK)
+
+```json
+[
+  {
+    "userId": "jsmith",
+    "displayName": "Jane Smith",
+    "role": "PROJECT_ADMIN",
+    "addedAt": "2025-01-10T09:00:00Z"
+  },
+  {
+    "userId": "bwilson",
+    "displayName": "Bob Wilson",
+    "role": "PROJECT_USER",
+    "addedAt": "2025-01-15T12:00:00Z"
+  }
+]
+```
+
+Each member entry includes:
+
+| Field | Description |
+|-------|-------------|
+| `userId` | The platform user ID |
+| `displayName` | The user's display name (falls back to userId if unavailable) |
+| `role` | `PROJECT_ADMIN` or `PROJECT_USER` |
+| `addedAt` | ISO 8601 timestamp of when the user was added to the project |
+
 ### Adding a Member
 
 **Endpoint:** `POST /projects/{projectId}/members`
@@ -79,6 +116,55 @@ Note: The user's files on EFS home directories are **not deleted** when they are
   "message": "User 'jsmith' removed from project 'genomics-team'."
 }
 ```
+
+### Changing a Member's Role
+
+**Endpoint:** `PUT /projects/{projectId}/members/{userId}`
+**Required role:** Project Administrator (for this project) or Platform Administrator
+
+Changes a member's role between `PROJECT_ADMIN` and `PROJECT_USER`.
+
+#### Request
+
+```json
+{
+  "role": "PROJECT_ADMIN"
+}
+```
+
+#### Fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `role` | string | Yes | `PROJECT_ADMIN` or `PROJECT_USER` |
+
+#### What Happens
+
+1. The platform verifies the user is an existing member of the project.
+2. The user is removed from their current Cognito group (`ProjectAdmin-{projectId}` or `ProjectUser-{projectId}`).
+3. The user is added to the new Cognito group matching the requested role.
+4. The membership record in DynamoDB is updated with the new role.
+
+If the user already has the requested role, the request is a no-op and returns the current record unchanged.
+
+#### Response (200 OK)
+
+```json
+{
+  "userId": "jsmith",
+  "projectId": "genomics-team",
+  "role": "PROJECT_ADMIN",
+  "addedAt": "2025-01-15T12:00:00Z"
+}
+```
+
+#### Error Cases
+
+| Scenario | Error Code | HTTP Status |
+|----------|-----------|-------------|
+| User is not a member of the project | `NOT_FOUND` | 404 |
+| Invalid role value | `VALIDATION_ERROR` | 400 |
+| Caller is not a Project Administrator | `AUTHORISATION_ERROR` | 403 |
 
 ### Roles
 
@@ -231,3 +317,64 @@ To restore access after a budget breach:
 2. Access is restored immediately — the `budgetBreached` flag is cleared in the same request if the new limit exceeds current spend.
 
 Alternatively, destroy unused clusters to reduce ongoing costs, then wait for the budget evaluation cycle.
+
+## Project Deactivation and Reactivation
+
+Projects can be temporarily deactivated to revoke all member access while preserving the team composition. When the project is needed again, reactivation restores all memberships automatically. Both operations require the **Platform Administrator** role.
+
+### Deactivating a Project
+
+**Endpoint:** `POST /projects/{projectId}/deactivate`
+**Required role:** Platform Administrator
+
+#### Prerequisites
+
+All clusters in the project must be destroyed before deactivation. If any non-destroyed clusters remain, the request is rejected.
+
+#### What Happens
+
+1. The platform verifies the project is in `ACTIVE` status.
+2. The platform checks that no active clusters exist in the project.
+3. The `ProjectAdmin-{projectId}` and `ProjectUser-{projectId}` Cognito groups are deleted, immediately revoking all members' role-based access.
+4. The project status transitions from `ACTIVE` to `ARCHIVED`.
+5. All membership records are preserved in DynamoDB for future reactivation.
+
+If a Cognito group deletion fails, the failure is logged and deactivation continues with the remaining steps.
+
+#### Response (200 OK)
+
+Returns the updated project record with `"status": "ARCHIVED"`.
+
+#### Error Cases
+
+| Scenario | Error Code | HTTP Status |
+|----------|-----------|-------------|
+| Project is not in ACTIVE status | `CONFLICT` | 409 |
+| Active clusters still exist | `CONFLICT` | 409 |
+| Caller is not a Platform Administrator | `AUTHORISATION_ERROR` | 403 |
+
+### Reactivating a Project
+
+**Endpoint:** `POST /projects/{projectId}/reactivate`
+**Required role:** Platform Administrator
+
+#### What Happens
+
+1. The platform verifies the project is in `ARCHIVED` status.
+2. The `ProjectAdmin-{projectId}` and `ProjectUser-{projectId}` Cognito groups are recreated.
+3. All preserved membership records are read from DynamoDB.
+4. Each member is added back to the appropriate Cognito group based on their stored role (`PROJECT_ADMIN` or `PROJECT_USER`).
+5. The project status transitions from `ARCHIVED` to `ACTIVE`.
+
+If restoring a member to a Cognito group fails, the membership record is marked with `PENDING_RESTORATION` status and the failure is logged. The daily POSIX reconciliation process will retry these restorations.
+
+#### Response (200 OK)
+
+Returns the updated project record with `"status": "ACTIVE"`.
+
+#### Error Cases
+
+| Scenario | Error Code | HTTP Status |
+|----------|-----------|-------------|
+| Project is not in ARCHIVED status | `CONFLICT` | 409 |
+| Caller is not a Platform Administrator | `AUTHORISATION_ERROR` | 403 |

@@ -27,6 +27,7 @@ Clusters table:
 """
 
 import logging
+import os
 import time
 from typing import Any
 
@@ -333,12 +334,18 @@ def propagate_user_to_clusters(
     gid: int,
     project_id: str,
     clusters_table_name: str,
+    projects_table_name: str | None = None,
 ) -> str:
     """Propagate a new POSIX user to all active cluster nodes via SSM.
 
     Queries the Clusters DynamoDB table for active clusters in the
     project, then sends an SSM Run Command to each cluster's login
     node to create the user account.
+
+    Before sending any SSM commands, verifies that the user holds a
+    Membership_Record for the target project.  If no membership record
+    exists, the propagation is skipped and PROPAGATION_SUCCESS is
+    returned (the user should not have a Linux account on the cluster).
 
     Retries up to 3 times with exponential backoff on SSM failures.
 
@@ -354,6 +361,11 @@ def propagate_user_to_clusters(
         The project identifier.
     clusters_table_name : str
         The DynamoDB Clusters table name.
+    projects_table_name : str | None
+        The DynamoDB Projects table name.  When provided, the function
+        verifies the user holds a Membership_Record before proceeding.
+        Falls back to the ``PROJECTS_TABLE_NAME`` environment variable
+        when *None*.
 
     Returns
     -------
@@ -361,6 +373,20 @@ def propagate_user_to_clusters(
         PROPAGATION_SUCCESS if all clusters were updated, or
         PROPAGATION_PENDING if any cluster failed after retries.
     """
+    # Resolve the projects table name from the parameter or environment
+    resolved_projects_table = projects_table_name or os.environ.get("PROJECTS_TABLE_NAME", "")
+
+    # Verify membership before propagating (Requirement 9.3)
+    if resolved_projects_table:
+        if not _verify_membership(resolved_projects_table, project_id, user_id):
+            logger.warning(
+                "User '%s' has no membership record for project '%s' "
+                "— skipping POSIX propagation.",
+                user_id,
+                project_id,
+            )
+            return PROPAGATION_SUCCESS
+
     active_clusters = _fetch_active_clusters(clusters_table_name, project_id)
 
     if not active_clusters:
@@ -522,6 +548,35 @@ def _fetch_active_clusters(
         item for item in response.get("Items", [])
         if item.get("status") == "ACTIVE"
     ]
+
+
+def _verify_membership(
+    projects_table_name: str,
+    project_id: str,
+    user_id: str,
+) -> bool:
+    """Check whether a user holds a Membership_Record for a project.
+
+    Queries the Projects table for the item with
+    PK=PROJECT#{projectId}, SK=MEMBER#{userId}.
+
+    Returns True if the record exists, False otherwise.
+    """
+    table = dynamodb.Table(projects_table_name)
+    try:
+        response = table.get_item(
+            Key={"PK": f"PROJECT#{project_id}", "SK": f"MEMBER#{user_id}"},
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed to verify membership for user '%s' in project '%s': %s",
+            user_id,
+            project_id,
+            exc,
+        )
+        return False
+
+    return "Item" in response
 
 
 def _send_ssm_command_with_retry(

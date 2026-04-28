@@ -541,7 +541,130 @@ Delete a project. All clusters must be destroyed first.
 
 ---
 
+### POST /projects/{projectId}/deactivate
+
+Deactivate a project. Revokes all member access by deleting the project's Cognito groups while preserving membership records in DynamoDB for future reactivation. All clusters must be destroyed before deactivation.
+
+**Required role:** Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectId` | string | The project identifier |
+
+**Request body:** None required.
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Project 'genomics-team' has been deactivated.",
+  "project": {
+    "projectId": "genomics-team",
+    "projectName": "Genomics Research Team",
+    "status": "ARCHIVED",
+    "createdAt": "2025-01-15T11:00:00Z"
+  }
+}
+```
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `AUTHORISATION_ERROR` | 403 | Caller is not an Administrator |
+| `NOT_FOUND` | 404 | Project does not exist |
+| `CONFLICT` | 409 | Project is not in ACTIVE status, or project has active clusters |
+
+---
+
+### POST /projects/{projectId}/reactivate
+
+Reactivate an archived project. Recreates the project's Cognito groups and restores all preserved membership records to the appropriate groups. If restoring a member fails, the membership record is marked with `PENDING_RESTORATION` status.
+
+**Required role:** Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectId` | string | The project identifier |
+
+**Request body:** None required.
+
+**Response (200 OK):**
+
+```json
+{
+  "message": "Project 'genomics-team' has been reactivated.",
+  "project": {
+    "projectId": "genomics-team",
+    "projectName": "Genomics Research Team",
+    "status": "ACTIVE",
+    "createdAt": "2025-01-15T11:00:00Z"
+  }
+}
+```
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `AUTHORISATION_ERROR` | 403 | Caller is not an Administrator |
+| `NOT_FOUND` | 404 | Project does not exist |
+| `CONFLICT` | 409 | Project is not in ARCHIVED status |
+
+---
+
 ## Project Membership
+
+### GET /projects/{projectId}/members
+
+List all members of a project.
+
+**Required role:** Project Administrator (for this project) or Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectId` | string | The project identifier |
+
+**Response (200 OK):**
+
+```json
+{
+  "members": [
+    {
+      "userId": "jsmith",
+      "displayName": "Jane Smith",
+      "role": "PROJECT_USER",
+      "addedAt": "2025-01-15T12:00:00Z"
+    }
+  ]
+}
+```
+
+**Response fields:**
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `userId` | string | The member's user identifier |
+| `displayName` | string | The member's display name |
+| `role` | string | Project role: `PROJECT_ADMIN` or `PROJECT_USER` |
+| `addedAt` | string | ISO 8601 timestamp of when the member was added |
+
+Members are sorted by `addedAt` in ascending order.
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `AUTHORISATION_ERROR` | 403 | Caller is not a Project Administrator for this project or an Administrator |
+| `NOT_FOUND` | 404 | Project does not exist |
+
+---
 
 ### POST /projects/{projectId}/members
 
@@ -614,6 +737,52 @@ Remove a user from a project.
 | Code | Status | Condition |
 |------|--------|-----------|
 | `AUTHORISATION_ERROR` | 403 | Caller is not a Project Administrator for this project |
+| `NOT_FOUND` | 404 | User is not a member of the project |
+
+---
+
+### PUT /projects/{projectId}/members/{userId}
+
+Change a project member's role.
+
+**Required role:** Project Administrator (for this project) or Administrator
+
+**Path parameters:**
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `projectId` | string | The project identifier |
+| `userId` | string | The user identifier of the member to update |
+
+**Request body:**
+
+```json
+{
+  "role": "string (required)"
+}
+```
+
+Valid roles: `PROJECT_ADMIN`, `PROJECT_USER`
+
+**Response (200 OK):**
+
+```json
+{
+  "userId": "jsmith",
+  "projectId": "genomics-team",
+  "role": "PROJECT_ADMIN",
+  "addedAt": "2025-01-15T12:00:00Z"
+}
+```
+
+If the member already has the requested role, the endpoint returns the current record unchanged (no-op).
+
+**Errors:**
+
+| Code | Status | Condition |
+|------|--------|-----------|
+| `VALIDATION_ERROR` | 400 | Missing role or role is not `PROJECT_ADMIN` or `PROJECT_USER` |
+| `AUTHORISATION_ERROR` | 403 | Caller is not a Project Administrator for this project or an Administrator |
 | `NOT_FOUND` | 404 | User is not a member of the project |
 
 ---

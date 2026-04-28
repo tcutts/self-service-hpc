@@ -89,4 +89,11 @@ describe('ApiGateway', () => {
       CompatibleRuntimes: ['python3.13'],
     });
   });
+
+  it('includes authorization.py in the shared layer description', () => {
+    template.hasResourceProperties('AWS::Lambda::LayerVersion', {
+      LayerName: 'hpc-shared-utils',
+      Description: Match.stringLikeRegexp('authorization'),
+    });
+  });
 });

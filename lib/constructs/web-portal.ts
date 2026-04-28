@@ -81,6 +81,8 @@ export class WebPortal extends Construct {
             `  cognitoRegion: '${cdk.Aws.REGION}',`,
             `  apiBaseUrl: '${props.api.url}',`,
             '  clusterPollIntervalMs: 5000,',
+            '  projectPollIntervalMs: 5000,',
+            '  clusterCreationTimeoutMs: 9000000,',
             '};',
           ].join('\n'),
         ),
