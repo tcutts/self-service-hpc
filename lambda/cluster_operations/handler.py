@@ -222,6 +222,49 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
             {"clusterName": cluster_name},
         )
 
+    # Storage mode validation
+    storage_mode = body.get("storageMode", "mountpoint")
+    if storage_mode not in ("lustre", "mountpoint"):
+        raise ValidationError(
+            f"Invalid storageMode '{storage_mode}'. Must be 'lustre' or 'mountpoint'.",
+            {"field": "storageMode"},
+        )
+
+    # Lustre capacity validation (only when lustre mode)
+    lustre_capacity_gib = body.get("lustreCapacityGiB", 1200)
+    if storage_mode == "lustre":
+        if not isinstance(lustre_capacity_gib, int) or lustre_capacity_gib < 1200:
+            raise ValidationError(
+                "Lustre capacity must be at least 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+        if lustre_capacity_gib % 1200 != 0:
+            raise ValidationError(
+                "Lustre capacity must be a multiple of 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+
+    # Node scaling overrides (None means "use template default")
+    min_nodes = body.get("minNodes")
+    max_nodes = body.get("maxNodes")
+    if min_nodes is not None:
+        if not isinstance(min_nodes, int) or min_nodes < 0:
+            raise ValidationError(
+                "minNodes must be a non-negative integer.",
+                {"field": "minNodes"},
+            )
+    if max_nodes is not None:
+        if not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                "maxNodes must be a positive integer.",
+                {"field": "maxNodes"},
+            )
+    if min_nodes is not None and max_nodes is not None and min_nodes > max_nodes:
+        raise ValidationError(
+            "minNodes cannot exceed maxNodes.",
+            {"fields": ["minNodes", "maxNodes"]},
+        )
+
     # Check budget breach before starting creation
     if check_budget_breach(PROJECTS_TABLE_NAME, project_id):
         raise BudgetExceededError(
@@ -246,6 +289,7 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
             "clusterName": cluster_name,
             "projectId": project_id,
             "templateId": template_id,
+            "storageMode": storage_mode,
             "createdBy": caller,
             "status": "CREATING",
             "currentStep": 0,
@@ -262,6 +306,10 @@ def _handle_create_cluster(event: dict[str, Any], project_id: str) -> dict[str, 
         "clusterName": cluster_name,
         "templateId": template_id,
         "createdBy": caller,
+        "storageMode": storage_mode,
+        "lustreCapacityGiB": lustre_capacity_gib if storage_mode == "lustre" else None,
+        "minNodes": min_nodes,
+        "maxNodes": max_nodes,
         "vpcId": infra["vpcId"],
         "efsFileSystemId": infra["efsFileSystemId"],
         "s3BucketName": infra["s3BucketName"],
@@ -334,6 +382,22 @@ def _handle_get_cluster(
         cluster_name=cluster_name,
     )
 
+    # Ensure storageMode is always present (default for legacy records)
+    if "storageMode" not in cluster:
+        cluster["storageMode"] = "mountpoint"
+
+    # Only include lustreCapacityGiB when storageMode is lustre
+    if cluster["storageMode"] != "lustre":
+        cluster.pop("lustreCapacityGiB", None)
+    elif "lustreCapacityGiB" in cluster:
+        cluster["lustreCapacityGiB"] = int(cluster["lustreCapacityGiB"])
+
+    # Ensure node scaling fields are integers (DynamoDB returns Decimal)
+    if "minNodes" in cluster:
+        cluster["minNodes"] = int(cluster["minNodes"])
+    if "maxNodes" in cluster:
+        cluster["maxNodes"] = int(cluster["maxNodes"])
+
     # Enrich active clusters with connection info
     if cluster.get("status") == "ACTIVE":
         login_ip = cluster.get("loginNodeIp", "")
@@ -391,6 +455,51 @@ def _handle_recreate_cluster(
     if not template_id:
         template_id = cluster.get("templateId", "")
 
+    # Storage mode: use request body override, or fall back to destroyed cluster record
+    storage_mode = body.get("storageMode") if body else None
+    if storage_mode is None:
+        storage_mode = cluster.get("storageMode", "mountpoint")
+    if storage_mode not in ("lustre", "mountpoint"):
+        raise ValidationError(
+            f"Invalid storageMode '{storage_mode}'. Must be 'lustre' or 'mountpoint'.",
+            {"field": "storageMode"},
+        )
+
+    # Lustre capacity validation (only when lustre mode)
+    lustre_capacity_gib = body.get("lustreCapacityGiB", 1200) if body else 1200
+    if storage_mode == "lustre":
+        if not isinstance(lustre_capacity_gib, int) or lustre_capacity_gib < 1200:
+            raise ValidationError(
+                "Lustre capacity must be at least 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+        if lustre_capacity_gib % 1200 != 0:
+            raise ValidationError(
+                "Lustre capacity must be a multiple of 1200 GiB.",
+                {"field": "lustreCapacityGiB"},
+            )
+
+    # Node scaling overrides (None means "use template default")
+    min_nodes = body.get("minNodes") if body else None
+    max_nodes = body.get("maxNodes") if body else None
+    if min_nodes is not None:
+        if not isinstance(min_nodes, int) or min_nodes < 0:
+            raise ValidationError(
+                "minNodes must be a non-negative integer.",
+                {"field": "minNodes"},
+            )
+    if max_nodes is not None:
+        if not isinstance(max_nodes, int) or max_nodes < 1:
+            raise ValidationError(
+                "maxNodes must be a positive integer.",
+                {"field": "maxNodes"},
+            )
+    if min_nodes is not None and max_nodes is not None and min_nodes > max_nodes:
+        raise ValidationError(
+            "minNodes cannot exceed maxNodes.",
+            {"fields": ["minNodes", "maxNodes"]},
+        )
+
     # Check budget breach before starting recreation
     if check_budget_breach(PROJECTS_TABLE_NAME, project_id):
         raise BudgetExceededError(
@@ -413,6 +522,7 @@ def _handle_recreate_cluster(
             "clusterName": cluster_name,
             "projectId": project_id,
             "templateId": template_id,
+            "storageMode": storage_mode,
             "createdBy": caller,
             "status": "CREATING",
             "currentStep": 0,
@@ -429,6 +539,10 @@ def _handle_recreate_cluster(
         "clusterName": cluster_name,
         "templateId": template_id,
         "createdBy": caller,
+        "storageMode": storage_mode,
+        "lustreCapacityGiB": lustre_capacity_gib if storage_mode == "lustre" else None,
+        "minNodes": min_nodes,
+        "maxNodes": max_nodes,
         "vpcId": infra["vpcId"],
         "efsFileSystemId": infra["efsFileSystemId"],
         "s3BucketName": infra["s3BucketName"],
@@ -499,6 +613,7 @@ def _handle_delete_cluster(
         "computeNodeGroupId": cluster.get("computeNodeGroupId", ""),
         "queueId": cluster.get("queueId", ""),
         "fsxFilesystemId": cluster.get("fsxFilesystemId", ""),
+        "storageMode": cluster.get("storageMode", "mountpoint"),
         "destroyedBy": caller,
     }
 

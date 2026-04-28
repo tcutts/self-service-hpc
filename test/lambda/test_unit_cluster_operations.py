@@ -598,6 +598,124 @@ class TestClusterCreationWorkflow:
         assert item["Item"]["pcsClusterId"] == "pcs-123"
         assert item["Item"]["loginNodeIp"] == "10.0.1.5"
 
+    def test_record_cluster_persists_storage_fields(self, _env):
+        """record_cluster persists storageMode, lustreCapacityGiB, minNodes, maxNodes.
+
+        **Validates: Requirements 6.1, 6.4**
+        """
+        event = {
+            "projectId": "proj-wf",
+            "clusterName": "storage-fields-cl",
+            "templateId": "tpl-1",
+            "storageMode": "lustre",
+            "lustreCapacityGiB": 2400,
+            "minNodes": 3,
+            "maxNodes": 25,
+            "pcsClusterId": "pcs-sf",
+            "pcsClusterArn": "arn:aws:pcs:us-east-1:123:cluster/pcs-sf",
+            "loginNodeGroupId": "lng-sf",
+            "computeNodeGroupId": "cng-sf",
+            "queueId": "q-sf",
+            "fsxFilesystemId": "fs-sf",
+            "loginNodeIp": "10.0.1.20",
+            "createdBy": "test-user",
+        }
+        result = _env["creation_mod"].record_cluster(event)
+        assert result["status"] == "ACTIVE"
+
+        item = _env["clusters_table"].get_item(
+            Key={"PK": "PROJECT#proj-wf", "SK": "CLUSTER#storage-fields-cl"}
+        )["Item"]
+        assert item["storageMode"] == "lustre"
+        assert item["lustreCapacityGiB"] == 2400
+        assert item["minNodes"] == 3
+        assert item["maxNodes"] == 25
+
+    def test_record_cluster_persists_mountpoint_without_lustre_capacity(self, _env):
+        """record_cluster omits lustreCapacityGiB for mountpoint clusters.
+
+        **Validates: Requirements 6.1, 6.4**
+        """
+        event = {
+            "projectId": "proj-wf",
+            "clusterName": "mp-fields-cl",
+            "templateId": "tpl-1",
+            "storageMode": "mountpoint",
+            "minNodes": 0,
+            "maxNodes": 10,
+            "pcsClusterId": "pcs-mp",
+            "pcsClusterArn": "arn:aws:pcs:us-east-1:123:cluster/pcs-mp",
+            "loginNodeGroupId": "lng-mp",
+            "computeNodeGroupId": "cng-mp",
+            "queueId": "q-mp",
+            "fsxFilesystemId": "",
+            "loginNodeIp": "10.0.1.21",
+            "createdBy": "test-user",
+        }
+        result = _env["creation_mod"].record_cluster(event)
+        assert result["status"] == "ACTIVE"
+
+        item = _env["clusters_table"].get_item(
+            Key={"PK": "PROJECT#proj-wf", "SK": "CLUSTER#mp-fields-cl"}
+        )["Item"]
+        assert item["storageMode"] == "mountpoint"
+        assert "lustreCapacityGiB" not in item
+        assert item["minNodes"] == 0
+        assert item["maxNodes"] == 10
+
+    def test_create_fsx_filesystem_uses_lustre_capacity_from_event(self, _env):
+        """create_fsx_filesystem passes lustreCapacityGiB as StorageCapacity.
+
+        **Validates: Requirements 2.6**
+        """
+        creation_mod = _env["creation_mod"]
+        event = {
+            "projectId": "proj-wf",
+            "clusterName": "fsx-cap-cl",
+            "lustreCapacityGiB": 3600,
+            "privateSubnetIds": ["subnet-priv-1"],
+            "securityGroupIds": {"fsx": "sg-fsx"},
+        }
+        mock_response = {
+            "FileSystem": {
+                "FileSystemId": "fs-cap-test",
+                "Lifecycle": "CREATING",
+            }
+        }
+        with patch.object(creation_mod.fsx_client, "create_file_system", return_value=mock_response) as mock_create, \
+             patch.object(creation_mod, "_update_step_progress"):
+            result = creation_mod.create_fsx_filesystem(event)
+
+        assert result["fsxFilesystemId"] == "fs-cap-test"
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["StorageCapacity"] == 3600
+
+    def test_create_fsx_filesystem_defaults_capacity_when_absent(self, _env):
+        """create_fsx_filesystem defaults to 1200 when lustreCapacityGiB is absent.
+
+        **Validates: Requirements 2.6**
+        """
+        creation_mod = _env["creation_mod"]
+        event = {
+            "projectId": "proj-wf",
+            "clusterName": "fsx-default-cl",
+            "privateSubnetIds": ["subnet-priv-1"],
+            "securityGroupIds": {"fsx": "sg-fsx"},
+        }
+        mock_response = {
+            "FileSystem": {
+                "FileSystemId": "fs-default-test",
+                "Lifecycle": "CREATING",
+            }
+        }
+        with patch.object(creation_mod.fsx_client, "create_file_system", return_value=mock_response) as mock_create, \
+             patch.object(creation_mod, "_update_step_progress"):
+            result = creation_mod.create_fsx_filesystem(event)
+
+        assert result["fsxFilesystemId"] == "fs-default-test"
+        call_kwargs = mock_create.call_args[1]
+        assert call_kwargs["StorageCapacity"] == 1200
+
     def test_step11_handle_creation_failure_marks_failed(self, _env):
         event = {
             "projectId": "proj-wf",
@@ -827,6 +945,59 @@ class TestClusterDestructionWorkflow:
         assert item["Item"]["status"] == "DESTROYED"
         assert "destroyedAt" in item["Item"]
 
+    def test_remove_mountpoint_s3_policy_removes_from_both_roles(self, _env):
+        """remove_mountpoint_s3_policy deletes MountpointS3Access from login and compute roles."""
+        iam = boto3.client("iam", region_name="us-east-1")
+        import json
+        policy_doc = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [{"Effect": "Allow", "Action": "s3:GetObject", "Resource": "*"}],
+        })
+        # Create roles and attach the inline policy
+        for suffix in ["login", "compute"]:
+            role_name = f"AWSPCS-proj-d-cl-mp-{suffix}"
+            iam.create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument='{"Version":"2012-10-17","Statement":[]}',
+            )
+            iam.put_role_policy(
+                RoleName=role_name,
+                PolicyName="MountpointS3Access",
+                PolicyDocument=policy_doc,
+            )
+
+        event = {"projectId": "proj-d", "clusterName": "cl-mp"}
+        _env["destruction_mod"].remove_mountpoint_s3_policy(event)
+
+        # Verify policies are removed
+        for suffix in ["login", "compute"]:
+            role_name = f"AWSPCS-proj-d-cl-mp-{suffix}"
+            policies = iam.list_role_policies(RoleName=role_name)
+            assert "MountpointS3Access" not in policies["PolicyNames"]
+
+    def test_remove_mountpoint_s3_policy_handles_no_such_entity(self, _env):
+        """remove_mountpoint_s3_policy silently ignores NoSuchEntity (lustre clusters)."""
+        iam = boto3.client("iam", region_name="us-east-1")
+        # Create roles WITHOUT the inline policy
+        for suffix in ["login", "compute"]:
+            role_name = f"AWSPCS-proj-d-cl-lustre-{suffix}"
+            try:
+                iam.create_role(
+                    RoleName=role_name,
+                    AssumeRolePolicyDocument='{"Version":"2012-10-17","Statement":[]}',
+                )
+            except iam.exceptions.EntityAlreadyExistsException:
+                pass
+
+        event = {"projectId": "proj-d", "clusterName": "cl-lustre"}
+        # Should not raise
+        result = _env["destruction_mod"].remove_mountpoint_s3_policy(event)
+        assert result == event
+
+    def test_remove_mountpoint_s3_policy_registered_in_dispatch(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "remove_mountpoint_s3_policy" in dispatch
+
 
 # ---------------------------------------------------------------------------
 # Authorisation for all cluster endpoints
@@ -1048,6 +1219,105 @@ class TestConnectionInfoVisibility:
         assert response["statusCode"] == 200
         body = json.loads(response["body"])
         assert "connectionInfo" not in body
+
+
+# ---------------------------------------------------------------------------
+# GET cluster detail includes storage configuration
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestGetClusterStorageConfig:
+    """Validates: Requirements 6.2, 6.3"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+            os.environ["CREATION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:creation"
+            os.environ["DESTRUCTION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:destruction"
+
+            clusters_table = create_clusters_table()
+            projects_table = create_projects_table()
+            create_cluster_name_registry_table()
+
+            handler_mod, clusters_mod, auth_mod, errors_mod, tagging_mod = reload_cluster_ops_handler_modules()
+
+            _seed_project(projects_table, "proj-storage", budget_breached=False)
+
+            # Cluster with lustre storage mode and capacity
+            _seed_cluster(clusters_table, "proj-storage", "lustre-cl", status="ACTIVE",
+                          storageMode="lustre", lustreCapacityGiB=2400,
+                          minNodes=2, maxNodes=20, loginNodeIp="10.0.1.10")
+
+            # Cluster with mountpoint storage mode
+            _seed_cluster(clusters_table, "proj-storage", "mountpoint-cl", status="ACTIVE",
+                          storageMode="mountpoint", minNodes=0, maxNodes=10,
+                          loginNodeIp="10.0.1.11")
+
+            # Cluster with mountpoint but lustreCapacityGiB erroneously in DB
+            _seed_cluster(clusters_table, "proj-storage", "mountpoint-stale-cl", status="ACTIVE",
+                          storageMode="mountpoint", lustreCapacityGiB=1200,
+                          minNodes=1, maxNodes=5, loginNodeIp="10.0.1.12")
+
+            # Legacy cluster without storageMode field
+            _seed_cluster(clusters_table, "proj-storage", "legacy-cl", status="ACTIVE",
+                          loginNodeIp="10.0.1.13")
+
+            yield {
+                "handler_mod": handler_mod,
+            }
+
+    def _get_cluster_body(self, _env, cluster_name):
+        event = _project_user_event(
+            "GET", "/projects/{projectId}/clusters/{clusterName}", "proj-storage",
+            path_parameters={"projectId": "proj-storage", "clusterName": cluster_name},
+        )
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 200
+        return json.loads(response["body"])
+
+    def test_lustre_cluster_includes_storage_mode(self, _env):
+        body = self._get_cluster_body(_env, "lustre-cl")
+        assert body["storageMode"] == "lustre"
+
+    def test_lustre_cluster_includes_lustre_capacity(self, _env):
+        body = self._get_cluster_body(_env, "lustre-cl")
+        assert body["lustreCapacityGiB"] == 2400
+
+    def test_lustre_cluster_includes_node_scaling(self, _env):
+        body = self._get_cluster_body(_env, "lustre-cl")
+        assert body["minNodes"] == 2
+        assert body["maxNodes"] == 20
+
+    def test_mountpoint_cluster_includes_storage_mode(self, _env):
+        body = self._get_cluster_body(_env, "mountpoint-cl")
+        assert body["storageMode"] == "mountpoint"
+
+    def test_mountpoint_cluster_excludes_lustre_capacity(self, _env):
+        body = self._get_cluster_body(_env, "mountpoint-cl")
+        assert "lustreCapacityGiB" not in body
+
+    def test_mountpoint_cluster_includes_node_scaling(self, _env):
+        body = self._get_cluster_body(_env, "mountpoint-cl")
+        assert body["minNodes"] == 0
+        assert body["maxNodes"] == 10
+
+    def test_mountpoint_strips_stale_lustre_capacity(self, _env):
+        """lustreCapacityGiB is stripped even if erroneously present in DB for mountpoint clusters."""
+        body = self._get_cluster_body(_env, "mountpoint-stale-cl")
+        assert body["storageMode"] == "mountpoint"
+        assert "lustreCapacityGiB" not in body
+
+    def test_legacy_cluster_defaults_to_mountpoint(self, _env):
+        """Clusters without storageMode in DB default to mountpoint."""
+        body = self._get_cluster_body(_env, "legacy-cl")
+        assert body["storageMode"] == "mountpoint"
+        assert "lustreCapacityGiB" not in body
 
 
 # ---------------------------------------------------------------------------
@@ -1348,6 +1618,35 @@ class TestClusterDestructionStartsSFN:
         assert response["statusCode"] == 404
         body = json.loads(response["body"])
         assert body["error"]["code"] == "NOT_FOUND"
+
+    def test_destruction_payload_includes_storage_mode_from_record(self, _env):
+        """storageMode from the cluster record flows into the destruction payload."""
+        _seed_cluster(
+            _env["clusters_table"], "proj-destroy", "lustre-cl",
+            status="ACTIVE", storageMode="lustre",
+            pcsClusterId="pcs-2", fsxFilesystemId="fs-2",
+        )
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = _project_user_event(
+                "DELETE", "/projects/{projectId}/clusters/{clusterName}", "proj-destroy",
+                path_parameters={"projectId": "proj-destroy", "clusterName": "lustre-cl"},
+            )
+            _env["handler_mod"].handler(event, None)
+            payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+            assert payload["storageMode"] == "lustre"
+
+    def test_destruction_payload_defaults_storage_mode_to_mountpoint(self, _env):
+        """Legacy clusters without storageMode default to 'mountpoint' in the destruction payload."""
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = _project_user_event(
+                "DELETE", "/projects/{projectId}/clusters/{clusterName}", "proj-destroy",
+                path_parameters={"projectId": "proj-destroy", "clusterName": "active-cl"},
+            )
+            _env["handler_mod"].handler(event, None)
+            payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+            assert payload["storageMode"] == "mountpoint"
 
     def test_unknown_route_returns_404(self, _env):
         event = _project_user_event(
@@ -2137,6 +2436,261 @@ class TestClusterRecreation:
         body = json.loads(response["body"])
         assert body["projectId"] == "proj-recreate"
 
+    # --- Storage mode overrides (Requirement 8.1, 8.2) ---
+
+    def test_recreation_with_storage_mode_override_lustre(self, _env):
+        """Recreation with storageMode=lustre override includes it in SFN payload."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored", storageMode="mountpoint")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                body={"storageMode": "lustre", "lustreCapacityGiB": 2400},
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "lustre"
+        assert payload["lustreCapacityGiB"] == 2400
+
+    def test_recreation_with_storage_mode_override_mountpoint(self, _env):
+        """Recreation with storageMode=mountpoint override; lustreCapacityGiB is None."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored", storageMode="lustre")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                body={"storageMode": "mountpoint"},
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "mountpoint"
+        assert payload["lustreCapacityGiB"] is None
+
+    def test_recreation_falls_back_to_stored_storage_mode(self, _env):
+        """When storageMode is omitted, falls back to the destroyed cluster's value."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored", storageMode="lustre")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            event["body"] = None
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "lustre"
+
+    def test_recreation_falls_back_to_mountpoint_when_no_stored_mode(self, _env):
+        """When storageMode is omitted and cluster record has no storageMode, defaults to mountpoint."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            event["body"] = None
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "mountpoint"
+
+    def test_recreation_invalid_storage_mode_returns_400(self, _env):
+        """Invalid storageMode in recreation body returns VALIDATION_ERROR."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"storageMode": "invalid"},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "storageMode" in body["error"]["message"]
+
+    # --- Lustre capacity validation in recreation ---
+
+    def test_recreation_lustre_capacity_below_minimum_returns_400(self, _env):
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"storageMode": "lustre", "lustreCapacityGiB": 600},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "1200" in body["error"]["message"]
+
+    def test_recreation_lustre_capacity_not_multiple_returns_400(self, _env):
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"storageMode": "lustre", "lustreCapacityGiB": 1500},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "multiple" in body["error"]["message"].lower()
+
+    # --- Node scaling overrides in recreation (Requirement 8.1, 8.3) ---
+
+    def test_recreation_with_node_scaling_overrides(self, _env):
+        """Recreation with minNodes/maxNodes includes them in SFN payload."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                body={"minNodes": 2, "maxNodes": 20},
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["minNodes"] == 2
+        assert payload["maxNodes"] == 20
+
+    def test_recreation_without_node_overrides_passes_none(self, _env):
+        """When minNodes/maxNodes are omitted, payload has None (template fallback)."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            event["body"] = None
+            response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["minNodes"] is None
+        assert payload["maxNodes"] is None
+
+    def test_recreation_negative_min_nodes_returns_400(self, _env):
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"minNodes": -1},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_recreation_zero_max_nodes_returns_400(self, _env):
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"maxNodes": 0},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+
+    def test_recreation_min_exceeds_max_returns_400(self, _env):
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        event = _project_user_event(
+            "POST",
+            "/projects/{projectId}/clusters/{clusterName}/recreate",
+            "proj-recreate",
+            body={"minNodes": 10, "maxNodes": 5},
+            path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+        )
+        response = _env["handler_mod"].handler(event, None)
+
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "minNodes" in body["error"]["message"]
+
+    # --- DynamoDB record includes storageMode ---
+
+    def test_recreation_persists_storage_mode_in_dynamo(self, _env):
+        """The CREATING record written during recreation includes storageMode."""
+        _seed_cluster(_env["clusters_table"], "proj-recreate", "destroyed-cl",
+                      status="DESTROYED", templateId="tpl-stored")
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+
+            event = _project_user_event(
+                "POST",
+                "/projects/{projectId}/clusters/{clusterName}/recreate",
+                "proj-recreate",
+                body={"storageMode": "lustre", "lustreCapacityGiB": 1200},
+                path_parameters={"projectId": "proj-recreate", "clusterName": "destroyed-cl"},
+            )
+            _env["handler_mod"].handler(event, None)
+
+        item = _env["clusters_table"].get_item(
+            Key={"PK": "PROJECT#proj-recreate", "SK": "CLUSTER#destroyed-cl"}
+        )["Item"]
+        assert item["storageMode"] == "lustre"
+        assert item["status"] == "CREATING"
+
 
 # ---------------------------------------------------------------------------
 # Launch template creation
@@ -2647,6 +3201,7 @@ class TestUnchangedBehaviourRegression:
             "tag_resources",
             "record_cluster",
             "handle_creation_failure",
+            "configure_mountpoint_s3_iam",
         ]
         actual_order = list(_env["creation_mod"]._STEP_DISPATCH.keys())
         assert actual_order == expected_order
@@ -2673,6 +3228,7 @@ class TestUnchangedBehaviourRegression:
             "check_fsx_export_status",
             "delete_pcs_resources",
             "delete_fsx_filesystem",
+            "remove_mountpoint_s3_policy",
             "delete_iam_resources",
             "delete_launch_templates",
             "record_cluster_destroyed",
@@ -2689,3 +3245,359 @@ class TestUnchangedBehaviourRegression:
         """delete_launch_templates must come before record_cluster_destroyed."""
         keys = list(_env["destruction_mod"]._STEP_DISPATCH.keys())
         assert keys.index("delete_launch_templates") < keys.index("record_cluster_destroyed")
+
+# ---------------------------------------------------------------------------
+# Cluster creation handler: storage and scaling validation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestCreateClusterStorageAndScalingValidation:
+    """Validates: Requirements 1.5, 1.6, 1.7, 2.2, 2.3, 2.4, 2.5, 2.7, 5.2, 5.3, 5.4, 5.5, 9.1
+
+    Tests storage mode validation, lustre capacity validation, node scaling
+    validation, and SFN payload propagation for the cluster creation handler.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+            os.environ["CREATION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:creation"
+            os.environ["DESTRUCTION_STATE_MACHINE_ARN"] = "arn:aws:states:us-east-1:123456789012:stateMachine:destruction"
+
+            clusters_table = create_clusters_table()
+            projects_table = create_projects_table()
+            create_cluster_name_registry_table()
+
+            handler_mod, clusters_mod, auth_mod, errors_mod, tagging_mod = reload_cluster_ops_handler_modules()
+
+            _seed_project(projects_table, "proj-val", budget_breached=False)
+
+            yield {
+                "handler_mod": handler_mod,
+                "clusters_table": clusters_table,
+                "projects_table": projects_table,
+                "errors_mod": errors_mod,
+            }
+
+    def _create_event(self, body):
+        return _project_user_event(
+            "POST", "/projects/{projectId}/clusters", "proj-val",
+            body=body,
+            path_parameters={"projectId": "proj-val"},
+        )
+
+    # --- storageMode validation (Req 1.5, 1.6, 1.7) ---
+
+    def test_valid_storage_mode_lustre_accepted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "sm-lustre", "templateId": "tpl-1", "storageMode": "lustre"})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+
+    def test_valid_storage_mode_mountpoint_accepted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "sm-mp", "templateId": "tpl-1", "storageMode": "mountpoint"})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+
+    def test_invalid_storage_mode_returns_400(self, _env):
+        event = self._create_event({"clusterName": "sm-bad", "templateId": "tpl-1", "storageMode": "efs"})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "storageMode" in body["error"]["message"]
+
+    def test_storage_mode_defaults_to_mountpoint_when_omitted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "sm-default", "templateId": "tpl-1"})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "mountpoint"
+
+    # --- lustreCapacityGiB validation (Req 2.2, 2.3, 2.4, 2.5, 2.7) ---
+
+    def test_lustre_capacity_valid_accepted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "lc-ok", "templateId": "tpl-1",
+                                        "storageMode": "lustre", "lustreCapacityGiB": 2400})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["lustreCapacityGiB"] == 2400
+
+    def test_lustre_capacity_below_minimum_returns_400(self, _env):
+        event = self._create_event({"clusterName": "lc-low", "templateId": "tpl-1",
+                                    "storageMode": "lustre", "lustreCapacityGiB": 600})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "1200" in body["error"]["message"]
+
+    def test_lustre_capacity_not_multiple_returns_400(self, _env):
+        event = self._create_event({"clusterName": "lc-notmul", "templateId": "tpl-1",
+                                    "storageMode": "lustre", "lustreCapacityGiB": 1500})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "multiple" in body["error"]["message"].lower()
+
+    def test_lustre_capacity_defaults_to_1200_when_omitted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "lc-def", "templateId": "tpl-1",
+                                        "storageMode": "lustre"})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["lustreCapacityGiB"] == 1200
+
+    def test_lustre_capacity_ignored_when_mountpoint(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "lc-ign", "templateId": "tpl-1",
+                                        "storageMode": "mountpoint", "lustreCapacityGiB": 9999})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["lustreCapacityGiB"] is None
+
+    # --- minNodes / maxNodes validation (Req 5.2, 5.3, 5.4, 5.5) ---
+
+    def test_valid_node_scaling_accepted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "ns-ok", "templateId": "tpl-1",
+                                        "minNodes": 2, "maxNodes": 10})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["minNodes"] == 2
+        assert payload["maxNodes"] == 10
+
+    def test_min_nodes_zero_accepted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "ns-zero", "templateId": "tpl-1",
+                                        "minNodes": 0, "maxNodes": 5})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+
+    def test_negative_min_nodes_returns_400(self, _env):
+        event = self._create_event({"clusterName": "ns-negmin", "templateId": "tpl-1",
+                                    "minNodes": -1, "maxNodes": 5})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "minNodes" in body["error"]["message"]
+
+    def test_zero_max_nodes_returns_400(self, _env):
+        event = self._create_event({"clusterName": "ns-zeromax", "templateId": "tpl-1",
+                                    "minNodes": 0, "maxNodes": 0})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "maxNodes" in body["error"]["message"]
+
+    def test_min_exceeds_max_returns_400(self, _env):
+        event = self._create_event({"clusterName": "ns-minmax", "templateId": "tpl-1",
+                                    "minNodes": 10, "maxNodes": 5})
+        response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 400
+        body = json.loads(response["body"])
+        assert body["error"]["code"] == "VALIDATION_ERROR"
+        assert "minNodes" in body["error"]["message"]
+
+    def test_node_scaling_defaults_to_none_when_omitted(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "ns-none", "templateId": "tpl-1"})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["minNodes"] is None
+        assert payload["maxNodes"] is None
+
+    # --- SFN payload includes all new fields (Req 9.1) ---
+
+    def test_sfn_payload_includes_all_new_fields(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "payload-all", "templateId": "tpl-1",
+                                        "storageMode": "lustre", "lustreCapacityGiB": 3600,
+                                        "minNodes": 1, "maxNodes": 50})
+            response = _env["handler_mod"].handler(event, None)
+        assert response["statusCode"] == 202
+        payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
+        assert payload["storageMode"] == "lustre"
+        assert payload["lustreCapacityGiB"] == 3600
+        assert payload["minNodes"] == 1
+        assert payload["maxNodes"] == 50
+        # Infra fields still present
+        assert "s3BucketName" in payload
+        assert "privateSubnetIds" in payload
+        assert "securityGroupIds" in payload
+
+    # --- Initial CREATING record includes storageMode ---
+
+    def test_creating_record_includes_storage_mode(self, _env):
+        with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
+            mock_sfn.start_execution = MagicMock(return_value={})
+            event = self._create_event({"clusterName": "rec-sm", "templateId": "tpl-1",
+                                        "storageMode": "lustre"})
+            _env["handler_mod"].handler(event, None)
+        item = _env["clusters_table"].get_item(
+            Key={"PK": "PROJECT#proj-val", "SK": "CLUSTER#rec-sm"}
+        )["Item"]
+        assert item["storageMode"] == "lustre"
+        assert item["status"] == "CREATING"
+
+
+# ---------------------------------------------------------------------------
+# configure_mountpoint_s3_iam — IAM policy attachment for Mountpoint S3
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestConfigureMountpointS3Iam:
+    """Validates: Requirements 4.1, 4.2, 4.3
+
+    Tests that configure_mountpoint_s3_iam attaches the correct inline
+    IAM policy to both login and compute roles, scoped to the specific
+    project S3 bucket.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+
+            create_clusters_table()
+            create_projects_table()
+            create_cluster_name_registry_table()
+
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "auth")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
+            _load_module_from(_CLUSTER_OPS_DIR, "clusters")
+            _load_module_from(_CLUSTER_OPS_DIR, "tagging")
+            _load_module_from(_CLUSTER_OPS_DIR, "posix_provisioning")
+            creation_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_creation")
+
+            # Create the IAM roles that the function expects to exist
+            iam = boto3.client("iam", region_name=AWS_REGION)
+            trust_policy = json.dumps({
+                "Version": "2012-10-17",
+                "Statement": [{"Effect": "Allow", "Principal": {"Service": "ec2.amazonaws.com"}, "Action": "sts:AssumeRole"}],
+            })
+            iam.create_role(RoleName="AWSPCS-proj-mp-cluster1-login", AssumeRolePolicyDocument=trust_policy)
+            iam.create_role(RoleName="AWSPCS-proj-mp-cluster1-compute", AssumeRolePolicyDocument=trust_policy)
+
+            yield {
+                "creation_mod": creation_mod,
+                "errors_mod": errors_mod,
+                "iam": iam,
+            }
+
+    def _base_event(self):
+        return {
+            "projectId": "proj-mp",
+            "clusterName": "cluster1",
+            "s3BucketName": "hpc-proj-mp-storage-abc123",
+        }
+
+    def test_attaches_policy_to_both_roles(self, _env):
+        """Policy is attached to both login and compute roles."""
+        event = self._base_event()
+        result = _env["creation_mod"].configure_mountpoint_s3_iam(event)
+
+        # Verify policy exists on both roles
+        for suffix in ["login", "compute"]:
+            role_name = f"AWSPCS-proj-mp-cluster1-{suffix}"
+            resp = _env["iam"].get_role_policy(RoleName=role_name, PolicyName="MountpointS3Access")
+            assert resp["PolicyName"] == "MountpointS3Access"
+
+    def test_policy_name_is_mountpoint_s3_access(self, _env):
+        """The inline policy is named MountpointS3Access."""
+        event = self._base_event()
+        _env["creation_mod"].configure_mountpoint_s3_iam(event)
+
+        resp = _env["iam"].list_role_policies(RoleName="AWSPCS-proj-mp-cluster1-login")
+        assert "MountpointS3Access" in resp["PolicyNames"]
+
+    def test_policy_grants_correct_s3_actions(self, _env):
+        """Policy grants exactly the five required S3 actions."""
+        event = self._base_event()
+        _env["creation_mod"].configure_mountpoint_s3_iam(event)
+
+        resp = _env["iam"].get_role_policy(
+            RoleName="AWSPCS-proj-mp-cluster1-login",
+            PolicyName="MountpointS3Access",
+        )
+        policy_doc = resp["PolicyDocument"]
+        actions = sorted(policy_doc["Statement"][0]["Action"])
+        expected = sorted([
+            "s3:GetObject", "s3:PutObject", "s3:DeleteObject",
+            "s3:ListBucket", "s3:GetBucketLocation",
+        ])
+        assert actions == expected
+
+    def test_policy_scoped_to_specific_bucket(self, _env):
+        """Policy resources are scoped to the specific bucket ARN, no wildcards."""
+        event = self._base_event()
+        _env["creation_mod"].configure_mountpoint_s3_iam(event)
+
+        resp = _env["iam"].get_role_policy(
+            RoleName="AWSPCS-proj-mp-cluster1-compute",
+            PolicyName="MountpointS3Access",
+        )
+        policy_doc = resp["PolicyDocument"]
+        resources = sorted(policy_doc["Statement"][0]["Resource"])
+        bucket = event["s3BucketName"]
+        expected = sorted([
+            f"arn:aws:s3:::{bucket}",
+            f"arn:aws:s3:::{bucket}/*",
+        ])
+        assert resources == expected
+
+    def test_returns_event_unchanged(self, _env):
+        """Function returns the input event dict unchanged."""
+        event = self._base_event()
+        result = _env["creation_mod"].configure_mountpoint_s3_iam(event)
+        assert result is event
+
+    def test_registered_in_step_dispatch(self, _env):
+        """configure_mountpoint_s3_iam is registered in _STEP_DISPATCH."""
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "configure_mountpoint_s3_iam" in dispatch
+        assert dispatch["configure_mountpoint_s3_iam"] is _env["creation_mod"].configure_mountpoint_s3_iam
+
+    def test_raises_internal_error_on_iam_failure(self, _env):
+        """Raises InternalError when IAM put_role_policy fails."""
+        event = {
+            "projectId": "proj-mp",
+            "clusterName": "nonexistent-cluster",
+            "s3BucketName": "some-bucket",
+        }
+        with pytest.raises(_env["errors_mod"].InternalError, match="Failed to attach MountpointS3Access"):
+            _env["creation_mod"].configure_mountpoint_s3_iam(event)

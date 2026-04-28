@@ -594,6 +594,43 @@ def record_cluster_destroyed(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step — Remove Mountpoint S3 inline policy from IAM roles
+# ===================================================================
+
+def remove_mountpoint_s3_policy(event: dict[str, Any]) -> dict[str, Any]:
+    """Remove the MountpointS3Access inline policy from login and compute roles.
+
+    For clusters created with ``storageMode == "mountpoint"``, an inline
+    IAM policy named ``MountpointS3Access`` was attached to both the
+    login and compute roles during creation.  This step removes those
+    policies before the roles themselves are deleted.
+
+    ``NoSuchEntity`` errors are silently ignored — the policy may not
+    exist if the cluster was created in lustre mode.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    for role_suffix in ["login", "compute"]:
+        role_name = f"AWSPCS-{project_id}-{cluster_name}-{role_suffix}"
+        try:
+            iam_client.delete_role_policy(
+                RoleName=role_name,
+                PolicyName="MountpointS3Access",
+            )
+            logger.info(
+                "Removed MountpointS3Access policy from role '%s'", role_name
+            )
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "NoSuchEntity":
+                logger.warning(
+                    "Failed to remove S3 policy from %s: %s", role_name, exc
+                )
+
+    return event
+
+
+# ===================================================================
 # Internal PCS cleanup helpers
 # ===================================================================
 
@@ -650,6 +687,7 @@ _STEP_DISPATCH.update({
     "check_fsx_export_status": check_fsx_export_status,
     "delete_pcs_resources": delete_pcs_resources,
     "delete_fsx_filesystem": delete_fsx_filesystem,
+    "remove_mountpoint_s3_policy": remove_mountpoint_s3_policy,
     "delete_iam_resources": delete_iam_resources,
     "delete_launch_templates": delete_launch_templates,
     "record_cluster_destroyed": record_cluster_destroyed,

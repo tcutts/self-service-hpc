@@ -1622,6 +1622,35 @@ function renderClustersPage(container, params) {
         </select>
       </div>
       <div id="template-preview" class="template-preview" style="display:none"></div>
+      <fieldset class="form-fieldset">
+        <legend>Storage Mode</legend>
+        <div class="form-group" style="margin-bottom:0.5rem">
+          <label style="font-weight:normal;cursor:pointer">
+            <input type="radio" name="storage-mode" value="mountpoint" checked /> Mountpoint for Amazon S3
+          </label>
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label style="font-weight:normal;cursor:pointer">
+            <input type="radio" name="storage-mode" value="lustre" /> FSx for Lustre
+          </label>
+        </div>
+      </fieldset>
+      <div id="lustre-capacity-group" class="form-group" style="display:none">
+        <label for="new-cluster-lustre-capacity">Lustre Capacity (GiB)</label>
+        <input type="number" id="new-cluster-lustre-capacity" min="1200" step="1200" value="1200" />
+        <small class="form-hint">Must be a multiple of 1200 GiB. Minimum 1200 GiB.</small>
+      </div>
+      <fieldset class="form-fieldset">
+        <legend>Node Scaling</legend>
+        <div class="form-group">
+          <label for="new-cluster-min-nodes">Min Nodes</label>
+          <input type="number" id="new-cluster-min-nodes" min="0" value="" placeholder="From template" />
+        </div>
+        <div class="form-group" style="margin-bottom:0">
+          <label for="new-cluster-max-nodes">Max Nodes</label>
+          <input type="number" id="new-cluster-max-nodes" min="1" value="" placeholder="From template" />
+        </div>
+      </fieldset>
       <button class="btn btn-primary" id="btn-submit-cluster">Create</button>
       <button class="btn" id="btn-cancel-cluster" style="margin-left:0.5rem">Cancel</button>
     </div>
@@ -1660,17 +1689,21 @@ function renderClustersPage(container, params) {
     }
   });
 
-  // Show template details when selection changes
+  // Show template details when selection changes and pre-populate node scaling
   document.getElementById('new-cluster-template').addEventListener('change', () => {
     const templateId = document.getElementById('new-cluster-template').value;
     const preview = document.getElementById('template-preview');
     if (!templateId) {
       preview.style.display = 'none';
+      document.getElementById('new-cluster-min-nodes').value = '';
+      document.getElementById('new-cluster-max-nodes').value = '';
       return;
     }
     const tpl = cachedTemplates.find(t => t.templateId === templateId);
     if (!tpl) {
       preview.style.display = 'none';
+      document.getElementById('new-cluster-min-nodes').value = '';
+      document.getElementById('new-cluster-max-nodes').value = '';
       return;
     }
     const sw = tpl.softwareStack || {};
@@ -1684,11 +1717,27 @@ function renderClustersPage(container, params) {
       ${cudaLine}
     `;
     preview.style.display = 'block';
+
+    // Pre-populate node scaling from template defaults
+    document.getElementById('new-cluster-min-nodes').value = tpl.minNodes != null ? tpl.minNodes : 0;
+    document.getElementById('new-cluster-max-nodes').value = tpl.maxNodes != null ? tpl.maxNodes : 10;
+  });
+
+  // Toggle lustre capacity visibility based on storage mode selection
+  document.querySelectorAll('input[name="storage-mode"]').forEach(radio => {
+    radio.addEventListener('change', () => {
+      const lustreGroup = document.getElementById('lustre-capacity-group');
+      lustreGroup.style.display = radio.value === 'lustre' && radio.checked ? 'block' : 'none';
+    });
   });
 
   document.getElementById('btn-cancel-cluster').addEventListener('click', () => {
     document.getElementById('create-cluster-form').style.display = 'none';
     document.getElementById('template-preview').style.display = 'none';
+    document.getElementById('lustre-capacity-group').style.display = 'none';
+    // Reset storage mode to default
+    const mountpointRadio = document.querySelector('input[name="storage-mode"][value="mountpoint"]');
+    if (mountpointRadio) mountpointRadio.checked = true;
   });
   document.getElementById('btn-submit-cluster').addEventListener('click', async () => {
     const pid = document.getElementById('cluster-project-id').value.trim();
@@ -1696,11 +1745,25 @@ function renderClustersPage(container, params) {
     const templateId = document.getElementById('new-cluster-template').value;
     if (!clusterName) return showToast('Cluster name is required', 'error');
     if (!templateId) return showToast('Please select a template', 'error');
+
+    const storageMode = document.querySelector('input[name="storage-mode"]:checked').value;
+    const body = { clusterName, templateId, storageMode };
+
+    if (storageMode === 'lustre') {
+      body.lustreCapacityGiB = parseInt(document.getElementById('new-cluster-lustre-capacity').value, 10) || 1200;
+    }
+
+    const minNodesVal = document.getElementById('new-cluster-min-nodes').value;
+    const maxNodesVal = document.getElementById('new-cluster-max-nodes').value;
+    if (minNodesVal !== '') body.minNodes = parseInt(minNodesVal, 10);
+    if (maxNodesVal !== '') body.maxNodes = parseInt(maxNodesVal, 10);
+
     try {
-      await apiCall('POST', `/projects/${encodeURIComponent(pid)}/clusters`, { clusterName, templateId });
+      await apiCall('POST', `/projects/${encodeURIComponent(pid)}/clusters`, body);
       showToast(`Cluster '${clusterName}' creation started`);
       document.getElementById('create-cluster-form').style.display = 'none';
       document.getElementById('template-preview').style.display = 'none';
+      document.getElementById('lustre-capacity-group').style.display = 'none';
       loadClusters(pid);
     } catch (e) { showToast(e.message, 'error'); }
   });

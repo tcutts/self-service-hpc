@@ -259,6 +259,45 @@ describe('ClusterOperations', () => {
     });
   });
 
+  it('creation state machine includes StorageModeChoice state', () => {
+    const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+      Properties: { StateMachineName: 'hpc-cluster-creation' },
+    });
+    const logicalIds = Object.keys(stateMachines);
+    expect(logicalIds).toHaveLength(1);
+    const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
+    // DefinitionString is an Fn::Join — flatten to find the state name
+    const definitionStr = JSON.stringify(definition);
+    expect(definitionStr).toContain('StorageModeChoice');
+  });
+
+  it('destruction state machine includes RemoveMountpointS3Policy step', () => {
+    const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+      Properties: { StateMachineName: 'hpc-cluster-destruction' },
+    });
+    const logicalIds = Object.keys(stateMachines);
+    expect(logicalIds).toHaveLength(1);
+    const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
+    const definitionStr = JSON.stringify(definition);
+    expect(definitionStr).toContain('RemoveMountpointS3Policy');
+  });
+
+  it('grants IAM PutRolePolicy and DeleteRolePolicy permissions for Mountpoint policy management', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              'iam:PutRolePolicy',
+              'iam:DeleteRolePolicy',
+            ]),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
   it('creates the expected number of API Gateway resources for cluster routes', () => {
     // From ProjectManagement: /projects, /projects/{projectId}, /projects/{projectId}/members,
     //   /projects/{projectId}/members/{userId}, /projects/{projectId}/budget,

@@ -625,7 +625,7 @@ def create_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
         response = fsx_client.create_file_system(
             FileSystemType="LUSTRE",
             FileSystemTypeVersion="2.15",
-            StorageCapacity=1200,  # minimum for Lustre (1.2 TiB)
+            StorageCapacity=event.get("lustreCapacityGiB", 1200),
             StorageType="SSD",
             SubnetIds=[subnet_id],
             SecurityGroupIds=[fsx_sg],
@@ -1202,12 +1202,17 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
     now = datetime.now(timezone.utc).isoformat()
 
+    storage_mode = event.get("storageMode", "mountpoint")
+
     cluster_record = {
         "PK": f"PROJECT#{project_id}",
         "SK": f"CLUSTER#{cluster_name}",
         "clusterName": cluster_name,
         "projectId": project_id,
         "templateId": event.get("templateId", ""),
+        "storageMode": storage_mode,
+        "minNodes": event.get("minNodes", 0),
+        "maxNodes": event.get("maxNodes", 10),
         "pcsClusterId": event.get("pcsClusterId", ""),
         "pcsClusterArn": event.get("pcsClusterArn", ""),
         "loginNodeGroupId": event.get("loginNodeGroupId", ""),
@@ -1221,6 +1226,9 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
         "createdBy": event.get("createdBy", ""),
         "createdAt": now,
     }
+
+    if storage_mode == "lustre":
+        cluster_record["lustreCapacityGiB"] = event.get("lustreCapacityGiB", 1200)
 
     table = dynamodb.Table(CLUSTERS_TABLE_NAME)
     try:
@@ -1598,6 +1606,66 @@ def _record_failed_cluster(
         )
 
 # ===================================================================
+# Mountpoint for S3 — attach S3 access policy to login/compute roles
+# ===================================================================
+
+def configure_mountpoint_s3_iam(event: dict[str, Any]) -> dict[str, Any]:
+    """Attach an inline IAM policy granting S3 access for Mountpoint for S3.
+
+    Adds a policy named ``MountpointS3Access`` to both the login and
+    compute IAM roles, scoped to the specific project S3 bucket ARN
+    and its objects.
+
+    Returns the event dict unchanged.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+    s3_bucket_name: str = event["s3BucketName"]
+
+    login_role_name = f"AWSPCS-{project_id}-{cluster_name}-login"
+    compute_role_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
+
+    policy_document = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Effect": "Allow",
+                "Action": [
+                    "s3:GetObject",
+                    "s3:PutObject",
+                    "s3:DeleteObject",
+                    "s3:ListBucket",
+                    "s3:GetBucketLocation",
+                ],
+                "Resource": [
+                    f"arn:aws:s3:::{s3_bucket_name}",
+                    f"arn:aws:s3:::{s3_bucket_name}/*",
+                ],
+            }
+        ],
+    }
+
+    policy_json = json.dumps(policy_document)
+
+    for role_name in [login_role_name, compute_role_name]:
+        try:
+            iam_client.put_role_policy(
+                RoleName=role_name,
+                PolicyName="MountpointS3Access",
+                PolicyDocument=policy_json,
+            )
+            logger.info(
+                "Attached MountpointS3Access policy to role '%s'", role_name
+            )
+        except ClientError as exc:
+            raise InternalError(
+                f"Failed to attach MountpointS3Access policy to role '{role_name}': {exc}"
+            )
+
+    return event
+
+
+# ===================================================================
 # Template resolution — resolve template fields before parallel state
 # ===================================================================
 
@@ -1638,25 +1706,33 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
 
         logger.info("Template '%s' resolved successfully", template_id)
 
-        return {
+        result = {
             **event,
             "loginInstanceType": item.get("loginInstanceType", "c7g.medium"),
             "instanceTypes": item.get("instanceTypes", ["c7g.medium"]),
-            "maxNodes": item.get("maxNodes", 10),
-            "minNodes": item.get("minNodes", 0),
             "purchaseOption": item.get("purchaseOption", "ONDEMAND"),
         }
+        # Only set minNodes/maxNodes from template when not already provided
+        if "minNodes" not in event or event["minNodes"] is None:
+            result["minNodes"] = item.get("minNodes", 0)
+        if "maxNodes" not in event or event["maxNodes"] is None:
+            result["maxNodes"] = item.get("maxNodes", 10)
+        # storageMode and lustreCapacityGiB pass through unchanged
+        return result
 
     # No template — apply sensible defaults
     logger.info("No templateId provided — using default template values")
-    return {
+    result = {
         **event,
         "loginInstanceType": "c7g.medium",
         "instanceTypes": ["c7g.medium"],
-        "maxNodes": 10,
-        "minNodes": 0,
         "purchaseOption": "ONDEMAND",
     }
+    if "minNodes" not in event or event["minNodes"] is None:
+        result["minNodes"] = 0
+    if "maxNodes" not in event or event["maxNodes"] is None:
+        result["maxNodes"] = 10
+    return result
 
 
 # ===================================================================
@@ -1799,4 +1875,5 @@ _STEP_DISPATCH.update({
     "tag_resources": tag_resources,
     "record_cluster": record_cluster,
     "handle_creation_failure": handle_creation_failure,
+    "configure_mountpoint_s3_iam": configure_mountpoint_s3_iam,
 })

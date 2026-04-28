@@ -201,6 +201,59 @@ def generate_cloudwatch_agent_commands(
     return commands
 
 
+def generate_mountpoint_s3_commands(s3_bucket_name: str, mount_path: str = "/data") -> list[str]:
+    """Generate bash commands to install and mount S3 via Mountpoint.
+
+    Parameters
+    ----------
+    s3_bucket_name : str
+        The S3 bucket name to mount.
+    mount_path : str
+        The local mount path. Defaults to ``/data``.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    return [
+        "# --- Mount project S3 bucket via Mountpoint for Amazon S3 ---",
+        "yum install -y mountpoint-s3 || apt-get install -y mountpoint-s3",
+        f"mkdir -p {mount_path}",
+        f"mount-s3 {s3_bucket_name} {mount_path} --allow-delete --allow-overwrite",
+        f"echo 'mount-s3 {s3_bucket_name} {mount_path} --allow-delete --allow-overwrite' >> /etc/rc.local",
+        "chmod +x /etc/rc.local",
+    ]
+
+
+def generate_fsx_lustre_mount_commands(
+    fsx_dns_name: str, fsx_mount_name: str, mount_path: str = "/data"
+) -> list[str]:
+    """Generate bash commands to mount FSx for Lustre.
+
+    Parameters
+    ----------
+    fsx_dns_name : str
+        The DNS name of the FSx for Lustre filesystem.
+    fsx_mount_name : str
+        The mount name of the FSx for Lustre filesystem.
+    mount_path : str
+        The local mount path. Defaults to ``/data``.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    return [
+        "# --- Mount FSx for Lustre filesystem ---",
+        "amazon-linux-extras install -y lustre || yum install -y lustre-client",
+        f"mkdir -p {mount_path}",
+        f"mount -t lustre {fsx_dns_name}@tcp:/{fsx_mount_name} {mount_path}",
+        f"echo '{fsx_dns_name}@tcp:/{fsx_mount_name} {mount_path} lustre defaults,noatime,flock,_netdev 0 0' >> /etc/fstab",
+    ]
+
+
 def generate_user_data_script(
     project_id: str,
     users_table_name: str,

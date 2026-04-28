@@ -8,12 +8,12 @@ Clusters are ephemeral HPC environments provisioned using AWS Parallel Computing
 
 - A **login node** (head node) for SSH/DCV access and job submission
 - **Compute nodes** that execute Slurm jobs, with elastic scaling
-- An **FSx for Lustre** filesystem linked to the project's S3 storage bucket
+- **Project data access** at `/data` — either via **FSx for Lustre** (high-performance cache linked to the project S3 bucket) or **Mountpoint for Amazon S3** (direct S3 mount, lower cost, faster provisioning)
 - **EFS home directories** mounted for each authorised user
 - **Slurm accounting** enabled for job tracking
 - **Dedicated IAM roles and instance profiles** for login and compute nodes (`AWSPCS-{projectId}-{clusterName}-login` and `AWSPCS-{projectId}-{clusterName}-compute`)
 
-Clusters are created from predefined **cluster templates** that specify instance types, node counts, and software configuration.
+Clusters are created from predefined **cluster templates** that specify instance types, node counts, and software configuration. When creating a cluster, you can choose the storage mode and optionally override the template's default compute node scaling limits.
 
 ## Listing Available Templates
 
@@ -59,7 +59,11 @@ Before creating a cluster, review the available templates:
 ```json
 {
   "clusterName": "genomics-run-42",
-  "templateId": "cpu-general"
+  "templateId": "cpu-general",
+  "storageMode": "mountpoint",
+  "lustreCapacityGiB": 2400,
+  "minNodes": 2,
+  "maxNodes": 20
 }
 ```
 
@@ -69,6 +73,10 @@ Before creating a cluster, review the available templates:
 |-------|------|----------|-------------|
 | `clusterName` | string | Yes | Unique name for the cluster (alphanumeric, hyphens, underscores) |
 | `templateId` | string | Yes | ID of the cluster template to use |
+| `storageMode` | string | No | Storage mode for project data access. Valid values: `lustre` (FSx for Lustre) or `mountpoint` (Mountpoint for Amazon S3). Defaults to `mountpoint` when omitted. |
+| `lustreCapacityGiB` | integer | No | FSx for Lustre storage capacity in GiB. Must be at least 1200 and a multiple of 1200 (i.e. 1200, 2400, 3600, …). Defaults to 1200. Only used when `storageMode` is `lustre`; ignored otherwise. |
+| `minNodes` | integer | No | Minimum number of compute nodes. Must be >= 0 and <= `maxNodes`. When omitted, the template's default value is used. |
+| `maxNodes` | integer | No | Maximum number of compute nodes. Must be >= 1 and >= `minNodes`. When omitted, the template's default value is used. |
 
 ### Cluster Naming Rules
 
@@ -84,10 +92,11 @@ Before creating a cluster, review the available templates:
    - Register the cluster name in the global registry
    - Create dedicated IAM roles and instance profiles for the cluster (`AWSPCS-{projectId}-{clusterName}-login` and `AWSPCS-{projectId}-{clusterName}-compute`)
    - Wait for instance profiles to propagate in IAM
-   - Create an FSx for Lustre filesystem with a data repository association to the project S3 bucket
+   - **If `storageMode` is `lustre`:** Create an FSx for Lustre filesystem (with the specified `lustreCapacityGiB` capacity) and a data repository association to the project S3 bucket. The FSx filesystem is mounted at `/data` on login and compute nodes.
+   - **If `storageMode` is `mountpoint`:** Skip FSx provisioning entirely. Instead, attach an inline IAM policy granting S3 access to the login and compute roles, and mount the project S3 bucket directly at `/data` on login and compute nodes using Mountpoint for Amazon S3. This is faster and lower cost than FSx for Lustre.
    - Create the PCS cluster with Slurm accounting enabled
    - Create the login node group (public subnet, static scaling) using the cluster-specific login instance profile
-   - Create the compute node group (private subnet, elastic scaling) using the cluster-specific compute instance profile
+   - Create the compute node group (private subnet, elastic scaling) using the cluster-specific compute instance profile, with the effective `minNodes` and `maxNodes` values (from overrides or template defaults)
    - Create the PCS queue
    - Provision POSIX user accounts on all nodes
    - Tag all resources with `Project` and `ClusterName` tags
@@ -110,6 +119,12 @@ Before creating a cluster, review the available templates:
 |----------|-----------|-------------|
 | Invalid cluster name format | `VALIDATION_ERROR` | 400 |
 | Name used by another project | `VALIDATION_ERROR` | 400 |
+| Invalid `storageMode` value | `VALIDATION_ERROR` | 400 |
+| `lustreCapacityGiB` less than 1200 | `VALIDATION_ERROR` | 400 |
+| `lustreCapacityGiB` not a multiple of 1200 | `VALIDATION_ERROR` | 400 |
+| `minNodes` less than 0 | `VALIDATION_ERROR` | 400 |
+| `maxNodes` less than 1 | `VALIDATION_ERROR` | 400 |
+| `minNodes` exceeds `maxNodes` | `VALIDATION_ERROR` | 400 |
 | Budget breached | `BUDGET_EXCEEDED` | 403 |
 | Caller is not a project member | `AUTHORISATION_ERROR` | 403 |
 
@@ -190,6 +205,7 @@ For **ACTIVE** clusters, the response includes SSH and DCV connection details:
   "clusterName": "genomics-run-42",
   "projectId": "genomics-team",
   "templateId": "cpu-general",
+  "storageMode": "mountpoint",
   "status": "ACTIVE",
   "createdBy": "jsmith",
   "createdAt": "2025-01-15T14:00:00Z",
@@ -212,9 +228,9 @@ For **ACTIVE** clusters, the response includes SSH and DCV connection details:
 
 ### What Happens
 
-1. An FSx data repository export task syncs data back to the project S3 bucket.
-2. PCS compute node groups, queue, and cluster are deleted.
-3. The FSx for Lustre filesystem is deleted.
+1. **If `storageMode` is `lustre`:** An FSx data repository export task syncs data back to the project S3 bucket, then the FSx for Lustre filesystem is deleted.
+2. **If `storageMode` is `mountpoint`:** The FSx export and deletion steps are skipped. The Mountpoint S3 inline IAM policy is removed from the login and compute roles.
+3. PCS compute node groups, queue, and cluster are deleted.
 4. The cluster-specific IAM resources are cleaned up — roles are removed from instance profiles, instance profiles are deleted, managed policies are detached, and IAM roles are deleted for both the login and compute profiles.
 5. The cluster record is updated to `DESTROYED` in DynamoDB.
 
@@ -253,7 +269,11 @@ To override the template, provide a `templateId`:
 
 ```json
 {
-  "templateId": "gpu-basic"
+  "templateId": "gpu-basic",
+  "storageMode": "lustre",
+  "lustreCapacityGiB": 2400,
+  "minNodes": 1,
+  "maxNodes": 8
 }
 ```
 
@@ -262,15 +282,20 @@ To override the template, provide a `templateId`:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `templateId` | string | No | ID of the cluster template to use. If omitted or empty, the template from the destroyed cluster record is used. |
+| `storageMode` | string | No | Storage mode for project data access (`lustre` or `mountpoint`). If omitted, the `storageMode` from the destroyed cluster record is used. |
+| `lustreCapacityGiB` | integer | No | FSx for Lustre storage capacity in GiB. Same validation rules as cluster creation. Only used when `storageMode` is `lustre`. |
+| `minNodes` | integer | No | Minimum number of compute nodes. If omitted, the resolved template's default value is used. |
+| `maxNodes` | integer | No | Maximum number of compute nodes. If omitted, the resolved template's default value is used. |
 
 ### What Happens
 
 1. The caller's authorisation is verified — only project members can recreate clusters.
 2. The existing cluster record is retrieved and its status is checked — only `DESTROYED` clusters can be recreated.
 3. The template is resolved: the request body `templateId` is used if provided, otherwise the stored `templateId` from the destroyed cluster record is used.
-4. The project's budget status is checked — recreation is blocked if the budget is breached.
-5. The same Step Functions creation workflow used for new clusters is started, provisioning fresh AWS resources (FSx filesystem, PCS cluster, node groups, queue).
-6. The destroyed cluster record is overwritten with a new `CREATING` record, and progress is tracked in DynamoDB.
+4. The storage mode is resolved: the request body `storageMode` is used if provided, otherwise the `storageMode` from the destroyed cluster record is used. This allows you to change the storage mode on recreation.
+5. The project's budget status is checked — recreation is blocked if the budget is breached.
+6. The same Step Functions creation workflow used for new clusters is started, provisioning fresh AWS resources based on the resolved storage mode and scaling configuration.
+7. The destroyed cluster record is overwritten with a new `CREATING` record, and progress is tracked in DynamoDB.
 
 Home directories (EFS) and project storage (S3) are **preserved** across destruction and recreation — they do not need to be re-created.
 
@@ -349,8 +374,10 @@ If cluster creation fails, any partially created IAM resources are automatically
 
 - **Destroy clusters when not in use** — clusters incur costs while running, even if no jobs are active.
 - **Use descriptive cluster names** — names like `genomics-run-42` or `training-gpu-jan` help identify purpose.
-- **Monitor creation progress** — check the cluster status if creation takes longer than expected (typically 10–15 minutes).
-- **Export data before destruction** — the platform automatically exports FSx data to S3, but verify important results are saved.
+- **Choose the right storage mode** — use `mountpoint` (the default) for general workloads that need S3 access with fast provisioning and lower cost. Use `lustre` when your workload requires high-throughput, low-latency filesystem access (e.g. large-scale parallel I/O).
+- **Size Lustre capacity appropriately** — Lustre capacity is provisioned in 1200 GiB (1.2 TiB) increments. Start with the minimum (1200 GiB) and increase only if your working dataset requires it.
+- **Monitor creation progress** — check the cluster status if creation takes longer than expected (typically 5–10 minutes for `mountpoint`, 10–15 minutes for `lustre`).
+- **Export data before destruction** — for `lustre` clusters, the platform automatically exports FSx data to S3, but verify important results are saved. For `mountpoint` clusters, data is already in S3.
 - **Recreate instead of creating new** — if you need the same cluster environment again, use the recreate action to reuse the cluster name and template configuration.
 
 ## Table Sorting and Filtering

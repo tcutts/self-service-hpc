@@ -512,3 +512,99 @@ class TestFetchUserPosixIdentities:
             USERS_TABLE_NAME, [],
         )
         assert users == []
+
+
+# ---------------------------------------------------------------------------
+# generate_mountpoint_s3_commands
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestGenerateMountpointS3Commands:
+    """Validates: Requirements 3.4"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            mod = _load_posix_module()
+            yield {"mod": mod}
+
+    def test_contains_mount_s3_command_with_bucket_name(self, _setup):
+        cmds = _setup["mod"].generate_mountpoint_s3_commands("my-project-bucket")
+        mount_cmds = [c for c in cmds if "mount-s3" in c and "my-project-bucket" in c]
+        assert len(mount_cmds) >= 1
+
+    def test_default_mount_path_is_data(self, _setup):
+        cmds = _setup["mod"].generate_mountpoint_s3_commands("my-bucket")
+        joined = "\n".join(cmds)
+        assert "mkdir -p /data" in joined
+        assert "mount-s3 my-bucket /data" in joined
+
+    def test_custom_mount_path(self, _setup):
+        cmds = _setup["mod"].generate_mountpoint_s3_commands("my-bucket", mount_path="/mnt/s3")
+        joined = "\n".join(cmds)
+        assert "mkdir -p /mnt/s3" in joined
+        assert "mount-s3 my-bucket /mnt/s3" in joined
+
+    def test_installs_mountpoint_package(self, _setup):
+        cmds = _setup["mod"].generate_mountpoint_s3_commands("my-bucket")
+        install_cmds = [c for c in cmds if "install" in c and "mountpoint-s3" in c]
+        assert len(install_cmds) == 1
+
+    def test_persists_mount_in_rc_local(self, _setup):
+        cmds = _setup["mod"].generate_mountpoint_s3_commands("my-bucket")
+        rc_cmds = [c for c in cmds if "/etc/rc.local" in c and "mount-s3" in c]
+        assert len(rc_cmds) == 1
+
+
+# ---------------------------------------------------------------------------
+# generate_fsx_lustre_mount_commands
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestGenerateFsxLustreMountCommands:
+    """Validates: Requirements 3.5"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            mod = _load_posix_module()
+            yield {"mod": mod}
+
+    def test_contains_lustre_mount_command(self, _setup):
+        cmds = _setup["mod"].generate_fsx_lustre_mount_commands(
+            "fs-abc123.fsx.us-east-1.amazonaws.com", "abcdef",
+        )
+        mount_cmds = [c for c in cmds if "mount -t lustre" in c]
+        assert len(mount_cmds) == 1
+        assert "fs-abc123.fsx.us-east-1.amazonaws.com@tcp:/abcdef" in mount_cmds[0]
+
+    def test_default_mount_path_is_data(self, _setup):
+        cmds = _setup["mod"].generate_fsx_lustre_mount_commands("fs-dns", "mntname")
+        joined = "\n".join(cmds)
+        assert "mkdir -p /data" in joined
+        assert "mount -t lustre fs-dns@tcp:/mntname /data" in joined
+
+    def test_custom_mount_path(self, _setup):
+        cmds = _setup["mod"].generate_fsx_lustre_mount_commands(
+            "fs-dns", "mntname", mount_path="/mnt/lustre",
+        )
+        joined = "\n".join(cmds)
+        assert "mkdir -p /mnt/lustre" in joined
+        assert "mount -t lustre fs-dns@tcp:/mntname /mnt/lustre" in joined
+
+    def test_installs_lustre_client(self, _setup):
+        cmds = _setup["mod"].generate_fsx_lustre_mount_commands("fs-dns", "mntname")
+        install_cmds = [c for c in cmds if "lustre" in c and "install" in c]
+        assert len(install_cmds) == 1
+
+    def test_adds_fstab_entry(self, _setup):
+        cmds = _setup["mod"].generate_fsx_lustre_mount_commands("fs-dns", "mntname")
+        fstab_cmds = [c for c in cmds if "/etc/fstab" in c]
+        assert len(fstab_cmds) == 1
+        assert "fs-dns@tcp:/mntname" in fstab_cmds[0]
