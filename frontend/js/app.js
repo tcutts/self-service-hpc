@@ -144,14 +144,17 @@ const templatesTableConfig = {
     {
       key: 'instanceTypes', label: 'Instance Types', type: 'text', sortable: true,
       value: (row) => (row.instanceTypes || []).join(', '),
+      render: (row) => esc((row.instanceTypes || []).join(', ')),
     },
     {
       key: 'loginInstanceType', label: 'Login Instance', type: 'text', sortable: true,
       value: (row) => row.loginInstanceType || '—',
+      render: (row) => esc(row.loginInstanceType || '—'),
     },
     {
       key: 'nodes', label: 'Nodes (min–max)', type: 'text', sortable: true,
       value: (row) => (row.minNodes || 0) + ' – ' + (row.maxNodes || '∞'),
+      render: (row) => esc((row.minNodes || 0) + ' – ' + (row.maxNodes || '∞')),
     },
     {
       key: '_actions', label: 'Actions', type: 'custom', sortable: false,
