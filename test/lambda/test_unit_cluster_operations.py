@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, patch
 
 import boto3
 import pytest
+from botocore.exceptions import ClientError
 from moto import mock_aws
 
 from conftest import (
@@ -103,8 +104,6 @@ def _seed_project(projects_table, project_id, budget_breached=False, **extra):
             "fsx": "sg-fsx",
         },
         "instanceProfileArn": f"arn:aws:iam::123456789012:instance-profile/AWSPCS-{project_id}-node",
-        "loginLaunchTemplateId": f"lt-login-{project_id}",
-        "computeLaunchTemplateId": f"lt-compute-{project_id}",
     }
     item.update(extra)
     projects_table.put_item(Item=item)
@@ -408,10 +407,8 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
         assert sfn_input["securityGroupIds"]["headNode"] == "sg-head"
         assert "instanceProfileArn" not in sfn_input
-        assert "loginLaunchTemplateId" in sfn_input
-        assert "computeLaunchTemplateId" in sfn_input
-        assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-infra"
-        assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-infra"
+        assert "loginLaunchTemplateId" not in sfn_input
+        assert "computeLaunchTemplateId" not in sfn_input
 
     def test_recreate_cluster_payload_includes_all_infra_fields(self, _env):
         """Recreation must also pass infrastructure details to the SFN."""
@@ -442,8 +439,8 @@ class TestClusterCreationInfraPayload:
         assert sfn_input["privateSubnetIds"] == ["subnet-priv-1", "subnet-priv-2"]
         assert sfn_input["securityGroupIds"]["fsx"] == "sg-fsx"
         assert "instanceProfileArn" not in sfn_input
-        assert sfn_input["loginLaunchTemplateId"] == "lt-login-proj-recreate-infra"
-        assert sfn_input["computeLaunchTemplateId"] == "lt-compute-proj-recreate-infra"
+        assert "loginLaunchTemplateId" not in sfn_input
+        assert "computeLaunchTemplateId" not in sfn_input
 
     def test_create_cluster_fails_when_infra_missing(self, _env):
         """Creation must fail gracefully when project has no infrastructure."""
@@ -468,6 +465,37 @@ class TestClusterCreationInfraPayload:
         body = json.loads(response["body"])
         assert body["error"]["code"] == "VALIDATION_ERROR"
         assert "infrastructure" in body["error"]["message"].lower()
+
+    def test_lookup_project_infrastructure_excludes_launch_template_ids(self, _env):
+        """Validates: Requirements 3.1, 3.2 — _lookup_project_infrastructure
+        does not return loginLaunchTemplateId or computeLaunchTemplateId,
+        even when the project record contains them (legacy data)."""
+        _env["projects_table"].put_item(Item={
+            "PK": "PROJECT#proj-legacy-lt",
+            "SK": "METADATA",
+            "projectId": "proj-legacy-lt",
+            "projectName": "Legacy LT Project",
+            "budgetBreached": False,
+            "status": "ACTIVE",
+            "createdAt": "2024-01-01T00:00:00+00:00",
+            "s3BucketName": "hpc-proj-legacy-lt-storage",
+            "vpcId": "vpc-legacy",
+            "efsFileSystemId": "fs-legacy",
+            "publicSubnetIds": ["subnet-pub-1"],
+            "privateSubnetIds": ["subnet-priv-1"],
+            "securityGroupIds": {"headNode": "sg-head", "computeNode": "sg-compute", "efs": "sg-efs", "fsx": "sg-fsx"},
+            "loginLaunchTemplateId": "lt-legacy-login",
+            "computeLaunchTemplateId": "lt-legacy-compute",
+        })
+
+        infra = _env["handler_mod"]._lookup_project_infrastructure("proj-legacy-lt")
+
+        assert "loginLaunchTemplateId" not in infra
+        assert "computeLaunchTemplateId" not in infra
+        # Verify other fields are still present
+        assert infra["vpcId"] == "vpc-legacy"
+        assert infra["s3BucketName"] == "hpc-proj-legacy-lt-storage"
+        assert infra["securityGroupIds"]["headNode"] == "sg-head"
 
 
 # ---------------------------------------------------------------------------
@@ -2108,3 +2136,556 @@ class TestClusterRecreation:
         assert response["statusCode"] == 202
         body = json.loads(response["body"])
         assert body["projectId"] == "proj-recreate"
+
+
+# ---------------------------------------------------------------------------
+# Launch template creation
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestCreateLaunchTemplates:
+    """Validates: Requirements 4.1, 4.2, 4.6"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+
+            create_clusters_table()
+            create_projects_table()
+            create_cluster_name_registry_table()
+
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "auth")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
+            _load_module_from(_CLUSTER_OPS_DIR, "clusters")
+            _load_module_from(_CLUSTER_OPS_DIR, "tagging")
+            _load_module_from(_CLUSTER_OPS_DIR, "posix_provisioning")
+            creation_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_creation")
+
+            yield {
+                "creation_mod": creation_mod,
+                "errors_mod": errors_mod,
+            }
+
+    def test_successful_creation_returns_both_template_ids(self, _env):
+        """create_launch_templates adds loginLaunchTemplateId and
+        computeLaunchTemplateId to the returned event."""
+        creation_mod = _env["creation_mod"]
+
+        mock_responses = [
+            {"LaunchTemplate": {"LaunchTemplateId": "lt-login-001"}},
+            {"LaunchTemplate": {"LaunchTemplateId": "lt-compute-002"}},
+        ]
+
+        with patch.object(
+            creation_mod, "ec2_client"
+        ) as mock_ec2:
+            mock_ec2.create_launch_template = MagicMock(side_effect=mock_responses)
+
+            event = {
+                "projectId": "proj-lt",
+                "clusterName": "cl-lt",
+                "securityGroupIds": {
+                    "headNode": "sg-head-1",
+                    "computeNode": "sg-compute-1",
+                },
+            }
+            result = creation_mod.create_launch_templates(event)
+
+        assert result["loginLaunchTemplateId"] == "lt-login-001"
+        assert result["computeLaunchTemplateId"] == "lt-compute-002"
+        assert mock_ec2.create_launch_template.call_count == 2
+
+    def test_client_error_raises_internal_error(self, _env):
+        """ClientError from EC2 is wrapped in InternalError."""
+        creation_mod = _env["creation_mod"]
+        errors_mod = _env["errors_mod"]
+
+        ec2_error = ClientError(
+            {"Error": {"Code": "InvalidParameterValue", "Message": "bad param"}},
+            "CreateLaunchTemplate",
+        )
+
+        with patch.object(
+            creation_mod, "ec2_client"
+        ) as mock_ec2:
+            mock_ec2.create_launch_template = MagicMock(side_effect=ec2_error)
+
+            event = {
+                "projectId": "proj-err",
+                "clusterName": "cl-err",
+                "securityGroupIds": {
+                    "headNode": "sg-head-1",
+                    "computeNode": "sg-compute-1",
+                },
+            }
+            with pytest.raises(errors_mod.InternalError, match="Failed to create launch template"):
+                creation_mod.create_launch_templates(event)
+
+    def test_step_registered_in_dispatch(self, _env):
+        """create_launch_templates is registered in _STEP_DISPATCH."""
+        creation_mod = _env["creation_mod"]
+        assert "create_launch_templates" in creation_mod._STEP_DISPATCH
+        assert creation_mod._STEP_DISPATCH["create_launch_templates"] is creation_mod.create_launch_templates
+
+
+# ---------------------------------------------------------------------------
+# Launch template deletion (cluster destruction)
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestDeleteLaunchTemplates:
+    """Validates: Requirements 5.1, 5.2, 5.3"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+
+            create_clusters_table()
+
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            destruction_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_destruction")
+
+            yield {
+                "destruction_mod": destruction_mod,
+                "errors_mod": errors_mod,
+            }
+
+    def test_successful_deletion_of_both_templates(self, _env):
+        """delete_launch_templates deletes both login and compute templates
+        and returns launchTemplateCleanupResults."""
+        destruction_mod = _env["destruction_mod"]
+
+        describe_response = {
+            "LaunchTemplates": [
+                {"LaunchTemplateId": "lt-login-001", "LaunchTemplateName": "hpc-proj-d-cl-d-login"},
+            ],
+        }
+
+        with patch.object(destruction_mod, "ec2_client") as mock_ec2:
+            mock_ec2.describe_launch_templates = MagicMock(return_value=describe_response)
+            mock_ec2.delete_launch_template = MagicMock(return_value={})
+
+            event = {"projectId": "proj-d", "clusterName": "cl-d"}
+            result = destruction_mod.delete_launch_templates(event)
+
+        assert "launchTemplateCleanupResults" in result
+        assert len(result["launchTemplateCleanupResults"]) == 2
+        assert all("deleted" in r for r in result["launchTemplateCleanupResults"])
+        assert mock_ec2.describe_launch_templates.call_count == 2
+        assert mock_ec2.delete_launch_template.call_count == 2
+
+    def test_graceful_handling_when_templates_not_found(self, _env):
+        """delete_launch_templates logs warning and continues when templates
+        do not exist (no error raised)."""
+        destruction_mod = _env["destruction_mod"]
+
+        not_found_error = ClientError(
+            {"Error": {"Code": "InvalidLaunchTemplateName.NotFoundException",
+                       "Message": "not found"}},
+            "DescribeLaunchTemplates",
+        )
+
+        with patch.object(destruction_mod, "ec2_client") as mock_ec2:
+            mock_ec2.describe_launch_templates = MagicMock(side_effect=not_found_error)
+
+            event = {"projectId": "proj-gone", "clusterName": "cl-gone"}
+            result = destruction_mod.delete_launch_templates(event)
+
+        assert "launchTemplateCleanupResults" in result
+        assert len(result["launchTemplateCleanupResults"]) == 2
+        assert all("not_found" in r for r in result["launchTemplateCleanupResults"])
+        # No exception raised — graceful handling
+        mock_ec2.delete_launch_template.assert_not_called()
+
+    def test_step_registered_in_dispatch(self, _env):
+        """delete_launch_templates is registered in _STEP_DISPATCH."""
+        destruction_mod = _env["destruction_mod"]
+        assert "delete_launch_templates" in destruction_mod._STEP_DISPATCH
+        assert destruction_mod._STEP_DISPATCH["delete_launch_templates"] is destruction_mod.delete_launch_templates
+
+# ---------------------------------------------------------------------------
+# Rollback launch template cleanup
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestRollbackLaunchTemplateCleanup:
+    """Validates: Requirements 6.1, 6.2, 6.3"""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+            os.environ["USERS_TABLE_NAME"] = "PlatformUsers"
+
+            clusters_table = create_clusters_table()
+            create_projects_table()
+            create_cluster_name_registry_table()
+
+            # Create PlatformUsers table for _lookup_user_email
+            from conftest import create_users_table
+            create_users_table()
+
+            # Create SNS topic for lifecycle notifications
+            sns_client = boto3.client("sns", region_name=AWS_REGION)
+            topic_response = sns_client.create_topic(Name="hpc-cluster-lifecycle-notifications")
+            os.environ["CLUSTER_LIFECYCLE_SNS_TOPIC_ARN"] = topic_response["TopicArn"]
+
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "auth")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
+            _load_module_from(_CLUSTER_OPS_DIR, "clusters")
+            _load_module_from(_CLUSTER_OPS_DIR, "tagging")
+            _load_module_from(_CLUSTER_OPS_DIR, "posix_provisioning")
+            creation_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_creation")
+
+            yield {
+                "clusters_table": clusters_table,
+                "creation_mod": creation_mod,
+                "errors_mod": errors_mod,
+            }
+
+    def test_rollback_deletes_launch_templates_when_they_exist(self, _env):
+        """handle_creation_failure deletes both login and compute launch
+        templates when they exist."""
+        creation_mod = _env["creation_mod"]
+
+        describe_response = {
+            "LaunchTemplates": [
+                {"LaunchTemplateId": "lt-rollback-001",
+                 "LaunchTemplateName": "hpc-proj-rb-cl-rb-login"},
+            ],
+        }
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "iam_client") as mock_iam, \
+             patch.object(creation_mod, "pcs_client") as mock_pcs, \
+             patch.object(creation_mod, "fsx_client") as mock_fsx, \
+             patch.object(creation_mod, "dynamodb") as mock_ddb, \
+             patch.object(creation_mod, "sns_client") as mock_sns, \
+             patch.object(creation_mod, "_lookup_user_email", return_value=""):
+
+            mock_ec2.describe_launch_templates = MagicMock(return_value=describe_response)
+            mock_ec2.delete_launch_template = MagicMock(return_value={})
+            mock_ddb.Table.return_value.put_item = MagicMock()
+
+            event = {
+                "projectId": "proj-rb",
+                "clusterName": "cl-rb",
+                "pcsClusterId": "",
+                "fsxFilesystemId": "",
+                "queueId": "",
+                "loginNodeGroupId": "",
+                "computeNodeGroupId": "",
+                "errorMessage": "Creation failed",
+            }
+            result = creation_mod.handle_creation_failure(event)
+
+        assert result["status"] == "FAILED"
+        # Verify EC2 describe was called for both login and compute templates
+        assert mock_ec2.describe_launch_templates.call_count == 2
+        describe_calls = mock_ec2.describe_launch_templates.call_args_list
+        template_names = [
+            call.kwargs.get("LaunchTemplateNames", call[1].get("LaunchTemplateNames", [None]))[0]
+            if call.kwargs else call[1]["LaunchTemplateNames"][0]
+            for call in describe_calls
+        ]
+        assert "hpc-proj-rb-cl-rb-login" in template_names
+        assert "hpc-proj-rb-cl-rb-compute" in template_names
+        # Verify delete was called for both
+        assert mock_ec2.delete_launch_template.call_count == 2
+
+    def test_rollback_handles_missing_launch_templates_gracefully(self, _env):
+        """handle_creation_failure does not raise when launch templates
+        do not exist (not-found error is caught)."""
+        creation_mod = _env["creation_mod"]
+
+        not_found_error = ClientError(
+            {"Error": {"Code": "InvalidLaunchTemplateName.NotFoundException",
+                       "Message": "not found"}},
+            "DescribeLaunchTemplates",
+        )
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "iam_client") as mock_iam, \
+             patch.object(creation_mod, "pcs_client") as mock_pcs, \
+             patch.object(creation_mod, "fsx_client") as mock_fsx, \
+             patch.object(creation_mod, "dynamodb") as mock_ddb, \
+             patch.object(creation_mod, "sns_client") as mock_sns, \
+             patch.object(creation_mod, "_lookup_user_email", return_value=""):
+
+            mock_ec2.describe_launch_templates = MagicMock(side_effect=not_found_error)
+            mock_ddb.Table.return_value.put_item = MagicMock()
+
+            event = {
+                "projectId": "proj-missing",
+                "clusterName": "cl-missing",
+                "pcsClusterId": "",
+                "fsxFilesystemId": "",
+                "queueId": "",
+                "loginNodeGroupId": "",
+                "computeNodeGroupId": "",
+                "errorMessage": "Creation failed early",
+            }
+            # Should not raise
+            result = creation_mod.handle_creation_failure(event)
+
+        assert result["status"] == "FAILED"
+        # delete_launch_template should NOT have been called
+        mock_ec2.delete_launch_template.assert_not_called()
+        # Rollback results should contain not_found entries
+        rollback_results = result.get("rollbackResults", [])
+        lt_results = [r for r in rollback_results if "launch_template" in r]
+        assert len(lt_results) == 2
+        assert all("not_found" in r for r in lt_results)
+
+    def test_rollback_continues_to_clean_up_other_resources(self, _env):
+        """handle_creation_failure cleans up IAM, PCS, and FSx resources
+        even when launch templates are also being cleaned up."""
+        creation_mod = _env["creation_mod"]
+
+        describe_lt_response = {
+            "LaunchTemplates": [
+                {"LaunchTemplateId": "lt-other-001",
+                 "LaunchTemplateName": "hpc-proj-other-cl-other-login"},
+            ],
+        }
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "iam_client") as mock_iam, \
+             patch.object(creation_mod, "pcs_client") as mock_pcs, \
+             patch.object(creation_mod, "fsx_client") as mock_fsx, \
+             patch.object(creation_mod, "dynamodb") as mock_ddb, \
+             patch.object(creation_mod, "sns_client") as mock_sns, \
+             patch.object(creation_mod, "_lookup_user_email", return_value=""):
+
+            mock_ec2.describe_launch_templates = MagicMock(return_value=describe_lt_response)
+            mock_ec2.delete_launch_template = MagicMock(return_value={})
+            mock_ddb.Table.return_value.put_item = MagicMock()
+
+            event = {
+                "projectId": "proj-other",
+                "clusterName": "cl-other",
+                "pcsClusterId": "pcs-cleanup-1",
+                "fsxFilesystemId": "fs-cleanup-1",
+                "queueId": "q-cleanup-1",
+                "loginNodeGroupId": "lng-cleanup-1",
+                "computeNodeGroupId": "cng-cleanup-1",
+                "errorMessage": "Something broke",
+            }
+            result = creation_mod.handle_creation_failure(event)
+
+        assert result["status"] == "FAILED"
+
+        # Verify IAM cleanup was attempted (login + compute roles)
+        assert mock_iam.remove_role_from_instance_profile.call_count >= 2
+        assert mock_iam.delete_instance_profile.call_count >= 2
+        assert mock_iam.delete_role.call_count >= 2
+
+        # Verify PCS cleanup was attempted
+        mock_pcs.delete_queue.assert_called_once_with(
+            clusterIdentifier="pcs-cleanup-1",
+            queueIdentifier="q-cleanup-1",
+        )
+        mock_pcs.delete_compute_node_group.assert_any_call(
+            clusterIdentifier="pcs-cleanup-1",
+            computeNodeGroupIdentifier="cng-cleanup-1",
+        )
+        mock_pcs.delete_compute_node_group.assert_any_call(
+            clusterIdentifier="pcs-cleanup-1",
+            computeNodeGroupIdentifier="lng-cleanup-1",
+        )
+        mock_pcs.delete_cluster.assert_called_once_with(
+            clusterIdentifier="pcs-cleanup-1",
+        )
+
+        # Verify FSx cleanup was attempted
+        mock_fsx.delete_file_system.assert_called_once_with(
+            FileSystemId="fs-cleanup-1",
+        )
+
+        # Verify launch template cleanup was also attempted
+        assert mock_ec2.describe_launch_templates.call_count == 2
+        assert mock_ec2.delete_launch_template.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Regression: unchanged behaviour after launch template migration
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestUnchangedBehaviourRegression:
+    """Validates: Requirements 7.1, 7.2, 7.3, 7.4
+
+    Verifies that all pre-existing creation and destruction steps remain
+    present in the dispatch tables and that the new launch-template steps
+    are positioned correctly relative to existing steps.
+    """
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _env(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            os.environ["CLUSTERS_TABLE_NAME"] = CLUSTERS_TABLE_NAME
+            os.environ["PROJECTS_TABLE_NAME"] = PROJECTS_TABLE_NAME
+            os.environ["CLUSTER_NAME_REGISTRY_TABLE_NAME"] = CLUSTER_NAME_REGISTRY_TABLE_NAME
+
+            create_clusters_table()
+            create_projects_table()
+            create_cluster_name_registry_table()
+
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "auth")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
+            _load_module_from(_CLUSTER_OPS_DIR, "clusters")
+            _load_module_from(_CLUSTER_OPS_DIR, "tagging")
+            _load_module_from(_CLUSTER_OPS_DIR, "posix_provisioning")
+            creation_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_creation")
+            destruction_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_destruction")
+
+            yield {
+                "creation_mod": creation_mod,
+                "destruction_mod": destruction_mod,
+                "errors_mod": errors_mod,
+            }
+
+    # -- Creation dispatch: all original steps still present ----------------
+
+    def test_creation_dispatch_contains_iam_steps(self, _env):
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "create_iam_resources" in dispatch
+        assert "wait_for_instance_profiles" in dispatch
+
+    def test_creation_dispatch_contains_fsx_steps(self, _env):
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "create_fsx_filesystem" in dispatch
+        assert "check_fsx_status" in dispatch
+        assert "create_fsx_dra" in dispatch
+
+    def test_creation_dispatch_contains_pcs_steps(self, _env):
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "create_pcs_cluster" in dispatch
+        assert "check_pcs_cluster_status" in dispatch
+        assert "create_login_node_group" in dispatch
+        assert "create_compute_node_group" in dispatch
+        assert "create_pcs_queue" in dispatch
+
+    def test_creation_dispatch_contains_dynamodb_and_tagging_steps(self, _env):
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "record_cluster" in dispatch
+        assert "tag_resources" in dispatch
+        assert "validate_and_register_name" in dispatch
+        assert "check_budget_breach" in dispatch
+
+    def test_creation_dispatch_contains_failure_handler(self, _env):
+        dispatch = _env["creation_mod"]._STEP_DISPATCH
+        assert "handle_creation_failure" in dispatch
+
+    # -- Destruction dispatch: all original steps still present -------------
+
+    def test_destruction_dispatch_contains_fsx_export_steps(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "create_fsx_export_task" in dispatch
+        assert "check_fsx_export_status" in dispatch
+
+    def test_destruction_dispatch_contains_pcs_step(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "delete_pcs_resources" in dispatch
+
+    def test_destruction_dispatch_contains_fsx_delete_step(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "delete_fsx_filesystem" in dispatch
+
+    def test_destruction_dispatch_contains_iam_step(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "delete_iam_resources" in dispatch
+
+    def test_destruction_dispatch_contains_dynamodb_step(self, _env):
+        dispatch = _env["destruction_mod"]._STEP_DISPATCH
+        assert "record_cluster_destroyed" in dispatch
+
+    # -- Creation step ordering: launch templates in correct position -------
+
+    def test_creation_step_order_matches_expected(self, _env):
+        """The full creation _STEP_DISPATCH key order must match the design."""
+        expected_order = [
+            "validate_and_register_name",
+            "check_budget_breach",
+            "create_iam_resources",
+            "wait_for_instance_profiles",
+            "create_launch_templates",
+            "resolve_template",
+            "create_fsx_filesystem",
+            "check_fsx_status",
+            "create_fsx_dra",
+            "create_pcs_cluster",
+            "check_pcs_cluster_status",
+            "create_login_node_group",
+            "create_compute_node_group",
+            "create_pcs_queue",
+            "tag_resources",
+            "record_cluster",
+            "handle_creation_failure",
+        ]
+        actual_order = list(_env["creation_mod"]._STEP_DISPATCH.keys())
+        assert actual_order == expected_order
+
+    def test_creation_launch_templates_after_instance_profiles(self, _env):
+        """create_launch_templates must come after wait_for_instance_profiles."""
+        keys = list(_env["creation_mod"]._STEP_DISPATCH.keys())
+        assert keys.index("create_launch_templates") > keys.index("wait_for_instance_profiles")
+
+    def test_creation_launch_templates_before_fsx_and_pcs(self, _env):
+        """create_launch_templates must come before FSx and PCS node groups."""
+        keys = list(_env["creation_mod"]._STEP_DISPATCH.keys())
+        lt_idx = keys.index("create_launch_templates")
+        assert lt_idx < keys.index("create_fsx_filesystem")
+        assert lt_idx < keys.index("create_login_node_group")
+        assert lt_idx < keys.index("create_compute_node_group")
+
+    # -- Destruction step ordering: launch templates in correct position ----
+
+    def test_destruction_step_order_matches_expected(self, _env):
+        """The full destruction _STEP_DISPATCH key order must match the design."""
+        expected_order = [
+            "create_fsx_export_task",
+            "check_fsx_export_status",
+            "delete_pcs_resources",
+            "delete_fsx_filesystem",
+            "delete_iam_resources",
+            "delete_launch_templates",
+            "record_cluster_destroyed",
+        ]
+        actual_order = list(_env["destruction_mod"]._STEP_DISPATCH.keys())
+        assert actual_order == expected_order
+
+    def test_destruction_launch_templates_after_iam_cleanup(self, _env):
+        """delete_launch_templates must come after delete_iam_resources."""
+        keys = list(_env["destruction_mod"]._STEP_DISPATCH.keys())
+        assert keys.index("delete_launch_templates") > keys.index("delete_iam_resources")
+
+    def test_destruction_launch_templates_before_record_destroyed(self, _env):
+        """delete_launch_templates must come before record_cluster_destroyed."""
+        keys = list(_env["destruction_mod"]._STEP_DISPATCH.keys())
+        assert keys.index("delete_launch_templates") < keys.index("record_cluster_destroyed")

@@ -380,6 +380,38 @@ describe('ProjectInfrastructureStack', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // No project-level launch templates
+  // Validates: Requirements 1.1, 1.2 (cluster-scoped-launch-templates)
+  // ---------------------------------------------------------------------------
+  describe('No project-level launch templates', () => {
+    it('does not create any EC2 launch template resources', () => {
+      const launchTemplates = template.findResources('AWS::EC2::LaunchTemplate');
+      expect(Object.keys(launchTemplates)).toHaveLength(0);
+    });
+
+    it('does not output LoginLaunchTemplateId', () => {
+      const outputs = template.findOutputs('*');
+      for (const [outputId] of Object.entries(outputs)) {
+        expect(outputId).not.toMatch(/LoginLaunchTemplate/i);
+      }
+    });
+
+    it('does not output ComputeLaunchTemplateId', () => {
+      const outputs = template.findOutputs('*');
+      for (const [outputId] of Object.entries(outputs)) {
+        expect(outputId).not.toMatch(/ComputeLaunchTemplate/i);
+      }
+    });
+
+    it('still outputs HeadNodeSecurityGroupId and ComputeNodeSecurityGroupId', () => {
+      const outputs = template.findOutputs('*');
+      const outputIds = Object.keys(outputs);
+      expect(outputIds.some(id => id.includes('HeadNodeSecurityGroupId'))).toBe(true);
+      expect(outputIds.some(id => id.includes('ComputeNodeSecurityGroupId'))).toBe(true);
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // Cost Allocation Tagging — all resources tagged with Project cost allocation tag
   // Validates: Requirement 14.1, 14.2
   // ---------------------------------------------------------------------------

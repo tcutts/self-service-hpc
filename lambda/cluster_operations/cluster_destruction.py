@@ -43,6 +43,7 @@ logger.setLevel(logging.INFO)
 # AWS clients
 # ---------------------------------------------------------------------------
 dynamodb = boto3.resource("dynamodb")
+ec2_client = boto3.client("ec2")
 fsx_client = boto3.client("fsx")
 iam_client = boto3.client("iam")
 pcs_client = boto3.client("pcs")
@@ -456,6 +457,98 @@ def delete_iam_resources(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step 5b — Delete cluster-scoped launch templates
+# ===================================================================
+
+def _delete_launch_template_by_name(template_name: str) -> str:
+    """Best-effort deletion of a single EC2 launch template by name.
+
+    Uses ``describe_launch_templates`` to resolve the name to an ID,
+    then ``delete_launch_template`` to remove it.  Returns a result
+    string for logging.
+    """
+    try:
+        response = ec2_client.describe_launch_templates(
+            LaunchTemplateNames=[template_name],
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "InvalidLaunchTemplateName.NotFoundException":
+            logger.warning(
+                "Launch template '%s' not found — already deleted",
+                template_name,
+            )
+            return f"launch_template:{template_name}:not_found"
+        logger.warning(
+            "Failed to describe launch template '%s': %s",
+            template_name,
+            exc,
+        )
+        return f"launch_template:{template_name}:describe_failed"
+
+    templates = response.get("LaunchTemplates", [])
+    if not templates:
+        logger.warning(
+            "Launch template '%s' not found in response — skipping",
+            template_name,
+        )
+        return f"launch_template:{template_name}:not_found"
+
+    template_id = templates[0]["LaunchTemplateId"]
+
+    try:
+        ec2_client.delete_launch_template(LaunchTemplateId=template_id)
+        logger.info("Deleted launch template '%s' (%s)", template_name, template_id)
+        return f"launch_template:{template_name}:deleted"
+    except ClientError as exc:
+        logger.warning(
+            "Failed to delete launch template '%s' (%s): %s",
+            template_name,
+            template_id,
+            exc,
+        )
+        return f"launch_template:{template_name}:delete_failed"
+
+
+def delete_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
+    """Delete cluster-scoped EC2 launch templates.
+
+    Cleans up the two launch templates created during cluster creation:
+    - ``hpc-{projectId}-{clusterName}-login``
+    - ``hpc-{projectId}-{clusterName}-compute``
+
+    Uses best-effort approach — each template is handled independently
+    so that a failure on one does not prevent deletion of the other.
+
+    Adds ``launchTemplateCleanupResults`` to the returned event.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    login_template_name = f"hpc-{project_id}-{cluster_name}-login"
+    compute_template_name = f"hpc-{project_id}-{cluster_name}-compute"
+
+    cleanup_results: list[str] = []
+
+    logger.info(
+        "Deleting launch templates for cluster '%s': %s, %s",
+        cluster_name,
+        login_template_name,
+        compute_template_name,
+    )
+
+    cleanup_results.append(_delete_launch_template_by_name(login_template_name))
+    cleanup_results.append(_delete_launch_template_by_name(compute_template_name))
+
+    logger.info(
+        "Launch template cleanup for cluster '%s': %s",
+        cluster_name,
+        "; ".join(cleanup_results),
+    )
+
+    return {**event, "launchTemplateCleanupResults": cleanup_results}
+
+
+# ===================================================================
 # Step 6 — Record cluster as destroyed in DynamoDB
 # ===================================================================
 
@@ -558,5 +651,6 @@ _STEP_DISPATCH.update({
     "delete_pcs_resources": delete_pcs_resources,
     "delete_fsx_filesystem": delete_fsx_filesystem,
     "delete_iam_resources": delete_iam_resources,
+    "delete_launch_templates": delete_launch_templates,
     "record_cluster_destroyed": record_cluster_destroyed,
 })

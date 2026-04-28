@@ -47,6 +47,7 @@ logger.setLevel(logging.INFO)
 # AWS clients
 # ---------------------------------------------------------------------------
 dynamodb = boto3.resource("dynamodb")
+ec2_client = boto3.client("ec2")
 fsx_client = boto3.client("fsx")
 iam_client = boto3.client("iam")
 pcs_client = boto3.client("pcs")
@@ -526,6 +527,67 @@ def wait_for_instance_profiles(event: dict[str, Any]) -> dict[str, Any]:
         compute_profile_name,
     )
     return {**event, "instanceProfilesReady": True}
+
+
+# ===================================================================
+# Step 4b — Create cluster-scoped EC2 launch templates
+# ===================================================================
+
+def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
+    """Create login and compute EC2 launch templates for this cluster.
+
+    Each template wraps a single security group so that PCS node groups
+    can reference it.  Templates are named deterministically so they
+    can be deleted by name during destruction or rollback.
+
+    Adds ``loginLaunchTemplateId`` and ``computeLaunchTemplateId``
+    to the returned event.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+    security_group_ids: dict[str, str] = event["securityGroupIds"]
+
+    tags = build_resource_tags(project_id, cluster_name)
+    tag_specs = [
+        {"ResourceType": "launch-template", "Tags": tags},
+    ]
+
+    templates = [
+        (
+            f"hpc-{project_id}-{cluster_name}-login",
+            security_group_ids["headNode"],
+            "loginLaunchTemplateId",
+        ),
+        (
+            f"hpc-{project_id}-{cluster_name}-compute",
+            security_group_ids["computeNode"],
+            "computeLaunchTemplateId",
+        ),
+    ]
+
+    result: dict[str, Any] = {**event}
+
+    for template_name, sg_id, event_key in templates:
+        try:
+            response = ec2_client.create_launch_template(
+                LaunchTemplateName=template_name,
+                LaunchTemplateData={"SecurityGroupIds": [sg_id]},
+                TagSpecifications=tag_specs,
+            )
+            template_id = response["LaunchTemplate"]["LaunchTemplateId"]
+            result[event_key] = template_id
+            logger.info(
+                "Created launch template '%s' (%s) for cluster '%s'",
+                template_name,
+                template_id,
+                cluster_name,
+            )
+        except ClientError as exc:
+            raise InternalError(
+                f"Failed to create launch template '{template_name}': {exc}"
+            )
+
+    return result
 
 
 # ===================================================================
@@ -1209,6 +1271,7 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
 
     Cleans up partially created resources in reverse order:
     1. Delete IAM roles and instance profiles (login and compute)
+    1b. Delete launch templates (login and compute)
     2. Delete PCS queue (if created)
     3. Delete PCS compute node groups (if created)
     4. Delete PCS cluster (if created)
@@ -1242,6 +1305,13 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
         cleanup_results.extend(
             _cleanup_iam_role_and_profile(compute_role_name)
         )
+
+    # 1b. Delete launch templates
+    if project_id and cluster_name:
+        login_lt_name = f"hpc-{project_id}-{cluster_name}-login"
+        compute_lt_name = f"hpc-{project_id}-{cluster_name}-compute"
+        cleanup_results.append(_cleanup_launch_template(login_lt_name))
+        cleanup_results.append(_cleanup_launch_template(compute_lt_name))
 
     # 2. Delete PCS queue
     if queue_id and pcs_cluster_id:
@@ -1403,6 +1473,40 @@ def _cleanup_iam_role_and_profile(role_name: str) -> list[str]:
         results.append(f"role:{role_name}:failed")
 
     return results
+
+
+def _cleanup_launch_template(template_name: str) -> str:
+    """Best-effort deletion of an EC2 launch template by name.
+
+    Resolves the template name to an ID via ``describe_launch_templates``,
+    then deletes it.  Returns a result string for logging.
+
+    If the template does not exist, logs a warning and returns a
+    ``not_found`` result — this is expected during rollback when the
+    creation step may not have completed.
+    """
+    try:
+        response = ec2_client.describe_launch_templates(
+            LaunchTemplateNames=[template_name],
+        )
+        templates = response.get("LaunchTemplates", [])
+        if not templates:
+            logger.warning("Launch template '%s' not found — skipping", template_name)
+            return f"launch_template:{template_name}:not_found"
+
+        template_id = templates[0]["LaunchTemplateId"]
+        ec2_client.delete_launch_template(LaunchTemplateId=template_id)
+        logger.info("Deleted launch template '%s' (%s)", template_name, template_id)
+        return f"launch_template:{template_name}:deleted"
+    except ClientError as exc:
+        error_code = exc.response.get("Error", {}).get("Code", "")
+        if error_code == "InvalidLaunchTemplateName.NotFoundException":
+            logger.warning("Launch template '%s' not found — skipping", template_name)
+            return f"launch_template:{template_name}:not_found"
+        logger.warning(
+            "Failed to delete launch template '%s': %s", template_name, exc
+        )
+        return f"launch_template:{template_name}:failed"
 
 
 def _cleanup_pcs_queue(cluster_id: str, queue_id: str) -> str:
@@ -1682,6 +1786,7 @@ _STEP_DISPATCH.update({
     "check_budget_breach": check_budget_breach,
     "create_iam_resources": create_iam_resources,
     "wait_for_instance_profiles": wait_for_instance_profiles,
+    "create_launch_templates": create_launch_templates,
     "resolve_template": resolve_template,
     "create_fsx_filesystem": create_fsx_filesystem,
     "check_fsx_status": check_fsx_status,

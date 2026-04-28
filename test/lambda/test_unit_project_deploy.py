@@ -191,8 +191,6 @@ class TestProjectDeployStepHandlers:
                 "efs": "sg-efs",
                 "fsx": "sg-fsx",
             },
-            "loginLaunchTemplateId": "lt-login-proj-record",
-            "computeLaunchTemplateId": "lt-compute-proj-record",
         }
 
         result = self.deploy_mod.record_infrastructure(event)
@@ -212,8 +210,9 @@ class TestProjectDeployStepHandlers:
         assert item["status"] == "ACTIVE"
         # instanceProfileArn is no longer stored at project level (per-cluster profiles now)
         assert "instanceProfileArn" not in item
-        assert item["loginLaunchTemplateId"] == "lt-login-proj-record"
-        assert item["computeLaunchTemplateId"] == "lt-compute-proj-record"
+        # Launch template IDs are no longer stored at project level (per-cluster templates now)
+        assert "loginLaunchTemplateId" not in item
+        assert "computeLaunchTemplateId" not in item
 
     def test_record_infrastructure_handles_empty_fields(self):
         """Validates: Requirement 2.2 — empty infrastructure fields are stored."""
@@ -382,8 +381,9 @@ class TestProjectDeployStepHandlers:
         assert result["securityGroupIds"]["fsx"] == "sg-fsx"
         # instanceProfileArn is no longer extracted (per-cluster profiles now)
         assert "instanceProfileArn" not in result
-        assert result["loginLaunchTemplateId"] == "lt-login-test"
-        assert result["computeLaunchTemplateId"] == "lt-compute-test"
+        # Launch template IDs are no longer extracted (per-cluster templates now)
+        assert "loginLaunchTemplateId" not in result
+        assert "computeLaunchTemplateId" not in result
 
     def test_record_infrastructure_updates_progress_to_step_5(self):
         """Validates: Requirements 2.5, 2.6 — step 5 progress written."""

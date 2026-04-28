@@ -54,10 +54,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
   public readonly fsxSecurityGroup: ec2.SecurityGroup;
   /** CloudWatch Log Group for cluster SSH/DCV access logs (365-day retention). */
   public readonly clusterAccessLogGroup: logs.LogGroup;
-  /** EC2 launch template for login (head) nodes. */
-  public readonly loginLaunchTemplate: ec2.LaunchTemplate;
-  /** EC2 launch template for compute nodes. */
-  public readonly computeLaunchTemplate: ec2.LaunchTemplate;
 
   constructor(scope: Construct, id: string, props: ProjectInfrastructureStackProps) {
     super(scope, id, props);
@@ -233,21 +229,6 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     });
 
     // -----------------------------------------------------------------
-    // EC2 Launch Templates — login and compute nodes
-    // -----------------------------------------------------------------
-    // Login nodes: head node SG, SSH/DCV access from trusted CIDRs
-    this.loginLaunchTemplate = new ec2.LaunchTemplate(this, 'LoginLaunchTemplate', {
-      launchTemplateName: `hpc-${props.projectId}-login`,
-      securityGroup: this.headNodeSecurityGroup,
-    });
-
-    // Compute nodes: compute node SG, private subnet only
-    this.computeLaunchTemplate = new ec2.LaunchTemplate(this, 'ComputeLaunchTemplate', {
-      launchTemplateName: `hpc-${props.projectId}-compute`,
-      securityGroup: this.computeNodeSecurityGroup,
-    });
-
-    // -----------------------------------------------------------------
     // Tags — Cost_Allocation_Tag on all resources
     // -----------------------------------------------------------------
     cdk.Tags.of(this).add('Project', tagValue);
@@ -305,14 +286,5 @@ export class ProjectInfrastructureStack extends cdk.Stack {
       description: `CloudWatch Log Group for cluster access logs for project ${props.projectId}`,
     });
 
-    new cdk.CfnOutput(this, 'LoginLaunchTemplateId', {
-      value: this.loginLaunchTemplate.launchTemplateId!,
-      description: `Login node launch template ID for project ${props.projectId}`,
-    });
-
-    new cdk.CfnOutput(this, 'ComputeLaunchTemplateId', {
-      value: this.computeLaunchTemplate.launchTemplateId!,
-      description: `Compute node launch template ID for project ${props.projectId}`,
-    });
   }
 }

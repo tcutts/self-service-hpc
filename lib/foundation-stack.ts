@@ -750,6 +750,16 @@ export class FoundationStack extends cdk.Stack {
       resources: ['*'],
     }));
 
+    // PCS CreateCluster creates a Secrets Manager secret for the Slurm auth
+    // key using the caller's credentials, so the Lambda needs these permissions.
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'secretsmanager:CreateSecret',
+        'secretsmanager:TagResource',
+      ],
+      resources: ['arn:aws:secretsmanager:*:*:secret:pcs!slurm-secret-*'],
+    }));
+
     clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
         'fsx:CreateFileSystem',
