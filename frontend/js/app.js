@@ -1683,19 +1683,13 @@ function renderClustersPage(container, params) {
         </select>
       </div>
       <div id="template-preview" class="template-preview" style="display:none"></div>
-      <fieldset class="form-fieldset">
-        <legend>Storage Mode</legend>
-        <div class="form-group" style="margin-bottom:0.5rem">
-          <label style="font-weight:normal;cursor:pointer">
-            <input type="radio" name="storage-mode" value="mountpoint" checked /> Mountpoint for Amazon S3
-          </label>
-        </div>
-        <div class="form-group" style="margin-bottom:0">
-          <label style="font-weight:normal;cursor:pointer">
-            <input type="radio" name="storage-mode" value="lustre" /> FSx for Lustre
-          </label>
-        </div>
-      </fieldset>
+      <div class="form-group">
+        <label for="new-cluster-storage-mode">Storage Mode</label>
+        <select id="new-cluster-storage-mode">
+          <option value="mountpoint">Mountpoint for Amazon S3</option>
+          <option value="lustre">FSx for Lustre</option>
+        </select>
+      </div>
       <div id="lustre-capacity-group" class="form-group" style="display:none">
         <label for="new-cluster-lustre-capacity">Lustre Capacity (GiB)</label>
         <input type="number" id="new-cluster-lustre-capacity" min="1200" step="1200" value="1200" />
@@ -1785,11 +1779,9 @@ function renderClustersPage(container, params) {
   });
 
   // Toggle lustre capacity visibility based on storage mode selection
-  document.querySelectorAll('input[name="storage-mode"]').forEach(radio => {
-    radio.addEventListener('change', () => {
-      const lustreGroup = document.getElementById('lustre-capacity-group');
-      lustreGroup.style.display = radio.value === 'lustre' && radio.checked ? 'block' : 'none';
-    });
+  document.getElementById('new-cluster-storage-mode').addEventListener('change', (e) => {
+    const lustreGroup = document.getElementById('lustre-capacity-group');
+    lustreGroup.style.display = e.target.value === 'lustre' ? 'block' : 'none';
   });
 
   document.getElementById('btn-cancel-cluster').addEventListener('click', () => {

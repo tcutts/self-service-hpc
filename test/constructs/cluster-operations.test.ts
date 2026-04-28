@@ -328,4 +328,33 @@ describe('ClusterOperations', () => {
     // Total = 19
     template.resourceCountIs('AWS::ApiGateway::Resource', 19);
   });
+
+  it('creation state machine includes CreateLaunchTemplates step', () => {
+    const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+      Properties: { StateMachineName: 'hpc-cluster-creation' },
+    });
+    const logicalIds = Object.keys(stateMachines);
+    expect(logicalIds).toHaveLength(1);
+    const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
+    const definitionStr = JSON.stringify(definition);
+    expect(definitionStr).toContain('CreateLaunchTemplates');
+    expect(definitionStr).toContain('create_launch_templates');
+  });
+
+  it('grants EC2 launch template permissions via IAM policy', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              'ec2:CreateLaunchTemplate',
+              'ec2:DeleteLaunchTemplate',
+              'ec2:DescribeLaunchTemplates',
+            ]),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
 });

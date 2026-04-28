@@ -176,6 +176,9 @@ export class ClusterOperations extends Construct {
         'ec2:CreateNetworkInterface',
         'ec2:DescribeNetworkInterfaces',
         'ec2:CreateTags',
+        'ec2:CreateLaunchTemplate',
+        'ec2:DeleteLaunchTemplate',
+        'ec2:DescribeLaunchTemplates',
       ],
       resources: ['*'],
     }));
@@ -372,6 +375,17 @@ export class ClusterOperations extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(10)),
     });
 
+    // Step 2e: Create launch templates for login and compute nodes
+    const createLaunchTemplates = new tasks.LambdaInvoke(this, 'CreateLaunchTemplates', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'create_launch_templates',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Step 3: Create FSx filesystem
     const createFsxFilesystem = new tasks.LambdaInvoke(this, 'CreateFsxFilesystem', {
       lambdaFunction: clusterCreationStepLambda,
@@ -552,6 +566,7 @@ export class ClusterOperations extends Construct {
     resolveTemplate.addCatch(failureChain, catchConfig);
     createIamResources.addCatch(failureChain, catchConfig);
     waitForInstanceProfiles.addCatch(failureChain, catchConfig);
+    createLaunchTemplates.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
@@ -681,8 +696,9 @@ export class ClusterOperations extends Construct {
 
     // Instance profile wait loop: check ready → if not ready, wait → check again
     const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
+    createLaunchTemplates.next(storageModeChoice);
     const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
-      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), storageModeChoice)
+      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), createLaunchTemplates)
       .otherwise(instanceProfileWaitLoop);
 
     // Chain: validate → budget → resolve template → create IAM resources → wait for instance profiles (loop) → StorageModeChoice → (lustre: parallel | mountpoint: PCS-only) → login nodes → compute → queue → tag → record → success
