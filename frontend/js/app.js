@@ -2557,7 +2557,7 @@ function renderApp() {
     : 'No project selected';
   const ctxClass = state.projectContext ? '' : ' no-project';
   const membersTab = canSeeMembers()
-    ? '<a href="#" data-page="members">Members</a>'
+    ? '<a href="#" data-page="members">Project Members</a>'
     : '';
   app.innerHTML = `
     <header>
@@ -2570,10 +2570,11 @@ function renderApp() {
     </header>
     <div class="layout">
       <nav aria-label="Main navigation">
-        <a href="#" data-page="users">Users</a>
         <a href="#" data-page="projects">Projects</a>
-        <a href="#" data-page="templates">Templates</a>
         <a href="#" data-page="clusters">Clusters</a>
+        <hr/>
+        <a href="#" data-page="templates">Cluster Templates</a>
+        <a href="#" data-page="users">User Management</a>
         ${membersTab}
         <a href="#" data-page="accounting">Accounting</a>
       </nav>
