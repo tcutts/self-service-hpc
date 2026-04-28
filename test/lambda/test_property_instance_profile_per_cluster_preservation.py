@@ -154,7 +154,7 @@ def test_pcs_cluster_creation_preserved(project_id, cluster_name, compute_sg, su
     kw = mock_pcs.create_cluster.call_args.kwargs
 
     assert kw["clusterName"] == cluster_name
-    assert kw["scheduler"] == {"type": "SLURM", "version": "24.11"}
+    assert kw["scheduler"] == {"type": "SLURM", "version": "25.11"}
     assert kw["size"] == "SMALL"
     assert kw["networking"]["subnetIds"] == [subnet]
     assert kw["networking"]["securityGroupIds"] == [compute_sg]

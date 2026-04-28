@@ -71,6 +71,8 @@ def _ensure_shared_modules():
     """
     if "authorization" not in sys.modules:
         _load_module_from(_SHARED_DIR, "authorization")
+    if "pcs_versions" not in sys.modules:
+        _load_module_from(_SHARED_DIR, "pcs_versions")
 
 
 # ---------------------------------------------------------------------------

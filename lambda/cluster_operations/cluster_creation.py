@@ -37,6 +37,7 @@ from botocore.exceptions import ClientError
 
 from cluster_names import register_cluster_name, validate_cluster_name
 from errors import BudgetExceededError, InternalError, ValidationError
+from pcs_versions import DEFAULT_SLURM_VERSION
 from posix_provisioning import generate_user_data_script
 from tagging import build_resource_tags, tags_as_dict
 
@@ -570,6 +571,16 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
     security_group_ids: dict[str, str] = event["securityGroupIds"]
     ami_id: str = event.get("amiId", "")
 
+    # The compute AMI is required — without it PCS rejects node group creation
+    if not ami_id:
+        raise ValidationError(
+            "amiId is required to create launch templates. "
+            "Ensure the cluster template has an AMI ID configured.",
+            {"field": "amiId"},
+        )
+
+    login_ami_id: str = event.get("loginAmiId", "") or ami_id
+
     tags = build_resource_tags(project_id, cluster_name)
     tag_specs = [
         {"ResourceType": "launch-template", "Tags": tags},
@@ -580,7 +591,7 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
             f"hpc-{project_id}-{cluster_name}-login",
             security_group_ids["headNode"],
             "loginLaunchTemplateId",
-            event.get("loginAmiId", "") or ami_id,
+            login_ami_id,
         ),
         (
             f"hpc-{project_id}-{cluster_name}-compute",
@@ -593,9 +604,10 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {**event}
 
     for template_name, sg_id, event_key, template_ami_id in templates:
-        lt_data: dict[str, Any] = {"SecurityGroupIds": [sg_id]}
-        if template_ami_id:
-            lt_data["ImageId"] = template_ami_id
+        lt_data: dict[str, Any] = {
+            "SecurityGroupIds": [sg_id],
+            "ImageId": template_ami_id,
+        }
 
         try:
             response = ec2_client.create_launch_template(
@@ -855,7 +867,7 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
                 clusterName=cluster_name,
                 scheduler={
                     "type": "SLURM",
-                    "version": "24.11",
+                    "version": event.get("schedulerVersion", DEFAULT_SLURM_VERSION),
                 },
                 size="SMALL",
                 networking={
@@ -1057,7 +1069,8 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
     tags = tags_as_dict(project_id, cluster_name)
 
     try:
-        response = pcs_client.create_compute_node_group(
+        login_ami_id = event.get("loginAmiId", "") or event.get("amiId", "")
+        create_kwargs = dict(
             clusterIdentifier=pcs_cluster_id,
             computeNodeGroupName=f"{cluster_name}-login",
             subnetIds=public_subnet_ids,
@@ -1076,6 +1089,9 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
             iamInstanceProfileArn=event.get("loginInstanceProfileArn", ""),
             tags=tags,
         )
+        if login_ami_id:
+            create_kwargs["amiId"] = login_ami_id
+        response = pcs_client.create_compute_node_group(**create_kwargs)
     except ClientError as exc:
         raise InternalError(f"Failed to create login node group: {exc}")
 
@@ -1142,7 +1158,8 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
     instance_configs = [{"instanceType": it} for it in instance_types]
 
     try:
-        response = pcs_client.create_compute_node_group(
+        compute_ami_id = event.get("amiId", "")
+        create_kwargs = dict(
             clusterIdentifier=pcs_cluster_id,
             computeNodeGroupName=f"{cluster_name}-compute",
             subnetIds=private_subnet_ids,
@@ -1159,6 +1176,9 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
             iamInstanceProfileArn=event.get("computeInstanceProfileArn", ""),
             tags=tags,
         )
+        if compute_ami_id:
+            create_kwargs["amiId"] = compute_ami_id
+        response = pcs_client.create_compute_node_group(**create_kwargs)
     except ClientError as exc:
         raise InternalError(f"Failed to create compute node group: {exc}")
 
@@ -1673,21 +1693,31 @@ def _record_failed_cluster(
     project_id: str, cluster_name: str, error_message: str,
     created_by: str = "",
 ) -> None:
-    """Record a FAILED cluster status in DynamoDB."""
+    """Record a FAILED cluster status in DynamoDB.
+
+    Uses ``update_item`` to preserve existing fields (templateId,
+    storageMode, etc.) rather than overwriting the entire record.
+    """
     now = datetime.now(timezone.utc).isoformat()
 
     table = dynamodb.Table(CLUSTERS_TABLE_NAME)
     try:
-        table.put_item(
-            Item={
+        table.update_item(
+            Key={
                 "PK": f"PROJECT#{project_id}",
                 "SK": f"CLUSTER#{cluster_name}",
-                "clusterName": cluster_name,
-                "projectId": project_id,
-                "status": "FAILED",
-                "errorMessage": error_message,
-                "createdBy": created_by,
-                "createdAt": now,
+            },
+            UpdateExpression=(
+                "SET #s = :status, errorMessage = :err, "
+                "createdBy = if_not_exists(createdBy, :cb), "
+                "updatedAt = :now"
+            ),
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":status": "FAILED",
+                ":err": error_message,
+                ":cb": created_by,
+                ":now": now,
             },
         )
         logger.info(
@@ -1810,6 +1840,10 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
 
         logger.info("Template '%s' resolved successfully", template_id)
 
+        scheduler_version = item.get("softwareStack", {}).get(
+            "schedulerVersion", DEFAULT_SLURM_VERSION
+        )
+
         result = {
             **event,
             "loginInstanceType": item.get("loginInstanceType", "c7g.medium"),
@@ -1817,7 +1851,15 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
             "purchaseOption": item.get("purchaseOption", "ONDEMAND"),
             "amiId": item.get("amiId", ""),
             "loginAmiId": item.get("loginAmiId", ""),
+            "schedulerVersion": scheduler_version,
         }
+
+        if not result["amiId"]:
+            raise ValidationError(
+                f"Cluster template '{template_id}' does not have an AMI ID configured. "
+                "Edit the template and set an AMI ID before creating clusters.",
+                {"templateId": template_id, "field": "amiId"},
+            )
         # Only set minNodes/maxNodes from template when not already provided
         if "minNodes" not in event or event["minNodes"] is None:
             result["minNodes"] = item.get("minNodes", 0)
@@ -1833,6 +1875,7 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
         "loginInstanceType": "c7g.medium",
         "instanceTypes": ["c7g.medium"],
         "purchaseOption": "ONDEMAND",
+        "schedulerVersion": DEFAULT_SLURM_VERSION,
     }
     if "minNodes" not in event or event["minNodes"] is None:
         result["minNodes"] = 0

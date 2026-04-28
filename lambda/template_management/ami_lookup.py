@@ -14,31 +14,40 @@ from typing import Any
 
 import boto3
 
-from errors import InternalError
+from errors import InternalError, ValidationError
+from pcs_versions import DEFAULT_SLURM_VERSION, SUPPORTED_SLURM_VERSIONS
 
 logger = logging.getLogger(__name__)
 
 ec2_client = boto3.client("ec2")
 
-# Latest PCS sample AMI parameters
-_PCS_AMI_OS = "al2023"
-_PCS_SLURM_VERSION = "25.11"
 
-
-def get_latest_pcs_ami(arch: str = "x86_64") -> dict[str, Any]:
+def get_latest_pcs_ami(
+    arch: str = "x86_64",
+    slurm_version: str = DEFAULT_SLURM_VERSION,
+) -> dict[str, Any]:
     """Return the latest PCS sample AMI for the given architecture.
 
     Args:
         arch: CPU architecture — "x86_64" or "arm64".
+        slurm_version: PCS Slurm version to look up (e.g. "24.11", "25.11").
 
     Returns:
         Dict with amiId, name, architecture, and creationDate.
 
     Raises:
+        ValidationError: If *slurm_version* is not in SUPPORTED_SLURM_VERSIONS.
         InternalError: If no matching AMI is found.
     """
+    if slurm_version not in SUPPORTED_SLURM_VERSIONS:
+        raise ValidationError(
+            f"Unsupported Slurm version '{slurm_version}'. "
+            f"Supported versions: {', '.join(SUPPORTED_SLURM_VERSIONS)}"
+        )
+
+    os_prefix = SUPPORTED_SLURM_VERSIONS[slurm_version]
     name_pattern = (
-        f"aws-pcs-sample_ami-{_PCS_AMI_OS}-{arch}-slurm-{_PCS_SLURM_VERSION}*"
+        f"aws-pcs-sample_ami-{os_prefix}-{arch}-slurm-{slurm_version}*"
     )
 
     try:

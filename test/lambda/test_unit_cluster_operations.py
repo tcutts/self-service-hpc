@@ -2714,7 +2714,8 @@ class TestCreateLaunchTemplates:
             create_projects_table()
             create_cluster_name_registry_table()
 
-            from conftest import _CLUSTER_OPS_DIR, _load_module_from
+            from conftest import _CLUSTER_OPS_DIR, _load_module_from, _ensure_shared_modules
+            _ensure_shared_modules()
             errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
             _load_module_from(_CLUSTER_OPS_DIR, "auth")
             _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
@@ -2746,6 +2747,7 @@ class TestCreateLaunchTemplates:
             event = {
                 "projectId": "proj-lt",
                 "clusterName": "cl-lt",
+                "amiId": "ami-compute123",
                 "securityGroupIds": {
                     "headNode": "sg-head-1",
                     "computeNode": "sg-compute-1",
@@ -2775,6 +2777,7 @@ class TestCreateLaunchTemplates:
             event = {
                 "projectId": "proj-err",
                 "clusterName": "cl-err",
+                "amiId": "ami-err123",
                 "securityGroupIds": {
                     "headNode": "sg-head-1",
                     "computeNode": "sg-compute-1",
@@ -2788,6 +2791,130 @@ class TestCreateLaunchTemplates:
         creation_mod = _env["creation_mod"]
         assert "create_launch_templates" in creation_mod._STEP_DISPATCH
         assert creation_mod._STEP_DISPATCH["create_launch_templates"] is creation_mod.create_launch_templates
+
+    def test_compute_launch_template_includes_ami_id(self, _env):
+        """The compute launch template must include ImageId from amiId."""
+        creation_mod = _env["creation_mod"]
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+            mock_ec2.create_launch_template = MagicMock(
+                return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
+            )
+
+            event = {
+                "projectId": "proj-ami",
+                "clusterName": "cl-ami",
+                "amiId": "ami-compute456",
+                "securityGroupIds": {
+                    "headNode": "sg-head-1",
+                    "computeNode": "sg-compute-1",
+                },
+            }
+            creation_mod.create_launch_templates(event)
+
+        # Second call is the compute template
+        compute_call = mock_ec2.create_launch_template.call_args_list[1]
+        lt_data = compute_call.kwargs.get("LaunchTemplateData",
+                    compute_call[1].get("LaunchTemplateData", {}))
+        assert lt_data["ImageId"] == "ami-compute456", (
+            f"Compute launch template missing ImageId, got: {lt_data}"
+        )
+
+    def test_login_launch_template_includes_ami_id(self, _env):
+        """The login launch template must include ImageId — defaults to amiId."""
+        creation_mod = _env["creation_mod"]
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+            mock_ec2.create_launch_template = MagicMock(
+                return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
+            )
+
+            event = {
+                "projectId": "proj-ami2",
+                "clusterName": "cl-ami2",
+                "amiId": "ami-shared789",
+                "securityGroupIds": {
+                    "headNode": "sg-head-1",
+                    "computeNode": "sg-compute-1",
+                },
+            }
+            creation_mod.create_launch_templates(event)
+
+        # First call is the login template
+        login_call = mock_ec2.create_launch_template.call_args_list[0]
+        lt_data = login_call.kwargs.get("LaunchTemplateData",
+                   login_call[1].get("LaunchTemplateData", {}))
+        assert lt_data["ImageId"] == "ami-shared789", (
+            f"Login launch template missing ImageId, got: {lt_data}"
+        )
+
+    def test_login_uses_separate_ami_when_provided(self, _env):
+        """When loginAmiId is set, the login template uses it instead of amiId."""
+        creation_mod = _env["creation_mod"]
+
+        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+            mock_ec2.create_launch_template = MagicMock(
+                return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
+            )
+
+            event = {
+                "projectId": "proj-ami3",
+                "clusterName": "cl-ami3",
+                "amiId": "ami-compute-arm",
+                "loginAmiId": "ami-login-x86",
+                "securityGroupIds": {
+                    "headNode": "sg-head-1",
+                    "computeNode": "sg-compute-1",
+                },
+            }
+            creation_mod.create_launch_templates(event)
+
+        login_call = mock_ec2.create_launch_template.call_args_list[0]
+        login_lt_data = login_call.kwargs.get("LaunchTemplateData",
+                         login_call[1].get("LaunchTemplateData", {}))
+        compute_call = mock_ec2.create_launch_template.call_args_list[1]
+        compute_lt_data = compute_call.kwargs.get("LaunchTemplateData",
+                           compute_call[1].get("LaunchTemplateData", {}))
+
+        assert login_lt_data["ImageId"] == "ami-login-x86", (
+            f"Login template should use loginAmiId, got: {login_lt_data}"
+        )
+        assert compute_lt_data["ImageId"] == "ami-compute-arm", (
+            f"Compute template should use amiId, got: {compute_lt_data}"
+        )
+
+    def test_missing_ami_id_raises_validation_error(self, _env):
+        """When amiId is empty, create_launch_templates raises ValidationError."""
+        creation_mod = _env["creation_mod"]
+        errors_mod = _env["errors_mod"]
+
+        event = {
+            "projectId": "proj-noami",
+            "clusterName": "cl-noami",
+            "amiId": "",
+            "securityGroupIds": {
+                "headNode": "sg-head-1",
+                "computeNode": "sg-compute-1",
+            },
+        }
+        with pytest.raises(errors_mod.ValidationError, match="amiId is required"):
+            creation_mod.create_launch_templates(event)
+
+    def test_absent_ami_id_raises_validation_error(self, _env):
+        """When amiId is not in the event at all, raises ValidationError."""
+        creation_mod = _env["creation_mod"]
+        errors_mod = _env["errors_mod"]
+
+        event = {
+            "projectId": "proj-noami2",
+            "clusterName": "cl-noami2",
+            "securityGroupIds": {
+                "headNode": "sg-head-1",
+                "computeNode": "sg-compute-1",
+            },
+        }
+        with pytest.raises(errors_mod.ValidationError, match="amiId is required"):
+            creation_mod.create_launch_templates(event)
 
 
 # ---------------------------------------------------------------------------

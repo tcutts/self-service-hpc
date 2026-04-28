@@ -12,6 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from errors import DuplicateError, InternalError, NotFoundError, ValidationError
+from pcs_versions import DEFAULT_SLURM_VERSION, SUPPORTED_SLURM_VERSIONS
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +57,7 @@ def create_template(
         min_nodes=min_nodes,
         max_nodes=max_nodes,
         ami_id=ami_id,
+        software_stack=software_stack,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -120,6 +122,7 @@ def update_template(
         min_nodes=min_nodes,
         max_nodes=max_nodes,
         ami_id=ami_id,
+        software_stack=software_stack,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -243,7 +246,7 @@ def _get_default_template_definitions() -> list[dict[str, Any]]:
             "ami_id": "ami-placeholder-cpu",
             "software_stack": {
                 "scheduler": "slurm",
-                "schedulerVersion": "24.11",
+                "schedulerVersion": DEFAULT_SLURM_VERSION,
             },
         },
         {
@@ -260,7 +263,7 @@ def _get_default_template_definitions() -> list[dict[str, Any]]:
             "ami_id": "ami-placeholder-gpu",
             "software_stack": {
                 "scheduler": "slurm",
-                "schedulerVersion": "24.11",
+                "schedulerVersion": DEFAULT_SLURM_VERSION,
                 "cudaVersion": "12.4",
             },
         },
@@ -275,6 +278,7 @@ def _validate_template_fields(
     min_nodes: int,
     max_nodes: int,
     ami_id: str,
+    software_stack: dict[str, Any] | None = None,
 ) -> None:
     """Validate template fields and raise ValidationError on failure."""
     if not template_id or not template_id.strip():
@@ -325,6 +329,16 @@ def _validate_template_fields(
             "amiId is required and must be a non-empty string.",
             {"field": "amiId"},
         )
+
+    if software_stack is not None:
+        scheduler_version = software_stack.get("schedulerVersion")
+        if scheduler_version is not None and scheduler_version not in SUPPORTED_SLURM_VERSIONS:
+            supported = ", ".join(sorted(SUPPORTED_SLURM_VERSIONS))
+            raise ValidationError(
+                f"schedulerVersion '{scheduler_version}' is not supported. "
+                f"Supported versions: {supported}.",
+                {"field": "schedulerVersion"},
+            )
 
 
 def _sanitise_record(item: dict[str, Any]) -> dict[str, Any]:

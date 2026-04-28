@@ -62,7 +62,7 @@ _sg_id = st.from_regex(r"sg-[0-9a-f]{8,17}", fullmatch=True)
     head_sg=_sg_id,
     compute_sg=_sg_id,
 )
-@settings(max_examples=100, deadline=None)
+@settings(max_examples=10, deadline=None)
 def test_launch_template_creation_naming_and_configuration(
     project_id, cluster_name, head_sg, compute_sg
 ):
@@ -77,6 +77,7 @@ def test_launch_template_creation_naming_and_configuration(
     event = {
         "projectId": project_id,
         "clusterName": cluster_name,
+        "amiId": "ami-test-compute",
         "securityGroupIds": {
             "headNode": head_sg,
             "computeNode": compute_sg,

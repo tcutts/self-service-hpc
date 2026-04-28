@@ -209,6 +209,7 @@ def _handle_default_ami(event: dict[str, Any]) -> dict[str, Any]:
 
     Query parameters:
         arch: CPU architecture — "x86_64" (default) or "arm64"
+        version: Slurm version — e.g. "24.11", "25.05", "25.11" (optional)
     """
     if not is_authenticated(event):
         raise AuthorisationError("Authentication is required.")
@@ -221,7 +222,11 @@ def _handle_default_ami(event: dict[str, Any]) -> dict[str, Any]:
             {"field": "arch", "validValues": ["x86_64", "arm64"]},
         )
 
-    ami = get_latest_pcs_ami(arch)
+    version = params.get("version")
+    if version is not None:
+        ami = get_latest_pcs_ami(arch, slurm_version=version.strip())
+    else:
+        ami = get_latest_pcs_ami(arch)
     return _response(200, ami)
 
 

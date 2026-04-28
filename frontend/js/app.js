@@ -1302,7 +1302,11 @@ function renderTemplatesPage(container) {
         </div>
         <div class="form-group">
           <label for="new-tpl-scheduler-ver">Scheduler Version</label>
-          <input type="text" id="new-tpl-scheduler-ver" value="25.11" placeholder="25.11" />
+          <select id="new-tpl-scheduler-ver">
+            <option value="24.11">24.11</option>
+            <option value="25.05">25.05</option>
+            <option value="25.11" selected>25.11</option>
+          </select>
         </div>
         <div class="form-group">
           <label for="new-tpl-cuda">CUDA Version (optional, for GPU templates)</label>
@@ -1490,7 +1494,11 @@ function showEditTemplateDialog(template) {
         </div>
         <div class="form-group">
           <label for="edit-tpl-scheduler-ver">Scheduler Version</label>
-          <input type="text" id="edit-tpl-scheduler-ver" value="${esc(sw.schedulerVersion || '')}" />
+          <select id="edit-tpl-scheduler-ver">
+            <option value="24.11"${sw.schedulerVersion === '24.11' ? ' selected' : ''}>24.11</option>
+            <option value="25.05"${sw.schedulerVersion === '25.05' ? ' selected' : ''}>25.05</option>
+            <option value="25.11"${!sw.schedulerVersion || sw.schedulerVersion === '25.11' ? ' selected' : ''}>25.11</option>
+          </select>
         </div>
         <div class="form-group">
           <label for="edit-tpl-cuda">CUDA Version (optional, for GPU templates)</label>

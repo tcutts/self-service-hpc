@@ -491,6 +491,12 @@ def _handle_recreate_cluster(
     template_id = body.get("templateId", "").strip() if body else ""
     if not template_id:
         template_id = cluster.get("templateId", "")
+    if not template_id:
+        raise ValidationError(
+            f"Cluster '{cluster_name}' has no stored template ID. "
+            "Provide a templateId in the request body to recreate this cluster.",
+            {"clusterName": cluster_name, "field": "templateId"},
+        )
 
     # For storage mode, fall back to the stored value (or "mountpoint") when
     # the request body doesn't supply one.

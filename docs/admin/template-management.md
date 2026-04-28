@@ -8,6 +8,29 @@ For the full API reference for template endpoints, see the [API Reference](../ap
 
 Cluster templates define the configuration used when creating new clusters. Each template specifies instance types, node counts, AMI, and scheduler configuration. Templates are shared across all projects — any project member can create a cluster from any template.
 
+## Scheduler Version
+
+Each template includes a **Scheduler Version** field that determines the Slurm version used when creating PCS clusters and the OS prefix used when resolving AMIs for node groups.
+
+The field is presented as a dropdown in both the create and edit template forms. The supported versions are:
+
+| Slurm Version | AMI OS Prefix |
+|---------------|---------------|
+| 24.11         | amzn2         |
+| 25.05         | amzn2         |
+| 25.11         | al2023        |
+
+The default version is **25.11**.
+
+The selected version controls two things during cluster creation:
+
+1. The Slurm scheduler version passed to the PCS `CreateCluster` API call.
+2. The AMI name pattern used to resolve the correct PCS sample AMI for compute and login node groups.
+
+Both values are derived from the same template setting, ensuring the cluster and its node group AMIs always use a matching Slurm version.
+
+The supported versions and their OS mappings are maintained in a single shared configuration constant (`SUPPORTED_SLURM_VERSIONS` in `lambda/shared/pcs_versions.py`). When AWS PCS adds a new Slurm version or deprecates an existing one, update this constant and the frontend dropdown options to keep them in sync.
+
 ## Bulk Template Actions
 
 Administrators can select multiple templates and delete them all at once, rather than deleting each template individually.

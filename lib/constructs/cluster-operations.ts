@@ -91,6 +91,7 @@ export class ClusterOperations extends Construct {
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'cluster_creation.step_handler',
       code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       environment: {
@@ -577,8 +578,6 @@ export class ClusterOperations extends Construct {
     checkBudgetBreach.addCatch(failureChain, catchConfig);
     resolveTemplate.addCatch(failureChain, catchConfig);
     createIamResources.addCatch(failureChain, catchConfig);
-    waitForInstanceProfiles.addCatch(failureChain, catchConfig);
-    createLaunchTemplates.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
@@ -622,16 +621,26 @@ export class ClusterOperations extends Construct {
       .when(sfn.Condition.stringEquals('$.storageMode', 'lustre'), lustreStorageBranch)
       .otherwise(configureMountpointS3Iam);
 
-    // PCS branch: create cluster → wait for active (shared by both storage modes)
+    // PCS branch: create cluster → wait for active
     const pcsBranch = createPcsCluster
       .next(checkPcsClusterStatus)
       .next(isPcsClusterActive);
 
-    // --- Parallel execution: storage provisioning and PCS cluster creation run concurrently ---
+    // Instance profile + launch template branch: wait for propagation → create templates
+    const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
+    const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
+      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), createLaunchTemplates)
+      .otherwise(instanceProfileWaitLoop);
 
-    const parallelStorageAndPcs = new sfn.Parallel(this, 'ParallelStorageAndPcs', {
-      comment: 'Provision storage and create PCS cluster in parallel',
+    const launchTemplateBranch = waitForInstanceProfiles
+      .next(areInstanceProfilesReady);
+
+    // --- Parallel execution: storage, PCS cluster, and launch templates all run concurrently ---
+
+    const parallelProvision = new sfn.Parallel(this, 'ParallelProvision', {
+      comment: 'Provision storage, create PCS cluster, and prepare launch templates in parallel',
       resultSelector: {
+        // Branch 0: storage
         'projectId.$': '$[0].projectId',
         'clusterName.$': '$[0].clusterName',
         'templateId.$': '$[0].templateId',
@@ -648,43 +657,39 @@ export class ClusterOperations extends Construct {
         'fsxDraId.$': '$[0].fsxDraId',
         'storageMode.$': '$[0].storageMode',
         'lustreCapacityGiB.$': '$[0].lustreCapacityGiB',
+        // Branch 1: PCS cluster
         'pcsClusterId.$': '$[1].pcsClusterId',
         'pcsClusterArn.$': '$[1].pcsClusterArn',
-        // Template-driven fields
+        // Template-driven fields (from any branch — all start with same payload)
         'loginInstanceType.$': '$[0].loginInstanceType',
         'instanceTypes.$': '$[0].instanceTypes',
         'maxNodes.$': '$[0].maxNodes',
         'minNodes.$': '$[0].minNodes',
         'purchaseOption.$': '$[0].purchaseOption',
-        // PCS compute node group fields
-        'loginInstanceProfileArn.$': '$[0].loginInstanceProfileArn',
-        'computeInstanceProfileArn.$': '$[0].computeInstanceProfileArn',
-        'loginLaunchTemplateId.$': '$[0].loginLaunchTemplateId',
-        'computeLaunchTemplateId.$': '$[0].computeLaunchTemplateId',
+        // Branch 2: instance profiles + launch templates
+        'loginInstanceProfileArn.$': '$[2].loginInstanceProfileArn',
+        'computeInstanceProfileArn.$': '$[2].computeInstanceProfileArn',
+        'loginLaunchTemplateId.$': '$[2].loginLaunchTemplateId',
+        'computeLaunchTemplateId.$': '$[2].computeLaunchTemplateId',
+        // AMI IDs (needed by node group creation as fallback)
+        'amiId.$': '$[0].amiId',
+        'loginAmiId.$': '$[0].loginAmiId',
       },
       resultPath: '$',
     });
 
-    parallelStorageAndPcs.branch(storageModeChoice, pcsBranch);
-    parallelStorageAndPcs.addCatch(failureChain, catchConfig);
+    parallelProvision.branch(storageModeChoice, pcsBranch, launchTemplateBranch);
+    parallelProvision.addCatch(failureChain, catchConfig);
 
-    // Instance profile wait loop: check ready → if not ready, wait → check again
-    const instanceProfileWaitLoop = waitForInstanceProfilesPropagation.next(waitForInstanceProfiles);
-    createLaunchTemplates.next(parallelStorageAndPcs);
-    const areInstanceProfilesReady = new sfn.Choice(this, 'AreInstanceProfilesReady')
-      .when(sfn.Condition.booleanEquals('$.instanceProfilesReady', true), createLaunchTemplates)
-      .otherwise(instanceProfileWaitLoop);
-
-    // Chain: validate → budget → resolve template → create IAM → wait for instance profiles (loop)
-    //   → launch templates → parallel(storage + PCS) → login nodes → compute → queue → tag → record → success
+    // Chain: validate → budget → resolve template → create IAM → parallel(storage + PCS + launch templates)
+    //   → login nodes → compute → queue → tag → record → success
     const creationDefinition = validateAndRegisterName
       .next(checkBudgetBreach)
       .next(resolveTemplate)
       .next(createIamResources)
-      .next(waitForInstanceProfiles)
-      .next(areInstanceProfilesReady);
+      .next(parallelProvision);
 
-    // Post-parallel chain: both storage modes converge here
+    // Post-parallel chain: all branches converge here
     const postBranchChain = createLoginNodeGroup
       .next(createComputeNodeGroup)
       .next(createPcsQueue)
@@ -692,7 +697,7 @@ export class ClusterOperations extends Construct {
       .next(recordCluster)
       .next(creationSuccess);
 
-    parallelStorageAndPcs.next(createLoginNodeGroup);
+    parallelProvision.next(createLoginNodeGroup);
 
     this.clusterCreationStateMachine = new sfn.StateMachine(this, 'ClusterCreationStateMachine', {
       stateMachineName: 'hpc-cluster-creation',

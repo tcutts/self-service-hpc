@@ -169,7 +169,7 @@ def test_create_pcs_cluster_non_subnet_params_unchanged(
     )
 
     # scheduler
-    assert call_kwargs["scheduler"] == {"type": "SLURM", "version": "24.11"}, (
+    assert call_kwargs["scheduler"] == {"type": "SLURM", "version": "25.11"}, (
         f"Unexpected scheduler: {call_kwargs['scheduler']}"
     )
 
