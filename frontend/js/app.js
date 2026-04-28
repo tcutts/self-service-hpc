@@ -1280,12 +1280,17 @@ function renderTemplatesPage(container) {
         <input type="number" id="new-tpl-max" value="4" min="1" />
       </div>
       <div class="form-group">
-        <label for="new-tpl-ami">AMI ID</label>
+        <label for="new-tpl-ami">Compute AMI ID</label>
         <div style="display:flex;gap:0.5rem">
           <input type="text" id="new-tpl-ami" placeholder="Auto-detected from instance types" style="flex:1" />
           <button class="btn" type="button" id="btn-detect-ami">Detect</button>
         </div>
         <small class="form-hint" id="ami-hint">Enter compute instance types above, then click Detect to find the latest PCS sample AMI.</small>
+      </div>
+      <div class="form-group">
+        <label for="new-tpl-login-ami">Login Node AMI ID (optional)</label>
+        <input type="text" id="new-tpl-login-ami" placeholder="Same as compute AMI if blank" />
+        <small class="form-hint">Only needed when the login node uses a different architecture than compute nodes.</small>
       </div>
       <fieldset class="form-fieldset">
         <legend>Software Stack</legend>
@@ -1351,6 +1356,7 @@ function renderTemplatesPage(container) {
     const minNodes = parseInt(document.getElementById('new-tpl-min').value, 10) || 0;
     const maxNodes = parseInt(document.getElementById('new-tpl-max').value, 10) || 4;
     const amiId = document.getElementById('new-tpl-ami').value.trim();
+    const loginAmiId = document.getElementById('new-tpl-login-ami').value.trim();
     const scheduler = document.getElementById('new-tpl-scheduler').value;
     const schedulerVersion = document.getElementById('new-tpl-scheduler-ver').value.trim();
     const cudaVersion = document.getElementById('new-tpl-cuda').value.trim();
@@ -1374,10 +1380,12 @@ function renderTemplatesPage(container) {
     if (cudaVersion) softwareStack.cudaVersion = cudaVersion;
 
     try {
-      await apiCall('POST', '/templates', {
+      const body = {
         templateId, templateName, description, instanceTypes,
         loginInstanceType, minNodes, maxNodes, amiId, softwareStack,
-      });
+      };
+      if (loginAmiId) body.loginAmiId = loginAmiId;
+      await apiCall('POST', '/templates', body);
       showToast(`Template '${templateId}' created`);
       document.getElementById('add-template-form').style.display = 'none';
       loadTemplates();
@@ -1460,12 +1468,17 @@ function showEditTemplateDialog(template) {
         <input type="number" id="edit-tpl-max" value="${template.maxNodes != null ? template.maxNodes : 4}" min="1" />
       </div>
       <div class="form-group">
-        <label for="edit-tpl-ami">AMI ID</label>
+        <label for="edit-tpl-ami">Compute AMI ID</label>
         <div style="display:flex;gap:0.5rem">
           <input type="text" id="edit-tpl-ami" value="${esc(template.amiId || '')}" style="flex:1" />
           <button class="btn" type="button" id="btn-edit-detect-ami">Detect</button>
         </div>
         <small class="form-hint" id="edit-ami-hint">Click Detect to find the latest PCS sample AMI for the current instance types.</small>
+      </div>
+      <div class="form-group">
+        <label for="edit-tpl-login-ami">Login Node AMI ID (optional)</label>
+        <input type="text" id="edit-tpl-login-ami" value="${esc(template.loginAmiId || '')}" />
+        <small class="form-hint">Only needed when the login node uses a different architecture than compute nodes.</small>
       </div>
       <fieldset class="form-fieldset">
         <legend>Software Stack</legend>
@@ -1535,6 +1548,7 @@ function showEditTemplateDialog(template) {
     const minNodes = parseInt(document.getElementById('edit-tpl-min').value, 10) || 0;
     const maxNodes = parseInt(document.getElementById('edit-tpl-max').value, 10) || 4;
     const amiId = document.getElementById('edit-tpl-ami').value.trim();
+    const loginAmiId = document.getElementById('edit-tpl-login-ami').value.trim();
     const scheduler = document.getElementById('edit-tpl-scheduler').value;
     const schedulerVersion = document.getElementById('edit-tpl-scheduler-ver').value.trim();
     const cudaVersion = document.getElementById('edit-tpl-cuda').value.trim();
@@ -1562,10 +1576,12 @@ function showEditTemplateDialog(template) {
     saveBtn.textContent = 'Saving…';
 
     try {
-      await apiCall('PUT', `/templates/${encodeURIComponent(template.templateId)}`, {
+      const body = {
         templateName, description, instanceTypes,
         loginInstanceType, minNodes, maxNodes, amiId, softwareStack,
-      });
+      };
+      if (loginAmiId) body.loginAmiId = loginAmiId;
+      await apiCall('PUT', `/templates/${encodeURIComponent(template.templateId)}`, body);
       showToast(`Template '${template.templateId}' updated`);
       document.removeEventListener('keydown', onKeyDown);
       modal.remove();

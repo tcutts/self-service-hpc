@@ -41,6 +41,7 @@ def create_template(
     max_nodes: int,
     ami_id: str,
     software_stack: dict[str, Any],
+    login_ami_id: str = "",
 ) -> dict[str, Any]:
     """Create a new cluster template in DynamoDB.
 
@@ -69,6 +70,7 @@ def create_template(
         "minNodes": min_nodes,
         "maxNodes": max_nodes,
         "amiId": ami_id,
+        "loginAmiId": login_ami_id,
         "softwareStack": software_stack,
         "createdAt": now,
     }
@@ -101,6 +103,7 @@ def update_template(
     max_nodes: int,
     ami_id: str,
     software_stack: dict[str, Any],
+    login_ami_id: str = "",
 ) -> dict[str, Any]:
     """Update an existing cluster template in DynamoDB.
 
@@ -129,7 +132,8 @@ def update_template(
                 "SET templateName = :tn, description = :desc, "
                 "instanceTypes = :it, loginInstanceType = :lit, "
                 "minNodes = :minN, maxNodes = :maxN, "
-                "amiId = :ami, softwareStack = :ss, updatedAt = :ua"
+                "amiId = :ami, loginAmiId = :loginAmi, "
+                "softwareStack = :ss, updatedAt = :ua"
             ),
             ExpressionAttributeValues={
                 ":tn": template_name,
@@ -139,6 +143,7 @@ def update_template(
                 ":minN": min_nodes,
                 ":maxN": max_nodes,
                 ":ami": ami_id,
+                ":loginAmi": login_ami_id,
                 ":ss": software_stack,
                 ":ua": now,
             },

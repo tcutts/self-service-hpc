@@ -568,6 +568,7 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
     cluster_name: str = event["clusterName"]
     security_group_ids: dict[str, str] = event["securityGroupIds"]
+    ami_id: str = event.get("amiId", "")
 
     tags = build_resource_tags(project_id, cluster_name)
     tag_specs = [
@@ -579,21 +580,27 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
             f"hpc-{project_id}-{cluster_name}-login",
             security_group_ids["headNode"],
             "loginLaunchTemplateId",
+            event.get("loginAmiId", "") or ami_id,
         ),
         (
             f"hpc-{project_id}-{cluster_name}-compute",
             security_group_ids["computeNode"],
             "computeLaunchTemplateId",
+            ami_id,
         ),
     ]
 
     result: dict[str, Any] = {**event}
 
-    for template_name, sg_id, event_key in templates:
+    for template_name, sg_id, event_key, template_ami_id in templates:
+        lt_data: dict[str, Any] = {"SecurityGroupIds": [sg_id]}
+        if template_ami_id:
+            lt_data["ImageId"] = template_ami_id
+
         try:
             response = ec2_client.create_launch_template(
                 LaunchTemplateName=template_name,
-                LaunchTemplateData={"SecurityGroupIds": [sg_id]},
+                LaunchTemplateData=lt_data,
                 TagSpecifications=tag_specs,
             )
             template_id = response["LaunchTemplate"]["LaunchTemplateId"]
@@ -1808,6 +1815,8 @@ def resolve_template(event: dict[str, Any]) -> dict[str, Any]:
             "loginInstanceType": item.get("loginInstanceType", "c7g.medium"),
             "instanceTypes": item.get("instanceTypes", ["c7g.medium"]),
             "purchaseOption": item.get("purchaseOption", "ONDEMAND"),
+            "amiId": item.get("amiId", ""),
+            "loginAmiId": item.get("loginAmiId", ""),
         }
         # Only set minNodes/maxNodes from template when not already provided
         if "minNodes" not in event or event["minNodes"] is None:

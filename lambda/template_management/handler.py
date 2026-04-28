@@ -122,6 +122,7 @@ def _handle_create_template(event: dict[str, Any]) -> dict[str, Any]:
         max_nodes=max_nodes,
         ami_id=ami_id,
         software_stack=software_stack,
+        login_ami_id=body.get("loginAmiId", "").strip() if isinstance(body.get("loginAmiId"), str) else "",
     )
     logger.info("Template created: %s by %s", template_id, caller)
     return _response(201, template_record)
@@ -197,6 +198,7 @@ def _handle_update_template(event: dict[str, Any], template_id: str) -> dict[str
         max_nodes=max_nodes,
         ami_id=ami_id,
         software_stack=software_stack,
+        login_ami_id=body.get("loginAmiId", "").strip() if isinstance(body.get("loginAmiId"), str) else "",
     )
     logger.info("Template updated: %s by %s", template_id, caller)
     return _response(200, updated_record)
