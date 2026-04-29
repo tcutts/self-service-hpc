@@ -1680,7 +1680,7 @@ function renderClustersPage(container, params) {
 
   container.innerHTML = `
     <div class="page-header">
-      <h2>Cluster Operations</h2>
+      <h2>Clusters</h2>
     </div>
     <div class="detail-panel" style="margin-bottom:1rem">
       <div style="display:flex;gap:0.75rem;align-items:flex-end">
@@ -2062,12 +2062,45 @@ async function loadClusterDetail(projectId, clusterName) {
     </div>`;
 
     // ACTIVE: show connection info
-    if (cluster.status === 'ACTIVE' && cluster.connectionInfo) {
+    if (cluster.status === 'ACTIVE') {
+      const ci = cluster.connectionInfo || {};
+      const hasConnection = ci.ssh || ci.dcv || ci.ssm;
+
       html += `<div class="connection-info">
-        <h4>Connection Information</h4>
-        ${cluster.connectionInfo.ssh ? `<div><strong>SSH:</strong><code>${esc(cluster.connectionInfo.ssh)}</code></div>` : ''}
-        ${cluster.connectionInfo.dcv ? `<div><strong>DCV:</strong><code>${esc(cluster.connectionInfo.dcv)}</code></div>` : ''}
-      </div>`;
+        <h4>Connection Details</h4>`;
+
+      if (hasConnection) {
+        if (ci.ssh) {
+          html += `<div class="connection-method">
+            <span class="label">SSH</span>
+            <div class="connection-method-value">
+              <code>${esc(ci.ssh)}</code>
+              <button class="copy-btn" type="button" aria-label="Copy SSH command" onclick="copyToClipboard('${esc(ci.ssh).replace(/'/g, "\\'")}', this)">Copy</button>
+            </div>
+          </div>`;
+        }
+        if (ci.dcv) {
+          html += `<div class="connection-method">
+            <span class="label">DCV (Remote Desktop)</span>
+            <div class="connection-method-value">
+              <a href="${esc(ci.dcv)}" target="_blank" rel="noopener noreferrer">${esc(ci.dcv)}</a>
+            </div>
+          </div>`;
+        }
+        if (ci.ssm) {
+          html += `<div class="connection-method">
+            <span class="label">SSM Session Manager</span>
+            <div class="connection-method-value">
+              <code>${esc(ci.ssm)}</code>
+              <button class="copy-btn" type="button" aria-label="Copy SSM command" onclick="copyToClipboard('${esc(ci.ssm).replace(/'/g, "\\'")}', this)">Copy</button>
+            </div>
+          </div>`;
+        }
+      } else {
+        html += `<p class="connection-unavailable">Connection details are not yet available</p>`;
+      }
+
+      html += `</div>`;
     }
 
     // CREATING: show progress
@@ -2474,6 +2507,50 @@ function attachAutocomplete(inputId, fetchFn, delay = 200) {
   });
 }
 
+/* ============================================================
+   Copy to Clipboard
+   ============================================================ */
+
+/**
+ * Copy the given text to the system clipboard.
+ * Falls back to selecting the text in the adjacent <code> element
+ * when the Clipboard API is unavailable (e.g. insecure context).
+ *
+ * @param {string} text - The text to copy.
+ * @param {HTMLElement} buttonElement - The copy button that was clicked.
+ */
+function copyToClipboard(text, buttonElement) {
+  function showCopiedIndicator() {
+    const toast = document.createElement('span');
+    toast.className = 'copy-toast';
+    toast.textContent = 'Copied!';
+    toast.setAttribute('role', 'status');
+    buttonElement.parentElement.appendChild(toast);
+    setTimeout(() => toast.remove(), 1500);
+  }
+
+  function fallbackSelect() {
+    const codeEl = buttonElement.parentElement.querySelector('code');
+    if (codeEl) {
+      const range = document.createRange();
+      range.selectNodeContents(codeEl);
+      const sel = window.getSelection();
+      sel.removeAllRanges();
+      sel.addRange(range);
+    }
+  }
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(function () {
+      showCopiedIndicator();
+    }).catch(function () {
+      fallbackSelect();
+    });
+  } else {
+    fallbackSelect();
+  }
+}
+
 function esc(str) {
   const div = document.createElement('div');
   div.textContent = String(str);
@@ -2601,6 +2678,8 @@ function renderApp() {
         <a href="#" data-page="users">User Management</a>
         ${membersTab}
         <a href="#" data-page="accounting">Accounting</a>
+        <hr/>
+        <a href="docs/index.html" target="_blank" rel="noopener noreferrer" class="nav-external">Documentation ↗</a>
       </nav>
       <main id="main-content"></main>
     </div>
@@ -2611,7 +2690,7 @@ function renderApp() {
     renderLoginPage();
   });
 
-  document.querySelectorAll('nav a').forEach(a => {
+  document.querySelectorAll('nav a[data-page]').forEach(a => {
     a.addEventListener('click', (e) => {
       e.preventDefault();
       navigate(a.dataset.page);

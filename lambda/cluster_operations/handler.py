@@ -438,12 +438,12 @@ def _handle_get_cluster(
     # Enrich active clusters with connection info
     if cluster.get("status") == "ACTIVE":
         login_ip = cluster.get("loginNodeIp", "")
+        instance_id = cluster.get("loginNodeInstanceId", "")
         ssh_port = cluster.get("sshPort", 22)
         dcv_port = cluster.get("dcvPort", 8443)
-        cluster["connectionInfo"] = {
-            "ssh": f"ssh -p {ssh_port} <username>@{login_ip}" if login_ip else "",
-            "dcv": f"https://{login_ip}:{dcv_port}" if login_ip else "",
-        }
+        cluster["connectionInfo"] = build_connection_info(
+            login_ip, instance_id, ssh_port, dcv_port
+        )
 
     # Include progress fields for clusters in CREATING status
     if cluster.get("status") == "CREATING":
@@ -657,6 +657,24 @@ def _handle_force_fail_cluster(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def build_connection_info(
+    login_ip: str,
+    instance_id: str,
+    ssh_port: int,
+    dcv_port: int,
+) -> dict[str, str]:
+    """Build the connectionInfo dict for an active cluster.
+
+    Returns a dict with ``ssh``, ``dcv``, and ``ssm`` fields.
+    Fields are empty strings when the corresponding source value is empty.
+    """
+    return {
+        "ssh": f"ssh -p {ssh_port} <username>@{login_ip}" if login_ip else "",
+        "dcv": f"https://{login_ip}:{dcv_port}" if login_ip else "",
+        "ssm": f"aws ssm start-session --target {instance_id}" if instance_id else "",
+    }
 
 
 def _parse_body(event: dict[str, Any]) -> dict[str, Any]:

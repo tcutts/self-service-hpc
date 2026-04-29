@@ -21,7 +21,8 @@ The response for an active cluster includes connection information:
   "loginNodeIp": "54.123.45.67",
   "connectionInfo": {
     "ssh": "ssh -p 22 jsmith@54.123.45.67",
-    "dcv": "https://54.123.45.67:8443"
+    "dcv": "https://54.123.45.67:8443",
+    "ssm": "aws ssm start-session --target i-0abc123def456789a"
   }
 }
 ```
@@ -64,6 +65,32 @@ DCV is particularly useful for:
 - Interactive debugging
 
 > **Note:** DCV uses a self-signed certificate by default. Your browser may show a security warning — this is expected for the initial deployment.
+
+## Connecting via SSM Session Manager
+
+AWS Systems Manager (SSM) Session Manager provides a secure shell to the login node without requiring open inbound ports or SSH keys. This is useful when SSH access is restricted by network policy or when you prefer not to manage SSH keys.
+
+### Prerequisites
+
+- **AWS CLI v2** — install from [https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html](https://docs.aws.amazon.com/cli/latest/userguide/install-cliv2.html)
+- **Session Manager plugin** — install from [https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html](https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html)
+- Valid AWS credentials configured for the account where the cluster is deployed.
+
+### Starting a Session
+
+Use the SSM command from the cluster connection details:
+
+```bash
+aws ssm start-session --target <instanceId>
+```
+
+Replace `<instanceId>` with the login node's EC2 instance ID from the cluster details (e.g. `i-0abc123def456789a`).
+
+### Key Points
+
+- SSM sessions do not require inbound security group rules — traffic is routed through the Systems Manager service.
+- You connect as the `ssm-user` by default. To switch to your POSIX user account after connecting, run `sudo su - <your-username>`.
+- Session activity can be logged to CloudWatch or S3 if configured by the platform administrator.
 
 ## Submitting Jobs with Slurm
 

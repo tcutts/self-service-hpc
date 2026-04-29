@@ -133,6 +133,7 @@ export class ClusterOperations extends Construct {
         'pcs:DeleteComputeNodeGroup',
         'pcs:DeleteQueue',
         'pcs:TagResource',
+        'pcs:ListComputeNodeGroupInstances',
       ],
       resources: ['*'],
     }));
@@ -185,6 +186,7 @@ export class ClusterOperations extends Construct {
         'ec2:DescribeInstanceTypes',
         'ec2:DescribeInstanceTypeOfferings',
         'ec2:DescribeImages',
+        'ec2:DescribeInstances',
         'ec2:RunInstances',
         'ec2:CreateFleet',
       ],
@@ -286,12 +288,14 @@ export class ClusterOperations extends Construct {
       memorySize: 512,
       environment: {
         CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+        CLUSTER_NAME_REGISTRY_TABLE_NAME: props.clusterNameRegistryTable.tableName,
       },
       description: 'Executes individual steps of the cluster destruction workflow',
     });
 
     // Grant destruction step Lambda permissions
     props.clustersTable.grantReadWriteData(clusterDestructionStepLambda);
+    props.clusterNameRegistryTable.grantReadWriteData(clusterDestructionStepLambda);
 
     clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
       actions: [
@@ -299,6 +303,8 @@ export class ClusterOperations extends Construct {
         'pcs:DeleteComputeNodeGroup',
         'pcs:DeleteQueue',
         'pcs:DescribeCluster',
+        'pcs:GetComputeNodeGroup',
+        'pcs:GetQueue',
       ],
       resources: ['*'],
     }));
@@ -520,6 +526,17 @@ export class ClusterOperations extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
+    // Step 7c: Resolve login node details (IP + instance ID)
+    const resolveLoginNodeDetails = new tasks.LambdaInvoke(this, 'ResolveLoginNodeDetails', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'resolve_login_node_details',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
     // Step 8: Create PCS queue
     const createPcsQueue = new tasks.LambdaInvoke(this, 'CreatePcsQueue', {
       lambdaFunction: clusterCreationStepLambda,
@@ -617,6 +634,7 @@ export class ClusterOperations extends Construct {
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     checkNodeGroupsStatus.addCatch(failureChain, catchConfig);
+    resolveLoginNodeDetails.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
     tagResources.addCatch(failureChain, catchConfig);
     recordCluster.addCatch(failureChain, catchConfig);
@@ -636,7 +654,7 @@ export class ClusterOperations extends Construct {
     // Node group wait loop: check status → if not active, wait → check again
     const nodeGroupWaitLoop = waitForNodeGroups.next(checkNodeGroupsStatus);
     const areNodeGroupsActive = new sfn.Choice(this, 'AreNodeGroupsActive')
-      .when(sfn.Condition.booleanEquals('$.nodeGroupsActive', true), createPcsQueue)
+      .when(sfn.Condition.booleanEquals('$.nodeGroupsActive', true), resolveLoginNodeDetails)
       .otherwise(nodeGroupWaitLoop);
 
     // --- Storage branch: choice between lustre (FSx) and mountpoint (S3 IAM) ---
@@ -738,7 +756,9 @@ export class ClusterOperations extends Construct {
       .next(checkNodeGroupsStatus)
       .next(areNodeGroupsActive);
 
-    // Continue after node groups are active: queue → tag → record → success
+    // Continue after node groups are active: resolve login node → queue → tag → record → success
+    resolveLoginNodeDetails.next(createPcsQueue);
+
     createPcsQueue
       .next(tagResources)
       .next(recordCluster)
@@ -783,12 +803,38 @@ export class ClusterOperations extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(60)),
     });
 
-    // Step 3: Delete PCS resources
+    // Step 3: Delete PCS resources (initiate sub-resource deletions)
     const deletePcsResources = new tasks.LambdaInvoke(this, 'DeletePcsResources', {
       lambdaFunction: clusterDestructionStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
         'step': 'delete_pcs_resources',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Step 3b: Check PCS sub-resource deletion status (with wait loop)
+    const checkPcsDeletionStatus = new tasks.LambdaInvoke(this, 'CheckPcsDeletionStatus', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_pcs_deletion_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForPcsDeletion = new sfn.Wait(this, 'WaitForPcsDeletion', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
+    // Step 3c: Delete PCS cluster (after sub-resources confirmed deleted)
+    const deletePcsCluster = new tasks.LambdaInvoke(this, 'DeletePcsCluster', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'delete_pcs_cluster',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -851,10 +897,33 @@ export class ClusterOperations extends Construct {
       resultPath: '$.removePolicyResult',
     });
 
+    // Step: Deregister cluster name from ClusterNameRegistry
+    const deregisterClusterName = new tasks.LambdaInvoke(this, 'DeregisterClusterName', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'deregister_cluster_name',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Fail state for PCS deletion errors
+    const destructionFailed = new sfn.Fail(this, 'DestructionFailed', {
+      cause: 'PCS resource cleanup failed',
+      error: 'PcsCleanupError',
+    });
+
     // Storage mode choice for destruction: remove S3 policy before IAM cleanup for mountpoint clusters
     const storageModeDestroyChoice = new sfn.Choice(this, 'StorageModeDestroyChoice')
       .when(sfn.Condition.stringEquals('$.storageMode', 'mountpoint'), removeMountpointS3Policy)
       .otherwise(deleteIamResources);
+
+    // Error catching on PCS deletion steps — route to DestructionFailed
+    const pcsCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
+    deletePcsResources.addCatch(destructionFailed, pcsCatchConfig);
+    checkPcsDeletionStatus.addCatch(destructionFailed, pcsCatchConfig);
+    deletePcsCluster.addCatch(destructionFailed, pcsCatchConfig);
 
     // Export wait loop: check status → if not complete, wait → check again
     const exportWaitLoop = waitForExport.next(checkFsxExportStatus);
@@ -862,13 +931,23 @@ export class ClusterOperations extends Construct {
       .when(sfn.Condition.booleanEquals('$.exportComplete', true), deletePcsResources)
       .otherwise(exportWaitLoop);
 
+    // PCS deletion wait loop: check status → if not all deleted, wait → check again
+    const pcsDeletionWaitLoop = waitForPcsDeletion.next(checkPcsDeletionStatus);
+    const arePcsSubResourcesDeleted = new sfn.Choice(this, 'ArePcsSubResourcesDeleted')
+      .when(sfn.Condition.booleanEquals('$.pcsSubResourcesDeleted', true), deletePcsCluster)
+      .otherwise(pcsDeletionWaitLoop);
+
     // Chain: steps 1-2 → export wait loop → steps 3-5 → success
     const destructionDefinition = createFsxExportTask
       .next(checkFsxExportStatus)
       .next(isExportComplete);
 
-    // Post-export chain: PCS → FSx → StorageModeDestroyChoice → IAM → record → success
+    // Post-export chain: DeletePcsResources → CheckPcsDeletionStatus → wait loop → DeletePcsCluster → FSx → StorageMode → IAM → LaunchTemplates → DeregisterClusterName → Record → success
     deletePcsResources
+      .next(checkPcsDeletionStatus)
+      .next(arePcsSubResourcesDeleted);
+
+    deletePcsCluster
       .next(deleteFsxFilesystem)
       .next(storageModeDestroyChoice);
 
@@ -876,6 +955,7 @@ export class ClusterOperations extends Construct {
     removeMountpointS3Policy.next(deleteIamResources);
     deleteIamResources
       .next(deleteLaunchTemplates)
+      .next(deregisterClusterName)
       .next(recordClusterDestroyed)
       .next(destructionSuccess);
 
@@ -947,6 +1027,8 @@ export class ClusterOperations extends Construct {
         'pcs:DeleteComputeNodeGroup',
         'pcs:DeleteQueue',
         'pcs:DescribeCluster',
+        'pcs:GetComputeNodeGroup',
+        'pcs:GetQueue',
       ],
       resources: ['*'],
     }));

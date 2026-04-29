@@ -8,16 +8,20 @@ Step Functions passes to the next step.
 The destruction workflow:
     1. Create FSx data repository export task (sync data back to S3)
     2. Wait for export to complete (with failure handling)
-    3. Delete PCS compute node groups, queue, and cluster
-    4. Delete FSx for Lustre filesystem
-    5. Update DynamoDB cluster record (status DESTROYED, destroyedAt)
+    3. Initiate deletion of PCS compute node groups and queue
+    4. Poll PCS sub-resource deletion status until complete
+    5. Delete PCS cluster (after sub-resources confirmed deleted)
+    6. Delete FSx for Lustre filesystem
+    7. Deregister cluster name from ClusterNameRegistry
+    8. Update DynamoDB cluster record (status DESTROYED, destroyedAt)
 
 **Important**: Home_Directory (EFS) and Project_Storage (S3) are
 retained after destruction — they are NOT deleted.
 
 Environment variables
 ---------------------
-CLUSTERS_TABLE_NAME    DynamoDB Clusters table
+CLUSTERS_TABLE_NAME                DynamoDB Clusters table
+CLUSTER_NAME_REGISTRY_TABLE_NAME   DynamoDB ClusterNameRegistry table
 
 Expected event keys
 -------------------
@@ -34,6 +38,7 @@ from typing import Any
 import boto3
 from botocore.exceptions import ClientError
 
+import cluster_names
 from errors import InternalError
 
 logger = logging.getLogger(__name__)
@@ -208,13 +213,18 @@ def check_fsx_export_status(event: dict[str, Any]) -> dict[str, Any]:
 # ===================================================================
 
 def delete_pcs_resources(event: dict[str, Any]) -> dict[str, Any]:
-    """Delete PCS compute node groups, queue, and cluster (in order).
+    """Initiate deletion of PCS compute node groups and queue.
 
-    Deletion order matters:
+    This step only *initiates* async deletion of sub-resources (node
+    groups and queue).  It does NOT delete the PCS cluster itself —
+    that is handled by the separate ``delete_pcs_cluster_step`` after
+    the state machine has confirmed sub-resources are fully deleted
+    via ``check_pcs_deletion_status``.
+
+    Deletion order:
     1. Compute node group (workers)
     2. Login node group (head node)
     3. Queue
-    4. Cluster
 
     Each deletion is best-effort — failures are logged but do not
     prevent subsequent deletions from being attempted.
@@ -247,19 +257,179 @@ def delete_pcs_resources(event: dict[str, Any]) -> dict[str, Any]:
             _delete_pcs_queue(pcs_cluster_id, queue_id)
         )
 
-    # 4. Delete cluster
-    if pcs_cluster_id:
-        cleanup_results.append(
-            _delete_pcs_cluster(pcs_cluster_id)
-        )
-
     logger.info(
-        "PCS resource cleanup for cluster '%s': %s",
+        "PCS sub-resource deletion initiated for cluster '%s': %s",
         cluster_name,
-        "; ".join(cleanup_results),
+        "; ".join(cleanup_results) if cleanup_results else "no sub-resources",
     )
 
     return {**event, "pcsCleanupResults": cleanup_results}
+
+
+# ===================================================================
+# Step 3b — Check PCS sub-resource deletion status
+# ===================================================================
+
+def check_pcs_deletion_status(event: dict[str, Any]) -> dict[str, Any]:
+    """Poll PCS to check whether node groups and queues have finished deleting.
+
+    For each non-empty sub-resource ID, calls the corresponding PCS
+    describe API.  A ``ResourceNotFoundException`` confirms the resource
+    has been deleted.  Any other response means the resource is still
+    in a transitional state (e.g. DELETING).
+
+    Returns the event with ``pcsSubResourcesDeleted`` set to True when
+    all sub-resources are confirmed deleted, or False if any are still
+    in progress.  Empty IDs are skipped (treated as already deleted).
+    """
+    pcs_cluster_id: str = event.get("pcsClusterId", "")
+    compute_node_group_id: str = event.get("computeNodeGroupId", "")
+    login_node_group_id: str = event.get("loginNodeGroupId", "")
+    queue_id: str = event.get("queueId", "")
+
+    # If there is no PCS cluster, nothing to poll
+    if not pcs_cluster_id:
+        logger.info("No PCS cluster ID — skipping sub-resource polling")
+        return {**event, "pcsSubResourcesDeleted": True}
+
+    all_deleted = True
+
+    # Check compute node group
+    if compute_node_group_id:
+        if not _is_pcs_resource_deleted(
+            lambda: pcs_client.get_compute_node_group(
+                clusterIdentifier=pcs_cluster_id,
+                computeNodeGroupIdentifier=compute_node_group_id,
+            ),
+            f"compute node group '{compute_node_group_id}'",
+        ):
+            all_deleted = False
+
+    # Check login node group
+    if login_node_group_id:
+        if not _is_pcs_resource_deleted(
+            lambda: pcs_client.get_compute_node_group(
+                clusterIdentifier=pcs_cluster_id,
+                computeNodeGroupIdentifier=login_node_group_id,
+            ),
+            f"login node group '{login_node_group_id}'",
+        ):
+            all_deleted = False
+
+    # Check queue
+    if queue_id:
+        if not _is_pcs_resource_deleted(
+            lambda: pcs_client.get_queue(
+                clusterIdentifier=pcs_cluster_id,
+                queueIdentifier=queue_id,
+            ),
+            f"queue '{queue_id}'",
+        ):
+            all_deleted = False
+
+    logger.info(
+        "PCS sub-resource deletion status: all_deleted=%s (cluster=%s)",
+        all_deleted,
+        pcs_cluster_id,
+    )
+
+    return {**event, "pcsSubResourcesDeleted": all_deleted}
+
+
+def _is_pcs_resource_deleted(describe_fn, resource_label: str) -> bool:
+    """Call a PCS describe function and return True if the resource is gone.
+
+    ``ResourceNotFoundException`` means the resource has been deleted.
+    Any other response (including success) means it still exists.
+    """
+    try:
+        describe_fn()
+        logger.info("PCS %s still exists (DELETING)", resource_label)
+        return False
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info("PCS %s confirmed deleted", resource_label)
+            return True
+        # Unexpected error — treat as still existing to be safe
+        logger.warning(
+            "Unexpected error checking PCS %s: %s", resource_label, exc
+        )
+        return False
+
+
+# ===================================================================
+# Step 3c — Delete PCS cluster
+# ===================================================================
+
+def delete_pcs_cluster_step(event: dict[str, Any]) -> dict[str, Any]:
+    """Delete the PCS cluster after sub-resources are confirmed deleted.
+
+    This step is only invoked by the state machine after
+    ``check_pcs_deletion_status`` confirms all sub-resources are gone.
+
+    If ``pcsClusterId`` is empty, the step is a no-op.
+    ``ResourceNotFoundException`` is treated as already deleted (success).
+    Any other failure raises ``InternalError`` to halt the workflow.
+    """
+    pcs_cluster_id: str = event.get("pcsClusterId", "")
+    cluster_name: str = event.get("clusterName", "")
+
+    if not pcs_cluster_id:
+        logger.info("No PCS cluster to delete — skipping")
+        return {**event, "pcsClusterDeleted": True}
+
+    try:
+        pcs_client.delete_cluster(clusterIdentifier=pcs_cluster_id)
+        logger.info(
+            "PCS cluster '%s' deletion initiated for cluster '%s'",
+            pcs_cluster_id,
+            cluster_name,
+        )
+        return {**event, "pcsClusterDeleted": True}
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info(
+                "PCS cluster '%s' already deleted — treating as success",
+                pcs_cluster_id,
+            )
+            return {**event, "pcsClusterDeleted": True}
+        raise InternalError(
+            f"Failed to delete PCS cluster '{pcs_cluster_id}': {exc}"
+        )
+
+
+# ===================================================================
+# Step — Deregister cluster name from ClusterNameRegistry
+# ===================================================================
+
+def deregister_cluster_name_step(event: dict[str, Any]) -> dict[str, Any]:
+    """Remove the cluster name from the ClusterNameRegistry.
+
+    Reads ``CLUSTER_NAME_REGISTRY_TABLE_NAME`` from the environment and
+    calls ``cluster_names.deregister_cluster_name`` to free the name
+    for reuse by any project.
+
+    Adds ``clusterNameDeregistered`` to the returned event.
+    """
+    cluster_name_val: str = event.get("clusterName", "")
+    table_name = os.environ.get("CLUSTER_NAME_REGISTRY_TABLE_NAME", "")
+
+    if not cluster_name_val or not table_name:
+        logger.info(
+            "Skipping cluster name deregistration — clusterName='%s', tableName='%s'",
+            cluster_name_val,
+            table_name,
+        )
+        return {**event, "clusterNameDeregistered": False}
+
+    result = cluster_names.deregister_cluster_name(table_name, cluster_name_val)
+    logger.info(
+        "Cluster name '%s' deregistration result: %s",
+        cluster_name_val,
+        "removed" if result else "not found",
+    )
+
+    return {**event, "clusterNameDeregistered": result}
 
 
 # ===================================================================
@@ -686,6 +856,9 @@ _STEP_DISPATCH.update({
     "create_fsx_export_task": create_fsx_export_task,
     "check_fsx_export_status": check_fsx_export_status,
     "delete_pcs_resources": delete_pcs_resources,
+    "check_pcs_deletion_status": check_pcs_deletion_status,
+    "delete_pcs_cluster": delete_pcs_cluster_step,
+    "deregister_cluster_name": deregister_cluster_name_step,
     "delete_fsx_filesystem": delete_fsx_filesystem,
     "remove_mountpoint_s3_policy": remove_mountpoint_s3_policy,
     "delete_iam_resources": delete_iam_resources,

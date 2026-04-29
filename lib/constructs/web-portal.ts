@@ -65,6 +65,9 @@ export class WebPortal extends Construct {
     // as a second source so the portal works immediately without manual
     // configuration. Later sources overwrite earlier ones, so the generated
     // config replaces the placeholder shipped in the frontend/ directory.
+    //
+    // The docs/ prefix is excluded from pruning so that the separate
+    // DocsDeployment (below) is not wiped out by the --delete flag.
     new s3deploy.BucketDeployment(this, 'WebPortalDeployment', {
       sources: [
         s3deploy.Source.asset(path.join(__dirname, '..', '..', 'frontend')),
@@ -90,6 +93,7 @@ export class WebPortal extends Construct {
       destinationBucket: this.bucket,
       distribution: this.distribution,
       distributionPaths: ['/*'],
+      exclude: ['docs/*'],
     });
 
     // Deploy documentation to S3 under the docs/ prefix

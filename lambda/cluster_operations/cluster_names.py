@@ -5,6 +5,7 @@ Provides functions for:
 - Suggesting cluster names based on project ID with a random suffix
 - Registering cluster names in DynamoDB with cross-project uniqueness
 - Looking up cluster name ownership
+- Deregistering cluster names to free them for reuse
 """
 
 import logging
@@ -117,6 +118,35 @@ def lookup_cluster_name(
     if item is None:
         return None
     return _sanitise_record(item)
+
+
+def deregister_cluster_name(table_name: str, cluster_name: str) -> bool:
+    """Remove a cluster name from the ClusterNameRegistry.
+
+    Deletes the ``CLUSTERNAME#{cluster_name}`` / ``REGISTRY`` item.
+    Uses a condition expression so that the call distinguishes between
+    a successful deletion and a no-op (item already absent).
+
+    Returns True if the item was deleted, False if it did not exist.
+    Unexpected DynamoDB errors are propagated to the caller.
+    """
+    table = dynamodb.Table(table_name)
+    try:
+        table.delete_item(
+            Key={"PK": f"CLUSTERNAME#{cluster_name}", "SK": "REGISTRY"},
+            ConditionExpression="attribute_exists(PK)",
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            logger.info(
+                "Cluster name '%s' was not found in registry — nothing to deregister.",
+                cluster_name,
+            )
+            return False
+        raise
+
+    logger.info("Deregistered cluster name '%s' from registry.", cluster_name)
+    return True
 
 
 def _sanitise_record(item: dict[str, Any]) -> dict[str, Any]:

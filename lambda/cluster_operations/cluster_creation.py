@@ -1436,6 +1436,86 @@ def check_node_groups_status(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step 9c — Resolve login node connection details
+# ===================================================================
+
+def resolve_login_node_details(event: dict[str, Any]) -> dict[str, Any]:
+    """Resolve the login node's EC2 instance ID and public IP.
+
+    Called after node groups are ACTIVE.  Queries EC2 for instances
+    tagged with the login node group ID (``aws:pcs:compute-node-group-id``),
+    then extracts the public IP address.
+
+    Adds ``loginNodeInstanceId`` and ``loginNodeIp`` to the event.
+
+    Raises:
+        InternalError: If no running instances are found or the instance
+            has no public IP address.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event.get("clusterName", "")
+    pcs_cluster_id: str = event["pcsClusterId"]
+    login_node_group_id: str = event["loginNodeGroupId"]
+
+    _update_step_progress(project_id, cluster_name, 10)
+
+    # 1. Get the login node EC2 instance ID via EC2 tags.
+    #    PCS tags each instance with ``aws:pcs:compute-node-group-id``.
+    try:
+        response = ec2_client.describe_instances(
+            Filters=[
+                {
+                    "Name": "tag:aws:pcs:compute-node-group-id",
+                    "Values": [login_node_group_id],
+                },
+                {
+                    "Name": "instance-state-name",
+                    "Values": ["running"],
+                },
+            ],
+        )
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to describe login node group instances: {exc}"
+        )
+
+    instances = [
+        inst
+        for reservation in response.get("Reservations", [])
+        for inst in reservation.get("Instances", [])
+    ]
+    if not instances:
+        raise InternalError(
+            f"Login node group '{login_node_group_id}' has no running instances."
+        )
+
+    ec2_instance = instances[0]
+    instance_id: str = ec2_instance["InstanceId"]
+
+    # 2. Get the public IP address from the same instance
+    public_ip: str = ec2_instance.get("PublicIpAddress", "")
+
+    if not public_ip:
+        raise InternalError(
+            f"Login node instance '{instance_id}' has no public IP address. "
+            "Ensure the login node is in a public subnet with a public IP."
+        )
+
+    logger.info(
+        "Resolved login node for cluster '%s': instance=%s, ip=%s",
+        cluster_name,
+        instance_id,
+        public_ip,
+    )
+
+    return {
+        **event,
+        "loginNodeInstanceId": instance_id,
+        "loginNodeIp": public_ip,
+    }
+
+
+# ===================================================================
 # Step 10 — Create PCS queue
 # ===================================================================
 
@@ -1541,6 +1621,42 @@ def tag_resources(event: dict[str, Any]) -> dict[str, Any]:
 # Step 12 — Record cluster in DynamoDB
 # ===================================================================
 
+
+def build_notification_message(
+    *,
+    cluster_name: str,
+    project_id: str,
+    login_ip: str,
+    instance_id: str,
+    ssh_port: int,
+    dcv_port: int,
+) -> str:
+    """Build the cluster-ready lifecycle notification message.
+
+    Includes SSH and DCV connection details when ``login_ip`` is non-empty,
+    and the SSM session command when ``instance_id`` is non-empty.
+    """
+    connection_details = ""
+    if login_ip:
+        connection_details = (
+            f"\n\nConnection Details:\n"
+            f"  SSH: ssh -p {ssh_port} <username>@{login_ip}\n"
+            f"  DCV: https://{login_ip}:{dcv_port}"
+        )
+
+    if instance_id:
+        ssm_line = f"\n  SSM: aws ssm start-session --target {instance_id}"
+        connection_details = connection_details + ssm_line if connection_details else (
+            f"\n\nConnection Details:{ssm_line}"
+        )
+
+    return (
+        f"Your HPC cluster '{cluster_name}' in project '{project_id}' "
+        f"has been created successfully and is now ACTIVE."
+        f"{connection_details}"
+    )
+
+
 def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
     """Record the cluster details in the DynamoDB Clusters table.
 
@@ -1573,6 +1689,7 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
         "queueId": event.get("queueId", ""),
         "fsxFilesystemId": event.get("fsxFilesystemId", ""),
         "loginNodeIp": event.get("loginNodeIp", ""),
+        "loginNodeInstanceId": event.get("loginNodeInstanceId", ""),
         "sshPort": event.get("sshPort", 22),
         "dcvPort": event.get("dcvPort", 8443),
         "status": "ACTIVE",
@@ -1599,24 +1716,22 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
     created_by = event.get("createdBy", "")
     user_email = _lookup_user_email(created_by)
     login_ip = event.get("loginNodeIp", "")
+    instance_id = event.get("loginNodeInstanceId", "")
     ssh_port = event.get("sshPort", 22)
     dcv_port = event.get("dcvPort", 8443)
 
-    connection_details = ""
-    if login_ip:
-        connection_details = (
-            f"\n\nConnection Details:\n"
-            f"  SSH: ssh -p {ssh_port} <username>@{login_ip}\n"
-            f"  DCV: https://{login_ip}:{dcv_port}"
-        )
+    message = build_notification_message(
+        cluster_name=cluster_name,
+        project_id=project_id,
+        login_ip=login_ip,
+        instance_id=instance_id,
+        ssh_port=ssh_port,
+        dcv_port=dcv_port,
+    )
 
     _publish_lifecycle_notification(
         subject=f"Cluster '{cluster_name}' is ready",
-        message=(
-            f"Your HPC cluster '{cluster_name}' in project '{project_id}' "
-            f"has been created successfully and is now ACTIVE."
-            f"{connection_details}"
-        ),
+        message=message,
         user_email=user_email,
     )
 
@@ -2265,6 +2380,7 @@ _STEP_DISPATCH.update({
     "create_login_node_group": create_login_node_group,
     "create_compute_node_group": create_compute_node_group,
     "check_node_groups_status": check_node_groups_status,
+    "resolve_login_node_details": resolve_login_node_details,
     "create_pcs_queue": create_pcs_queue,
     "tag_resources": tag_resources,
     "record_cluster": record_cluster,
