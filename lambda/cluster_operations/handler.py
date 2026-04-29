@@ -550,8 +550,9 @@ def _handle_delete_cluster(
     )
 
     # Atomically transition status to DESTROYING and initialise progress fields.
-    # The ConditionExpression ensures only ACTIVE or FAILED clusters can be
-    # destroyed, and prevents concurrent deletion requests from both succeeding.
+    # The ConditionExpression ensures only ACTIVE, FAILED, or DESTRUCTION_FAILED
+    # clusters can be destroyed, and prevents concurrent deletion requests from
+    # both succeeding.
     now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
     clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
     try:
@@ -564,7 +565,7 @@ def _handle_delete_cluster(
                 "SET #st = :destroying, currentStep = :zero, totalSteps = :total, "
                 "stepDescription = :desc, updatedAt = :now"
             ),
-            ConditionExpression="#st IN (:active, :failed)",
+            ConditionExpression="#st IN (:active, :failed, :destruction_failed)",
             ExpressionAttributeNames={"#st": "status"},
             ExpressionAttributeValues={
                 ":destroying": "DESTROYING",
@@ -573,6 +574,7 @@ def _handle_delete_cluster(
                 ":desc": "Starting cluster destruction",
                 ":active": "ACTIVE",
                 ":failed": "FAILED",
+                ":destruction_failed": "DESTRUCTION_FAILED",
                 ":now": now,
             },
         )

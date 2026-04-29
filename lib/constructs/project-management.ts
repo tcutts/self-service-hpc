@@ -36,7 +36,9 @@ export class ProjectManagement extends Construct {
       functionName: 'hpc-project-management',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,

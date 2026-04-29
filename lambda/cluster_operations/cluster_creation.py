@@ -377,7 +377,16 @@ _PCS_INLINE_POLICY_DOCUMENT = {
             "Effect": "Allow",
             "Action": "pcs:RegisterComputeNodeGroupInstance",
             "Resource": "*",
-        }
+        },
+        {
+            "Effect": "Allow",
+            "Action": [
+                "elasticfilesystem:ClientMount",
+                "elasticfilesystem:ClientWrite",
+                "elasticfilesystem:ClientRootAccess",
+            ],
+            "Resource": "*",
+        },
     ],
 }
 

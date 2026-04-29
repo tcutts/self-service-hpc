@@ -2,6 +2,8 @@ import * as cdk from 'aws-cdk-lib';
 import * as apigateway from 'aws-cdk-lib/aws-apigateway';
 import * as cognito from 'aws-cdk-lib/aws-cognito';
 import * as dynamodb from 'aws-cdk-lib/aws-dynamodb';
+import * as events from 'aws-cdk-lib/aws-events';
+import * as eventsTargets from 'aws-cdk-lib/aws-events-targets';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as lambda from 'aws-cdk-lib/aws-lambda';
 import * as sfn from 'aws-cdk-lib/aws-stepfunctions';
@@ -33,6 +35,8 @@ export class ClusterOperations extends Construct {
   public readonly clusterOperationsLambda: lambda.Function;
   /** The POSIX reconciliation Lambda function. */
   public readonly posixReconciliationLambda: lambda.Function;
+  /** The login node refresh Lambda function. */
+  public readonly loginNodeRefreshLambda: lambda.Function;
   /** The cluster creation state machine. */
   public readonly clusterCreationStateMachine: sfn.StateMachine;
   /** The cluster destruction state machine. */
@@ -48,7 +52,9 @@ export class ClusterOperations extends Construct {
       functionName: 'hpc-cluster-operations',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
@@ -90,7 +96,9 @@ export class ClusterOperations extends Construct {
       functionName: 'hpc-cluster-creation-steps',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'cluster_creation.step_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
@@ -283,7 +291,9 @@ export class ClusterOperations extends Construct {
       functionName: 'hpc-cluster-destruction-steps',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'cluster_destruction.step_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
       environment: {
@@ -908,22 +918,45 @@ export class ClusterOperations extends Construct {
       resultPath: '$',
     });
 
-    // Fail state for PCS deletion errors
-    const destructionFailed = new sfn.Fail(this, 'DestructionFailed', {
-      cause: 'PCS resource cleanup failed',
-      error: 'PcsCleanupError',
+    // Failure handler: record DESTRUCTION_FAILED status in DynamoDB before failing
+    const recordClusterDestructionFailed = new tasks.LambdaInvoke(this, 'RecordClusterDestructionFailed', {
+      lambdaFunction: clusterDestructionStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'record_cluster_destruction_failed',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$.destructionFailedResult',
     });
+
+    // Terminal fail state for destruction errors
+    const destructionFailed = new sfn.Fail(this, 'DestructionFailed', {
+      cause: 'Cluster destruction failed',
+      error: 'ClusterDestructionError',
+    });
+
+    // Route failure handler to the terminal fail state
+    recordClusterDestructionFailed.next(destructionFailed);
+
+    // If the failure handler itself fails, proceed to the fail state anyway
+    recordClusterDestructionFailed.addCatch(destructionFailed, { resultPath: '$.error' });
 
     // Storage mode choice for destruction: remove S3 policy before IAM cleanup for mountpoint clusters
     const storageModeDestroyChoice = new sfn.Choice(this, 'StorageModeDestroyChoice')
       .when(sfn.Condition.stringEquals('$.storageMode', 'mountpoint'), removeMountpointS3Policy)
       .otherwise(deleteIamResources);
 
-    // Error catching on PCS deletion steps — route to DestructionFailed
-    const pcsCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
-    deletePcsResources.addCatch(destructionFailed, pcsCatchConfig);
-    checkPcsDeletionStatus.addCatch(destructionFailed, pcsCatchConfig);
-    deletePcsCluster.addCatch(destructionFailed, pcsCatchConfig);
+    // Error catching — all failure paths route through RecordClusterDestructionFailed
+    const destructionCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
+
+    // Catch errors on FSx export steps
+    createFsxExportTask.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+    checkFsxExportStatus.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+
+    // Catch errors on PCS deletion steps
+    deletePcsResources.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+    checkPcsDeletionStatus.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+    deletePcsCluster.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
 
     // Export wait loop: check status → if not complete, wait → check again
     const exportWaitLoop = waitForExport.next(checkFsxExportStatus);
@@ -1078,7 +1111,9 @@ export class ClusterOperations extends Construct {
       functionName: 'hpc-posix-reconciliation',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'posix_reconciliation.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 256,
@@ -1103,5 +1138,46 @@ export class ClusterOperations extends Construct {
       ],
       resources: ['*'],
     }));
+
+    // ---------------------------------------------------------------
+    // Login Node Refresh Lambda Function (Scheduled)
+    // Periodically re-resolves login node instance IDs and IPs for
+    // all active clusters.  If PCS replaces a login node, this Lambda
+    // detects the change and updates DynamoDB so connection details
+    // shown in the UI stay current.
+    // ---------------------------------------------------------------
+    this.loginNodeRefreshLambda = new lambda.Function(this, 'LoginNodeRefreshLambda', {
+      functionName: 'hpc-login-node-refresh',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'login_node_refresh.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
+      layers: [props.sharedLayer],
+      timeout: cdk.Duration.minutes(2),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+      },
+      description: 'Refreshes login node instance IDs and IPs for active clusters every 5 minutes',
+    });
+
+    // Grant DynamoDB read/write on Clusters table (read to scan, write to update)
+    props.clustersTable.grantReadWriteData(this.loginNodeRefreshLambda);
+
+    // Grant EC2 DescribeInstances to resolve current login node instances
+    this.loginNodeRefreshLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['ec2:DescribeInstances'],
+      resources: ['*'],
+    }));
+
+    // EventBridge rule to trigger login node refresh every 5 minutes
+    new events.Rule(this, 'LoginNodeRefreshScheduleRule', {
+      ruleName: 'hpc-login-node-refresh-schedule',
+      description: 'Triggers the login node refresh Lambda every 5 minutes to detect replaced instances',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+    }).addTarget(
+      new eventsTargets.LambdaFunction(this.loginNodeRefreshLambda),
+    );
   }
 }

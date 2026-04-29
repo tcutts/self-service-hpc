@@ -59,6 +59,12 @@ pcs_client = boto3.client("pcs")
 CLUSTERS_TABLE_NAME = os.environ.get("CLUSTERS_TABLE_NAME", "Clusters")
 
 # ---------------------------------------------------------------------------
+# Polling retry limits
+# ---------------------------------------------------------------------------
+MAX_PCS_DELETION_RETRIES = 120  # 120 iterations × 30s wait = ~60 minutes
+MAX_EXPORT_RETRIES = 60         # 60 iterations × 60s wait = ~60 minutes
+
+# ---------------------------------------------------------------------------
 # Step progress tracking
 # ---------------------------------------------------------------------------
 TOTAL_STEPS = 8
@@ -236,6 +242,28 @@ def check_fsx_export_status(event: dict[str, Any]) -> dict[str, Any]:
         logger.info("No export task ID — marking as complete")
         return {**event, "exportComplete": True, "exportFailed": False}
 
+    # Track and enforce bounded retry count
+    export_retry_count: int = event.get("exportRetryCount", 0) + 1
+
+    if export_retry_count > MAX_EXPORT_RETRIES:
+        logger.error(
+            "FSx export polling timed out for filesystem '%s' after "
+            "%d iterations (~%d minutes)",
+            fsx_filesystem_id,
+            MAX_EXPORT_RETRIES,
+            MAX_EXPORT_RETRIES,
+        )
+        return {
+            **event,
+            "exportComplete": True,
+            "exportFailed": True,
+            "exportRetryCount": export_retry_count,
+            "exportFailureReason": (
+                f"Export polling timed out after {MAX_EXPORT_RETRIES} "
+                f"iterations (~{MAX_EXPORT_RETRIES} minutes)"
+            ),
+        }
+
     try:
         response = fsx_client.describe_data_repository_tasks(
             TaskIds=[export_task_id],
@@ -253,14 +281,21 @@ def check_fsx_export_status(event: dict[str, Any]) -> dict[str, Any]:
     lifecycle = task.get("Lifecycle", "")
 
     logger.info(
-        "FSx export task '%s' for filesystem '%s' status: %s",
+        "FSx export task '%s' for filesystem '%s' status: %s (retry=%d/%d)",
         export_task_id,
         fsx_filesystem_id,
         lifecycle,
+        export_retry_count,
+        MAX_EXPORT_RETRIES,
     )
 
     if lifecycle == "SUCCEEDED":
-        return {**event, "exportComplete": True, "exportFailed": False}
+        return {
+            **event,
+            "exportComplete": True,
+            "exportFailed": False,
+            "exportRetryCount": export_retry_count,
+        }
 
     if lifecycle in ("FAILED", "CANCELED"):
         failure_reason = task.get("FailureDetails", {}).get("Message", "Unknown")
@@ -275,10 +310,16 @@ def check_fsx_export_status(event: dict[str, Any]) -> dict[str, Any]:
             "exportComplete": True,
             "exportFailed": True,
             "exportFailureReason": failure_reason,
+            "exportRetryCount": export_retry_count,
         }
 
     # Still in progress (PENDING, EXECUTING, etc.)
-    return {**event, "exportComplete": False, "exportFailed": False}
+    return {
+        **event,
+        "exportComplete": False,
+        "exportFailed": False,
+        "exportRetryCount": export_retry_count,
+    }
 
 
 # ===================================================================
@@ -339,6 +380,14 @@ def delete_pcs_resources(event: dict[str, Any]) -> dict[str, Any]:
         "; ".join(cleanup_results) if cleanup_results else "no sub-resources",
     )
 
+    # Detect failed sub-resource deletions and propagate the error
+    failed_results = [r for r in cleanup_results if r.endswith(":failed")]
+    if failed_results:
+        raise InternalError(
+            f"PCS sub-resource deletion failed for cluster '{cluster_name}': "
+            f"{'; '.join(failed_results)}"
+        )
+
     return {**event, "pcsCleanupResults": cleanup_results}
 
 
@@ -353,6 +402,10 @@ def check_pcs_deletion_status(event: dict[str, Any]) -> dict[str, Any]:
     describe API.  A ``ResourceNotFoundException`` confirms the resource
     has been deleted.  Any other response means the resource is still
     in a transitional state (e.g. DELETING).
+
+    Tracks the number of polling iterations via ``pcsRetryCount`` in the
+    event.  If the count exceeds ``MAX_PCS_DELETION_RETRIES``, raises
+    ``InternalError`` to halt the loop and route to the failure handler.
 
     Returns the event with ``pcsSubResourcesDeleted`` set to True when
     all sub-resources are confirmed deleted, or False if any are still
@@ -371,6 +424,16 @@ def check_pcs_deletion_status(event: dict[str, Any]) -> dict[str, Any]:
     if not pcs_cluster_id:
         logger.info("No PCS cluster ID — skipping sub-resource polling")
         return {**event, "pcsSubResourcesDeleted": True}
+
+    # Track and enforce bounded retry count
+    pcs_retry_count: int = event.get("pcsRetryCount", 0) + 1
+
+    if pcs_retry_count > MAX_PCS_DELETION_RETRIES:
+        raise InternalError(
+            f"PCS sub-resource deletion polling timed out for cluster "
+            f"'{cluster_name}' after {MAX_PCS_DELETION_RETRIES} iterations "
+            f"(~{MAX_PCS_DELETION_RETRIES * 30 // 60} minutes)"
+        )
 
     all_deleted = True
 
@@ -408,12 +471,14 @@ def check_pcs_deletion_status(event: dict[str, Any]) -> dict[str, Any]:
             all_deleted = False
 
     logger.info(
-        "PCS sub-resource deletion status: all_deleted=%s (cluster=%s)",
+        "PCS sub-resource deletion status: all_deleted=%s (cluster=%s, retry=%d/%d)",
         all_deleted,
         pcs_cluster_id,
+        pcs_retry_count,
+        MAX_PCS_DELETION_RETRIES,
     )
 
-    return {**event, "pcsSubResourcesDeleted": all_deleted}
+    return {**event, "pcsSubResourcesDeleted": all_deleted, "pcsRetryCount": pcs_retry_count}
 
 
 def _is_pcs_resource_deleted(describe_fn, resource_label: str) -> bool:
@@ -421,6 +486,8 @@ def _is_pcs_resource_deleted(describe_fn, resource_label: str) -> bool:
 
     ``ResourceNotFoundException`` means the resource has been deleted.
     Any other response (including success) means it still exists.
+    Any unexpected ``ClientError`` is re-raised so it propagates to
+    the state machine's error handler.
     """
     try:
         describe_fn()
@@ -430,11 +497,12 @@ def _is_pcs_resource_deleted(describe_fn, resource_label: str) -> bool:
         if exc.response["Error"]["Code"] == "ResourceNotFoundException":
             logger.info("PCS %s confirmed deleted", resource_label)
             return True
-        # Unexpected error — treat as still existing to be safe
+        # Unexpected error — re-raise so the state machine error handler
+        # can route to DestructionFailed instead of polling forever
         logger.warning(
             "Unexpected error checking PCS %s: %s", resource_label, exc
         )
-        return False
+        raise
 
 
 # ===================================================================
@@ -860,6 +928,63 @@ def record_cluster_destroyed(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Step 6b — Record cluster destruction as FAILED in DynamoDB
+# ===================================================================
+
+def record_cluster_destruction_failed(event: dict[str, Any]) -> dict[str, Any]:
+    """Update the DynamoDB cluster record to DESTRUCTION_FAILED status.
+
+    Invoked by the state machine failure handler when the destruction
+    workflow times out or encounters an unrecoverable error.
+
+    Sets:
+    - ``status`` → ``DESTRUCTION_FAILED``
+    - ``destructionFailedAt`` → current UTC ISO 8601 timestamp
+
+    Removes:
+    - ``currentStep``, ``totalSteps``, ``stepDescription`` — progress
+      fields are cleared so stale data does not appear if the record
+      is queried after the failure.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+    now = datetime.now(timezone.utc).isoformat()
+
+    table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+
+    try:
+        table.update_item(
+            Key={
+                "PK": f"PROJECT#{project_id}",
+                "SK": f"CLUSTER#{cluster_name}",
+            },
+            UpdateExpression=(
+                "SET #s = :status, destructionFailedAt = :ts "
+                "REMOVE currentStep, totalSteps, stepDescription"
+            ),
+            ExpressionAttributeNames={"#s": "status"},
+            ExpressionAttributeValues={
+                ":status": "DESTRUCTION_FAILED",
+                ":ts": now,
+            },
+        )
+    except ClientError as exc:
+        raise InternalError(
+            f"Failed to update cluster '{cluster_name}' status to "
+            f"DESTRUCTION_FAILED: {exc}"
+        )
+
+    logger.info(
+        "Cluster '%s' in project '%s' marked as DESTRUCTION_FAILED at %s",
+        cluster_name,
+        project_id,
+        now,
+    )
+
+    return {**event, "status": "DESTRUCTION_FAILED", "destructionFailedAt": now}
+
+
+# ===================================================================
 # Step — Remove Mountpoint S3 inline policy from IAM roles
 # ===================================================================
 
@@ -903,7 +1028,12 @@ def remove_mountpoint_s3_policy(event: dict[str, Any]) -> dict[str, Any]:
 def _delete_pcs_node_group(
     cluster_id: str, node_group_id: str, label: str
 ) -> str:
-    """Best-effort deletion of a PCS compute node group."""
+    """Best-effort deletion of a PCS compute node group.
+
+    Returns a ``:<label>_node_group:<id>:deleted`` result on success or
+    when the resource has already been deleted (``ResourceNotFoundException``).
+    Returns ``:<label>_node_group:<id>:failed`` for genuine API errors.
+    """
     try:
         pcs_client.delete_compute_node_group(
             clusterIdentifier=cluster_id,
@@ -912,6 +1042,13 @@ def _delete_pcs_node_group(
         logger.info("Deleted PCS %s node group '%s'", label, node_group_id)
         return f"{label}_node_group:{node_group_id}:deleted"
     except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info(
+                "PCS %s node group '%s' already deleted — treating as success",
+                label,
+                node_group_id,
+            )
+            return f"{label}_node_group:{node_group_id}:deleted"
         logger.warning(
             "Failed to delete PCS %s node group '%s': %s",
             label,
@@ -922,7 +1059,12 @@ def _delete_pcs_node_group(
 
 
 def _delete_pcs_queue(cluster_id: str, queue_id: str) -> str:
-    """Best-effort deletion of a PCS queue."""
+    """Best-effort deletion of a PCS queue.
+
+    Returns ``queue:<id>:deleted`` on success or when the resource has
+    already been deleted (``ResourceNotFoundException``).
+    Returns ``queue:<id>:failed`` for genuine API errors.
+    """
     try:
         pcs_client.delete_queue(
             clusterIdentifier=cluster_id,
@@ -931,6 +1073,12 @@ def _delete_pcs_queue(cluster_id: str, queue_id: str) -> str:
         logger.info("Deleted PCS queue '%s'", queue_id)
         return f"queue:{queue_id}:deleted"
     except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info(
+                "PCS queue '%s' already deleted — treating as success",
+                queue_id,
+            )
+            return f"queue:{queue_id}:deleted"
         logger.warning("Failed to delete PCS queue '%s': %s", queue_id, exc)
         return f"queue:{queue_id}:failed"
 
@@ -960,4 +1108,5 @@ _STEP_DISPATCH.update({
     "delete_iam_resources": delete_iam_resources,
     "delete_launch_templates": delete_launch_templates,
     "record_cluster_destroyed": record_cluster_destroyed,
+    "record_cluster_destruction_failed": record_cluster_destruction_failed,
 })

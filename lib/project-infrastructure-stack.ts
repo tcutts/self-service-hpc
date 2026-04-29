@@ -1,6 +1,7 @@
 import * as cdk from 'aws-cdk-lib';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as efs from 'aws-cdk-lib/aws-efs';
+import * as iam from 'aws-cdk-lib/aws-iam';
 import * as logs from 'aws-cdk-lib/aws-logs';
 import * as s3 from 'aws-cdk-lib/aws-s3';
 import { Construct } from 'constructs';
@@ -193,6 +194,20 @@ export class ProjectInfrastructureStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.DESTROY,
       securityGroup: this.efsSecurityGroup,
     });
+
+    // Allow EC2 instances to mount, read, and write via mount targets
+    this.fileSystem.addToResourcePolicy(new iam.PolicyStatement({
+      effect: iam.Effect.ALLOW,
+      principals: [new iam.AnyPrincipal()],
+      actions: [
+        'elasticfilesystem:ClientMount',
+        'elasticfilesystem:ClientWrite',
+        'elasticfilesystem:ClientRootAccess',
+      ],
+      conditions: {
+        Bool: { 'elasticfilesystem:AccessedViaMountTarget': 'true' },
+      },
+    }));
 
     // -----------------------------------------------------------------
     // S3 — project storage

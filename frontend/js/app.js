@@ -1906,6 +1906,16 @@ async function loadClusters(projectId) {
               return renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Destroying…');
             } else if (row.status === 'FAILED') {
               return `<span style="color:var(--color-danger);font-size:0.8rem">${esc(row.errorMessage || 'Unknown error')}</span>`;
+            } else if (row.status === 'DESTRUCTION_FAILED') {
+              const progress = row.progress || {};
+              let info = '';
+              if (progress.stepDescription) {
+                info += `Step ${progress.currentStep || '?'} of ${progress.totalSteps || '?'}: ${esc(progress.stepDescription)}`;
+              }
+              if (row.errorMessage) {
+                info += (info ? '<br>' : '') + esc(row.errorMessage);
+              }
+              return `<span style="color:var(--color-danger);font-size:0.8rem">${info || 'Destruction failed'}</span>`;
             }
             return '—';
           },
@@ -1913,8 +1923,9 @@ async function loadClusters(projectId) {
         {
           key: '_actions', label: 'Actions', type: 'custom', sortable: false,
           render: (row) => {
-            if (['ACTIVE', 'FAILED'].includes(row.status)) {
-              return `<button class="btn btn-danger btn-sm" onclick="destroyCluster('${esc(projectId)}','${esc(row.clusterName)}')">Destroy</button>`;
+            if (['ACTIVE', 'FAILED', 'DESTRUCTION_FAILED'].includes(row.status)) {
+              const label = row.status === 'DESTRUCTION_FAILED' ? 'Retry Destroy' : 'Destroy';
+              return `<button class="btn btn-danger btn-sm" onclick="destroyCluster('${esc(projectId)}','${esc(row.clusterName)}')">${label}</button>`;
             } else if (row.status === 'DESTROYED' && !budgetBreached) {
               return `<button class="btn btn-primary btn-sm" onclick="recreateCluster('${esc(projectId)}','${esc(row.clusterName)}')">Recreate</button>`;
             } else if (row.status === 'CREATING' && row.createdAt && (Date.now() - new Date(row.createdAt).getTime()) > CONFIG.clusterCreationTimeoutMs) {
@@ -1932,6 +1943,7 @@ async function loadClusters(projectId) {
     TableModule.render('clusters', clustersTableConfig, clusters, el);
 
     // Start or stop polling based on transitional cluster states
+    // DESTRUCTION_FAILED is intentionally excluded — it is a terminal status, not transitional
     const transitionalClusters = clusters.filter(c => ['CREATING', 'DESTROYING'].includes(c.status));
     if (transitionalClusters.length > 0) {
       startClusterListPolling(projectId);
@@ -1953,6 +1965,8 @@ async function loadClusters(projectId) {
         showToast(`Cluster '${c.clusterName}' creation FAILED`, 'error');
       } else if (prev === 'DESTROYING' && c.status === 'DESTROYED') {
         showToast(`Cluster '${c.clusterName}' has been destroyed`, 'success');
+      } else if (prev === 'DESTROYING' && c.status === 'DESTRUCTION_FAILED') {
+        showToast(`Cluster '${c.clusterName}' destruction FAILED`, 'error');
       }
       state.clusterStatusCache[c.clusterName] = c.status;
     });
@@ -2068,6 +2082,8 @@ async function loadClusterDetail(projectId, clusterName) {
       showToast(`Cluster '${clusterName}' creation FAILED`, 'error');
     } else if (prev === 'DESTROYING' && cluster.status === 'DESTROYED') {
       showToast(`Cluster '${clusterName}' has been destroyed`, 'success');
+    } else if (prev === 'DESTROYING' && cluster.status === 'DESTRUCTION_FAILED') {
+      showToast(`Cluster '${clusterName}' destruction FAILED`, 'error');
     }
     state.clusterStatusCache[clusterName] = cluster.status;
 
@@ -2081,6 +2097,7 @@ async function loadClusterDetail(projectId, clusterName) {
       <div class="detail-row"><span class="label">Created By</span><span>${esc(cluster.createdBy || '—')}</span></div>
       <div class="detail-row"><span class="label">Created At</span><span>${esc(cluster.createdAt || '—')}</span></div>
       ${cluster.destroyedAt ? `<div class="detail-row"><span class="label">Destroyed At</span><span>${esc(cluster.destroyedAt)}</span></div>` : ''}
+      ${cluster.destructionFailedAt ? `<div class="detail-row"><span class="label">Destruction Failed At</span><span>${esc(cluster.destructionFailedAt)}</span></div>` : ''}
     </div>`;
 
     // ACTIVE: show connection info
@@ -2178,6 +2195,24 @@ async function loadClusterDetail(projectId, clusterName) {
       </div>`;
     }
 
+    // DESTRUCTION_FAILED: show failure details and retry info
+    if (cluster.status === 'DESTRUCTION_FAILED') {
+      const progress = cluster.progress || {};
+      let stepInfo = '';
+      if (progress.currentStep && progress.totalSteps) {
+        stepInfo = `Step ${progress.currentStep} of ${progress.totalSteps}: ${esc(progress.stepDescription || 'Unknown step')}`;
+      }
+      html += `<div class="error-box">
+        <h4>Destruction Failed</h4>
+        ${stepInfo ? `<p>${stepInfo}</p>` : ''}
+        ${cluster.errorMessage ? `<p>${esc(cluster.errorMessage)}</p>` : ''}
+        ${cluster.destructionFailedAt ? `<p style="font-size:0.8rem;color:var(--color-text-muted)">Failed at: ${esc(cluster.destructionFailedAt)}</p>` : ''}
+      </div>`;
+      html += `<div class="info-box">
+        <p>The cluster destruction workflow encountered an error and could not finish cleaning up all resources. You can retry the destruction — the workflow is idempotent and will pick up where it left off.</p>
+      </div>`;
+    }
+
     // Non-ACTIVE info message
     if (['CREATING', 'DESTROYING', 'DESTROYED'].includes(cluster.status)) {
       const msgs = {
@@ -2190,10 +2225,11 @@ async function loadClusterDetail(projectId, clusterName) {
       }
     }
 
-    // Destroy button for ACTIVE/FAILED
-    if (['ACTIVE', 'FAILED'].includes(cluster.status)) {
+    // Destroy button for ACTIVE/FAILED/DESTRUCTION_FAILED
+    if (['ACTIVE', 'FAILED', 'DESTRUCTION_FAILED'].includes(cluster.status)) {
+      const label = cluster.status === 'DESTRUCTION_FAILED' ? 'Retry Destroy' : 'Destroy Cluster';
       html += `<div style="margin-top:1rem">
-        <button class="btn btn-danger" onclick="destroyCluster('${esc(projectId)}','${esc(clusterName)}')">Destroy Cluster</button>
+        <button class="btn btn-danger" onclick="destroyCluster('${esc(projectId)}','${esc(clusterName)}')">${label}</button>
       </div>`;
     }
 

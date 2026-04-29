@@ -53,7 +53,9 @@ export class PlatformOperations extends Construct {
       functionName: 'hpc-accounting-query',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'accounting')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'accounting'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(60),
       memorySize: 256,
@@ -110,7 +112,9 @@ export class PlatformOperations extends Construct {
       functionName: 'hpc-budget-notification',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'budget_notification')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'budget_notification'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,
       environment: {
@@ -137,7 +141,9 @@ export class PlatformOperations extends Construct {
       functionName: 'hpc-fsx-cleanup',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'handler.handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'fsx_cleanup')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'fsx_cleanup'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 256,
@@ -201,7 +207,9 @@ export class PlatformOperations extends Construct {
       functionName: 'hpc-cluster-creation-failure-handler',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'cluster_creation.mark_cluster_failed_from_event',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(30),
       memorySize: 256,

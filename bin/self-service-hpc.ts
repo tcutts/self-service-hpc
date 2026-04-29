@@ -62,33 +62,14 @@ const trustedCidrRanges: string[] = trustedCidrRangesRaw
   .filter((s: string) => s.length > 0);
 
 // -----------------------------------------------------------------------
-// 2. Sample Project Infrastructure Stack (parameterised)
-//
-//    In production the platform Lambda creates project stacks dynamically.
-//    This sample shows how to wire a project stack with cross-stack
-//    references from the Foundation stack.
-// -----------------------------------------------------------------------
-const sampleProject = new ProjectInfrastructureStack(app, 'HpcProject-sample-project', {
-  description: 'Self-Service HPC Platform — Project Infrastructure (sample-project)',
-  env,
-  projectId: 'sample-project',
-  projectName: 'Sample Project',
-  costAllocationTag: 'sample-project',
-  trustedCidrRanges,
-});
-
-// Explicit dependency so the Foundation stack deploys first
-sampleProject.addDependency(foundation);
-
-// -----------------------------------------------------------------------
-// 2b. Dynamic Project Infrastructure Stacks
+// 2. Dynamic Project Infrastructure Stacks
 //
 //    When CodeBuild runs `npx cdk deploy HpcProject-<projectId>`, the
 //    PROJECT_ID environment variable tells us which stack to synthesise.
 //    This block creates the stack on-the-fly so CDK can find it.
 // -----------------------------------------------------------------------
 const dynamicProjectId = process.env.PROJECT_ID;
-if (dynamicProjectId && dynamicProjectId !== 'sample-project') {
+if (dynamicProjectId) {
   const dynamicProject = new ProjectInfrastructureStack(
     app,
     `HpcProject-${dynamicProjectId}`,

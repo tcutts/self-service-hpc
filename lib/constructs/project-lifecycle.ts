@@ -41,7 +41,9 @@ export class ProjectLifecycle extends Construct {
       functionName: 'hpc-project-deploy-steps',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'project_deploy.step_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
@@ -192,7 +194,9 @@ export class ProjectLifecycle extends Construct {
       functionName: 'hpc-project-destroy-steps',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'project_destroy.step_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.minutes(5),
       memorySize: 512,
@@ -336,7 +340,9 @@ export class ProjectLifecycle extends Construct {
       functionName: 'hpc-project-update-steps',
       runtime: lambda.Runtime.PYTHON_3_13,
       handler: 'project_update.step_handler',
-      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management')),
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'project_management'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
       layers: [props.sharedLayer],
       timeout: cdk.Duration.seconds(300),
       memorySize: 512,

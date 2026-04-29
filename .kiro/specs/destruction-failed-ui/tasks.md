@@ -63,7 +63,7 @@ Add frontend handling for the `DESTRUCTION_FAILED` cluster status across the UI:
     - Add a subsection describing the UI behaviour for DESTRUCTION_FAILED: the danger badge in the cluster list and detail page, the "Retry Destroy" button in both views, the toast notification on transition, and the progress column showing where destruction failed
     - _Requirements: 7.1, 7.2, 7.3_
 
-- [-] 7. Write tests
+- [x] 7. Write tests
   - [x] 7.1 Write property test: DESTRUCTION_FAILED badge rendering (Property 1)
     - Create `test/frontend/destruction-failed.property.test.js`
     - Generate random cluster objects with status `DESTRUCTION_FAILED` and varying `clusterName` values
@@ -96,7 +96,7 @@ Add frontend handling for the `DESTRUCTION_FAILED` cluster status across the UI:
     - Verify that the transitional filter produces an empty array (no polling triggered)
     - **Property 6: Polling treats DESTRUCTION_FAILED as terminal**
     - **Validates: Requirements 6.1, 6.2**
-  - [-] 7.7 Write unit tests for DESTRUCTION_FAILED UI behaviour
+  - [x] 7.7 Write unit tests for DESTRUCTION_FAILED UI behaviour
     - Create `test/frontend/destruction-failed.test.js`
     - Test CSS class `badge-destruction_failed` exists with correct colour values (Req 1.3)
     - Test detail page renders informational retry message (Req 5.6)
@@ -105,7 +105,7 @@ Add frontend handling for the `DESTRUCTION_FAILED` cluster status across the UI:
     - Test detail page does not start polling for DESTRUCTION_FAILED (Req 6.3)
     - _Requirements: 1.3, 4.4, 5.4, 5.5, 5.6, 6.3_
 
-- [ ] 8. Final checkpoint
+- [x] 8. Final checkpoint
   - Ensure all tests pass, ask the user if questions arise.
 
 ## Notes

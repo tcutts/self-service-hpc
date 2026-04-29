@@ -270,6 +270,7 @@ tr:last-child td {
 .badge-active   { background: #d4edda; color: var(--color-success); }
 .badge-creating { background: #fff3cd; color: #856404; }
 .badge-failed   { background: #f8d7da; color: var(--color-danger); }
+.badge-destruction_failed { background: #f8d7da; color: var(--color-danger); }
 .badge-destroying { background: #fff3cd; color: #856404; }
 .badge-destroyed  { background: #e2e3e5; color: var(--color-text-muted); }
 .badge-inactive   { background: #e2e3e5; color: var(--color-text-muted); }

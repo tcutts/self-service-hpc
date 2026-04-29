@@ -247,11 +247,12 @@ class TestFullDestructionWorkflow:
             assert result["status"] == "DESTROYED"
             assert "destroyedAt" in result
 
-            # Verify DynamoDB update was called
-            mocks["table"].update_item.assert_called_once()
-            call_kwargs = mocks["table"].update_item.call_args[1]
-            assert call_kwargs["Key"]["PK"] == "PROJECT#proj-integ"
-            assert call_kwargs["Key"]["SK"] == "CLUSTER#integ-cluster"
+            # Verify DynamoDB update was called (progress updates + final DESTROYED)
+            assert mocks["table"].update_item.call_count >= 1
+            # The last update_item call should be the record_cluster_destroyed call
+            last_call_kwargs = mocks["table"].update_item.call_args[1]
+            assert last_call_kwargs["Key"]["PK"] == "PROJECT#proj-integ"
+            assert last_call_kwargs["Key"]["SK"] == "CLUSTER#integ-cluster"
 
     def test_pcs_polling_loop_waits_then_succeeds(self, mock_aws_clients):
         """Simulate the state machine polling loop: first poll returns
@@ -478,9 +479,14 @@ class TestDestructionPcsClusterFailure:
 
             assert "pcs_integ123" in str(exc_info.value)
 
-            # Verify record_cluster_destroyed was NOT called
-            # (the exception prevents the state machine from reaching it)
-            mocks["table"].update_item.assert_not_called()
+            # Verify record_cluster_destroyed was NOT called.
+            # update_item may have been called for progress tracking, but
+            # none of those calls should set status to DESTROYED.
+            for call in mocks["table"].update_item.call_args_list:
+                call_kwargs = call[1]
+                expr_values = call_kwargs.get("ExpressionAttributeValues", {})
+                assert expr_values.get(":status") != "DESTROYED", \
+                    "Cluster should not be marked DESTROYED after a failure"
 
     def test_cluster_not_marked_destroyed_on_failure(self, mock_aws_clients):
         """Explicitly verify that after a PCS cluster deletion failure,

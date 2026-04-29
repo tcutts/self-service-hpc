@@ -273,7 +273,7 @@ def generate_mountpoint_s3_commands(s3_bucket_name: str, mount_path: str = "/dat
     """
     return [
         "# --- Mount project S3 bucket via Mountpoint for Amazon S3 ---",
-        "yum install -y mountpoint-s3 || apt-get install -y mountpoint-s3",
+        "dnf install -y mount-s3 || yum install -y mount-s3",
         f"mkdir -p {mount_path}",
         f"mount-s3 {s3_bucket_name} {mount_path} --allow-delete --allow-overwrite",
         f"echo 'mount-s3 {s3_bucket_name} {mount_path} --allow-delete --allow-overwrite' >> /etc/rc.local",
@@ -349,6 +349,58 @@ def generate_ssm_agent_commands() -> list[str]:
     ]
 
 
+def _append_wrapped_section(
+    lines: list[str],
+    section_name: str,
+    commands: list[str],
+) -> None:
+    """Append an error-isolated section to the script lines.
+
+    Wraps *commands* in a subshell with ``set -e`` so that failures
+    within the section do not propagate to the parent script.  The
+    section's exit code is captured and used to update the tracking
+    arrays (``SUCCEEDED_SECTIONS`` / ``FAILED_SECTIONS``).
+
+    Parameters
+    ----------
+    lines : list[str]
+        The accumulating list of script lines (mutated in place).
+    section_name : str
+        Human-readable name used in log messages and tracking arrays.
+    commands : list[str]
+        The bash command strings to execute inside the subshell.
+    """
+    lines.append(f"# --- Section: {section_name} ---")
+    lines.append("(")
+    lines.append("  set -e")
+    heredoc_delimiter: str | None = None
+    for cmd in commands:
+        if heredoc_delimiter is not None:
+            # Inside a heredoc — emit lines unindented so the closing
+            # delimiter is found at column 0 by bash.
+            lines.append(cmd)
+            if cmd.strip() == heredoc_delimiter:
+                heredoc_delimiter = None
+        else:
+            lines.append(f"  {cmd}")
+            # Detect heredoc start: `<< 'DELIM'` or `<< DELIM`
+            if "<<" in cmd:
+                import re
+
+                m = re.search(r"<<-?\s*'?(\w+)'?", cmd)
+                if m:
+                    heredoc_delimiter = m.group(1)
+    lines.append(") 2>&1")
+    lines.append("if [ $? -eq 0 ]; then")
+    lines.append(f'  SUCCEEDED_SECTIONS+=("{section_name}")')
+    lines.append(f'  echo "[SUCCESS] {section_name}"')
+    lines.append("else")
+    lines.append(f'  FAILED_SECTIONS+=("{section_name}")')
+    lines.append(f'  echo "[FAILED] {section_name}" >&2')
+    lines.append("fi")
+    lines.append("")
+
+
 def generate_user_data_script(
     project_id: str,
     users_table_name: str,
@@ -401,60 +453,87 @@ def generate_user_data_script(
 
     lines = [
         "#!/bin/bash",
-        "set -euo pipefail",
+        "# NOTE: bash strict mode (set -e / -u / -o pipefail) is intentionally",
+        "# NOT used. Each section is wrapped in an error-isolated subshell so",
+        "# that a single section failure does not abort the entire script and",
+        "# cause PCS to terminate the login node in an infinite crash loop.",
         "",
         f"# POSIX user provisioning for project: {project_id}",
         f"# Generated for {len(users)} user(s)",
         "",
+        "# --- Error tracking infrastructure ---",
+        "FAILED_SECTIONS=()",
+        "SUCCEEDED_SECTIONS=()",
+        "",
     ]
 
     # --- SSM Agent (ensure running before anything else) ---
-    for cmd in generate_ssm_agent_commands():
-        lines.append(cmd)
-    lines.append("")
+    _append_wrapped_section(
+        lines, "SSM Agent", generate_ssm_agent_commands(),
+    )
 
     # --- EFS mount (before user creation so /home is available) ---
     if efs_filesystem_id:
-        for cmd in generate_efs_mount_commands(efs_filesystem_id):
-            lines.append(cmd)
-        lines.append("")
+        _append_wrapped_section(
+            lines, "EFS Mount", generate_efs_mount_commands(efs_filesystem_id),
+        )
 
-    lines.append("# --- Create project user accounts ---")
-
+    # --- User creation (all users as a single section) ---
+    user_cmds: list[str] = []
+    user_cmds.append("# --- Create project user accounts ---")
     for user in users:
         user_id = user["userId"]
         uid = user["posixUid"]
         gid = user["posixGid"]
-        lines.append(f"# User: {user_id}")
-        for cmd in generate_user_creation_commands(user_id, uid, gid):
-            lines.append(cmd)
-        lines.append("")
+        user_cmds.append(f"# User: {user_id}")
+        user_cmds.extend(generate_user_creation_commands(user_id, uid, gid))
+    _append_wrapped_section(lines, "User Creation", user_cmds)
 
-    lines.append("# --- Disable generic accounts ---")
-    for cmd in generate_disable_generic_accounts_commands():
-        lines.append(cmd)
+    # --- Generic account disabling ---
+    disable_cmds: list[str] = ["# --- Disable generic accounts ---"]
+    disable_cmds.extend(generate_disable_generic_accounts_commands())
+    _append_wrapped_section(lines, "Generic Account Disabling", disable_cmds)
 
-    lines.append("")
-    lines.append("# --- Configure access logging ---")
-    for cmd in generate_pam_exec_logging_commands():
-        lines.append(cmd)
+    # --- Access logging (PAM exec) ---
+    logging_cmds: list[str] = ["# --- Configure access logging ---"]
+    logging_cmds.extend(generate_pam_exec_logging_commands())
+    _append_wrapped_section(lines, "Access Logging", logging_cmds)
 
-    lines.append("")
-    for cmd in generate_cloudwatch_agent_commands(project_id):
-        lines.append(cmd)
+    # --- CloudWatch agent ---
+    _append_wrapped_section(
+        lines, "CloudWatch Agent",
+        generate_cloudwatch_agent_commands(project_id),
+    )
 
     # --- Storage mount ---
     if storage_mode == "mountpoint" and s3_bucket_name:
-        lines.append("")
-        for cmd in generate_mountpoint_s3_commands(s3_bucket_name):
-            lines.append(cmd)
+        _append_wrapped_section(
+            lines, "S3 Storage Mount",
+            generate_mountpoint_s3_commands(s3_bucket_name),
+        )
     elif storage_mode == "lustre" and fsx_dns_name and fsx_mount_name:
-        lines.append("")
-        for cmd in generate_fsx_lustre_mount_commands(fsx_dns_name, fsx_mount_name):
-            lines.append(cmd)
+        _append_wrapped_section(
+            lines, "FSx Lustre Mount",
+            generate_fsx_lustre_mount_commands(fsx_dns_name, fsx_mount_name),
+        )
 
+    # --- Summary ---
+    lines.append("# --- Provisioning Summary ---")
+    lines.append('echo "========== Provisioning Summary =========="')
+    lines.append('echo "Succeeded sections (${#SUCCEEDED_SECTIONS[@]}):"')
+    lines.append("for s in \"${SUCCEEDED_SECTIONS[@]}\"; do")
+    lines.append('  echo "  [SUCCESS] $s"')
+    lines.append("done")
+    lines.append('echo "Failed sections (${#FAILED_SECTIONS[@]}):"')
+    lines.append("for s in \"${FAILED_SECTIONS[@]}\"; do")
+    lines.append('  echo "  [FAILED] $s" >&2')
+    lines.append("done")
+    lines.append(
+        'echo "Total: ${#SUCCEEDED_SECTIONS[@]} succeeded,'
+        ' ${#FAILED_SECTIONS[@]} failed"'
+    )
     lines.append("")
-    lines.append("echo 'POSIX user provisioning complete.'")
+    lines.append("exit 0")
 
     return "\n".join(lines)
 

@@ -423,8 +423,8 @@ class TestGenerateUserDataScriptPreservation:
                 s3_bucket_name=s3_bucket,
             )
 
-        assert "mountpoint-s3" in script, (
-            "Script should contain mountpoint-s3 install command"
+        assert "mount-s3" in script, (
+            "Script should contain mount-s3 install command"
         )
         assert f"mount-s3 {s3_bucket}" in script, (
             f"Script should mount S3 bucket '{s3_bucket}'"
@@ -494,8 +494,8 @@ class TestGenerateUserDataScriptPreservation:
                 storage_mode="",
             )
 
-        assert "mountpoint-s3" not in script, (
-            "Script should NOT contain mountpoint-s3 when no storage mode"
+        assert "dnf install -y mount-s3" not in script, (
+            "Script should NOT contain mount-s3 install when no storage mode"
         )
         assert "mount-s3" not in script, (
             "Script should NOT contain mount-s3 when no storage mode"

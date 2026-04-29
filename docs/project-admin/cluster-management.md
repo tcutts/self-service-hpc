@@ -165,6 +165,7 @@ You can navigate away from the web portal and return later — the status is alw
 CREATING → ACTIVE    (success — cluster ready for use)
 CREATING → FAILED    (failure — resources automatically rolled back)
 ACTIVE   → DESTROYING → DESTROYED
+ACTIVE   → DESTROYING → DESTRUCTION_FAILED
 DESTROYED → CREATING  (via POST /clusters/{clusterName}/recreate)
 ```
 
@@ -254,7 +255,7 @@ Home directories (EFS) and project storage (S3) are **preserved** after cluster 
 
 | Scenario | Error Code | HTTP Status |
 |----------|-----------|-------------|
-| Cluster not in ACTIVE or FAILED status | `CONFLICT` | 409 |
+| Cluster not in ACTIVE, FAILED, or DESTRUCTION_FAILED status | `CONFLICT` | 409 |
 | Cluster does not exist | `NOT_FOUND` | 404 |
 | Caller is not a project member | `AUTHORISATION_ERROR` | 403 |
 
@@ -299,6 +300,79 @@ The page refreshes automatically during destruction — you can navigate away an
 ```
 
 If destruction fails at any step, the progress bar remains at the last successfully started step so you can see where the failure occurred.
+
+## Destruction Failure Recovery
+
+In rare cases, the destruction workflow can encounter an error that prevents it from completing. When this happens, the cluster transitions to `DESTRUCTION_FAILED` status instead of remaining stuck in `DESTROYING`.
+
+### What `DESTRUCTION_FAILED` Means
+
+The `DESTRUCTION_FAILED` status indicates that the cluster destruction workflow encountered an error and could not finish cleaning up all resources. The cluster is no longer being actively destroyed, but some resources may still exist in a partially deleted state.
+
+### When It Occurs
+
+A cluster transitions to `DESTRUCTION_FAILED` when any of the following happens during the destruction workflow:
+
+- **Sub-resource deletion failure** — a PCS compute node group or queue deletion fails (e.g. due to a service error or conflict), and the failure is detected before entering the polling loop.
+- **Polling timeout** — the PCS sub-resource deletion polling loop or the FSx data repository export polling loop exceeds its maximum retry count (~60 minutes each) without completing.
+- **Unexpected API error** — a PCS or FSx API call returns an unexpected error (e.g. throttling, access denied, or an internal service error) during the polling phase.
+- **Workflow timeout** — the overall Step Functions state machine exceeds its 2-hour execution timeout.
+
+### Recovery Options
+
+When a cluster is in `DESTRUCTION_FAILED` status, you can take the following actions:
+
+1. **Retry destruction** — send another `DELETE /projects/{projectId}/clusters/{clusterName}` request. The destruction workflow is idempotent — it treats already-deleted resources as successful no-ops and only attempts to delete resources that still exist. This allows a retry to pick up where the previous attempt left off.
+
+2. **Investigate the failure** — check the destruction progress to see which step failed. The progress bar shows the last step that was attempted, which can help identify the root cause (e.g. a specific PCS resource that could not be deleted).
+
+3. **Contact an administrator** — if repeated retries fail, contact a platform administrator who can investigate the underlying AWS resources and resolve any blocking issues (e.g. resource dependencies, permission problems, or service outages).
+
+### UI Behaviour
+
+When a cluster transitions to `DESTRUCTION_FAILED`, the web portal provides visual feedback and recovery controls across several surfaces.
+
+**Status Badge**
+
+A danger-styled badge displaying `DESTRUCTION_FAILED` appears in both the cluster list table and the cluster detail page. The badge uses red background and red text styling, consistent with the existing `FAILED` badge, so the failure state is immediately visible.
+
+**Retry Destroy Button**
+
+A "Retry Destroy" button is available in two places:
+
+- **Cluster list table** — in the Actions column, alongside where the "Destroy" button normally appears for active clusters.
+- **Cluster detail page** — below the failure details section.
+
+Both buttons use danger (red) styling and call the same destruction endpoint (`DELETE /projects/{projectId}/clusters/{clusterName}`). Clicking the button shows a confirmation dialog before sending the request. The destruction workflow is idempotent, so retrying picks up where the previous attempt left off.
+
+**Toast Notification**
+
+When the UI detects that a cluster has transitioned from `DESTROYING` to `DESTRUCTION_FAILED` during automatic polling, a toast notification appears with an error message including the cluster name. This notification uses red error styling to indicate a failure condition. The transition is detected in both the cluster list view and the cluster detail view.
+
+**Progress Column**
+
+In the cluster list table, the Progress column displays failure details for `DESTRUCTION_FAILED` clusters:
+
+- The step where destruction failed (e.g. "Step 4 of 8: Waiting for resource cleanup"), drawn from the `progress` object in the API response.
+- The error message text, if the cluster record includes an `errorMessage` field.
+
+This information is styled with danger colouring, consistent with the existing display for `FAILED` clusters. On the cluster detail page, the same step and error information is shown in a dedicated error box, along with the `destructionFailedAt` timestamp and an informational message explaining that the user can retry.
+
+### API Response — Destruction Failed
+
+```json
+{
+  "clusterName": "genomics-run-42",
+  "projectId": "genomics-team",
+  "status": "DESTRUCTION_FAILED",
+  "destructionFailedAt": "2025-01-15T16:30:00Z",
+  "progress": {
+    "currentStep": 4,
+    "totalSteps": 8,
+    "stepDescription": "Waiting for resource cleanup"
+  }
+}
+```
 
 ## Recreating a Cluster
 
