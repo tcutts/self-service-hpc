@@ -1081,6 +1081,139 @@ def check_pcs_cluster_status(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Helper — create or adopt a PCS compute node group (idempotent)
+# ===================================================================
+
+_NODE_GROUP_FAILED_STATES = {"CREATE_FAILED", "DELETE_FAILED"}
+_NODE_GROUP_DELETE_WAIT_SECONDS = 10
+_NODE_GROUP_DELETE_MAX_POLLS = 30  # 30 × 10s = 5 minutes
+
+
+def _create_or_adopt_node_group(
+    cluster_id: str,
+    node_group_name: str,
+    create_kwargs: dict[str, Any],
+    label: str,
+) -> str:
+    """Create a PCS compute node group, or adopt/replace an existing one.
+
+    If the node group already exists (``ConflictException``):
+    - If it is in a healthy or in-progress state, adopt it and return
+      its ID so the workflow can continue.
+    - If it is in a terminal failure state (``CREATE_FAILED``,
+      ``DELETE_FAILED``), delete it, wait for deletion to complete,
+      then re-create it.
+
+    Returns the node group ID.
+    """
+    try:
+        response = pcs_client.create_compute_node_group(**create_kwargs)
+        node_group = response.get("computeNodeGroup", {})
+        return node_group.get("id", "")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] != "ConflictException":
+            raise InternalError(f"Failed to create {label} node group: {exc}")
+
+    # Node group already exists — inspect its status
+    logger.info(
+        "%s node group '%s' already exists — checking status",
+        label.capitalize(),
+        node_group_name,
+    )
+
+    try:
+        existing = pcs_client.get_compute_node_group(
+            clusterIdentifier=cluster_id,
+            computeNodeGroupIdentifier=node_group_name,
+        )
+    except ClientError as get_exc:
+        raise InternalError(
+            f"{label.capitalize()} node group '{node_group_name}' exists but "
+            f"could not be described: {get_exc}"
+        )
+
+    existing_group = existing["computeNodeGroup"]
+    existing_id = existing_group["id"]
+    existing_status = existing_group.get("status", "UNKNOWN")
+
+    if existing_status not in _NODE_GROUP_FAILED_STATES:
+        # Healthy or still creating — adopt it
+        logger.info(
+            "Adopting existing %s node group '%s' (status: %s)",
+            label,
+            existing_id,
+            existing_status,
+        )
+        return existing_id
+
+    # Terminal failure — delete and re-create
+    logger.warning(
+        "%s node group '%s' is in state '%s' — deleting before re-creation",
+        label.capitalize(),
+        existing_id,
+        existing_status,
+    )
+
+    try:
+        pcs_client.delete_compute_node_group(
+            clusterIdentifier=cluster_id,
+            computeNodeGroupIdentifier=existing_id,
+        )
+    except ClientError as del_exc:
+        if del_exc.response["Error"]["Code"] != "ResourceNotFoundException":
+            raise InternalError(
+                f"Failed to delete failed {label} node group '{existing_id}': {del_exc}"
+            )
+
+    # Poll until the node group is gone
+    for attempt in range(1, _NODE_GROUP_DELETE_MAX_POLLS + 1):
+        time.sleep(_NODE_GROUP_DELETE_WAIT_SECONDS)
+        try:
+            check = pcs_client.get_compute_node_group(
+                clusterIdentifier=cluster_id,
+                computeNodeGroupIdentifier=node_group_name,
+            )
+            status = check["computeNodeGroup"].get("status", "")
+            logger.info(
+                "Waiting for %s node group '%s' deletion: %s (poll %d/%d)",
+                label,
+                node_group_name,
+                status,
+                attempt,
+                _NODE_GROUP_DELETE_MAX_POLLS,
+            )
+            if status == "DELETED":
+                break
+        except ClientError as poll_exc:
+            if poll_exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info(
+                    "%s node group '%s' deleted successfully",
+                    label.capitalize(),
+                    node_group_name,
+                )
+                break
+            raise InternalError(
+                f"Error polling {label} node group deletion: {poll_exc}"
+            )
+    else:
+        raise InternalError(
+            f"Timed out waiting for {label} node group '{node_group_name}' "
+            f"to be deleted after {_NODE_GROUP_DELETE_MAX_POLLS} attempts."
+        )
+
+    # Re-create the node group
+    logger.info("Re-creating %s node group '%s'", label, node_group_name)
+    try:
+        response = pcs_client.create_compute_node_group(**create_kwargs)
+        node_group = response.get("computeNodeGroup", {})
+        return node_group.get("id", "")
+    except ClientError as recreate_exc:
+        raise InternalError(
+            f"Failed to re-create {label} node group '{node_group_name}': {recreate_exc}"
+        )
+
+
+# ===================================================================
 # Step 8 — Create login node compute node group
 # ===================================================================
 
@@ -1113,35 +1246,34 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
 
     tags = tags_as_dict(project_id, cluster_name)
 
-    try:
-        login_ami_id = event.get("loginAmiId", "") or event.get("amiId", "")
-        create_kwargs = dict(
-            clusterIdentifier=pcs_cluster_id,
-            computeNodeGroupName=f"{cluster_name}-login",
-            subnetIds=public_subnet_ids,
-            purchaseOption="ONDEMAND",
-            scalingConfiguration={
-                "minInstanceCount": 1,
-                "maxInstanceCount": 1,
-            },
-            instanceConfigs=[
-                {"instanceType": login_instance_type},
-            ],
-            customLaunchTemplate={
-                "id": event.get("loginLaunchTemplateId", ""),
-                "version": event.get("loginLaunchTemplateVersion", "1"),
-            },
-            iamInstanceProfileArn=event.get("loginInstanceProfileArn", ""),
-            tags=tags,
-        )
-        if login_ami_id:
-            create_kwargs["amiId"] = login_ami_id
-        response = pcs_client.create_compute_node_group(**create_kwargs)
-    except ClientError as exc:
-        raise InternalError(f"Failed to create login node group: {exc}")
+    login_node_group_name = f"{cluster_name}-login"
+    login_ami_id = event.get("loginAmiId", "") or event.get("amiId", "")
 
-    node_group = response.get("computeNodeGroup", {})
-    login_group_id = node_group.get("id", "")
+    create_kwargs = dict(
+        clusterIdentifier=pcs_cluster_id,
+        computeNodeGroupName=login_node_group_name,
+        subnetIds=public_subnet_ids,
+        purchaseOption="ONDEMAND",
+        scalingConfiguration={
+            "minInstanceCount": 1,
+            "maxInstanceCount": 1,
+        },
+        instanceConfigs=[
+            {"instanceType": login_instance_type},
+        ],
+        customLaunchTemplate={
+            "id": event.get("loginLaunchTemplateId", ""),
+            "version": event.get("loginLaunchTemplateVersion", "1"),
+        },
+        iamInstanceProfileArn=event.get("loginInstanceProfileArn", ""),
+        tags=tags,
+    )
+    if login_ami_id:
+        create_kwargs["amiId"] = login_ami_id
+
+    login_group_id = _create_or_adopt_node_group(
+        pcs_cluster_id, login_node_group_name, create_kwargs, "login",
+    )
 
     logger.info(
         "Login node group '%s' created for cluster '%s'",
@@ -1186,33 +1318,32 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
 
     instance_configs = [{"instanceType": it} for it in instance_types]
 
-    try:
-        compute_ami_id = event.get("amiId", "")
-        create_kwargs = dict(
-            clusterIdentifier=pcs_cluster_id,
-            computeNodeGroupName=f"{cluster_name}-compute",
-            subnetIds=private_subnet_ids,
-            purchaseOption=purchase_option,
-            scalingConfiguration={
-                "minInstanceCount": min_nodes,
-                "maxInstanceCount": max_nodes,
-            },
-            instanceConfigs=instance_configs,
-            customLaunchTemplate={
-                "id": event.get("computeLaunchTemplateId", ""),
-                "version": event.get("computeLaunchTemplateVersion", "1"),
-            },
-            iamInstanceProfileArn=event.get("computeInstanceProfileArn", ""),
-            tags=tags,
-        )
-        if compute_ami_id:
-            create_kwargs["amiId"] = compute_ami_id
-        response = pcs_client.create_compute_node_group(**create_kwargs)
-    except ClientError as exc:
-        raise InternalError(f"Failed to create compute node group: {exc}")
+    compute_node_group_name = f"{cluster_name}-compute"
 
-    node_group = response.get("computeNodeGroup", {})
-    compute_group_id = node_group.get("id", "")
+    compute_ami_id = event.get("amiId", "")
+    create_kwargs = dict(
+        clusterIdentifier=pcs_cluster_id,
+        computeNodeGroupName=compute_node_group_name,
+        subnetIds=private_subnet_ids,
+        purchaseOption=purchase_option,
+        scalingConfiguration={
+            "minInstanceCount": min_nodes,
+            "maxInstanceCount": max_nodes,
+        },
+        instanceConfigs=instance_configs,
+        customLaunchTemplate={
+            "id": event.get("computeLaunchTemplateId", ""),
+            "version": event.get("computeLaunchTemplateVersion", "1"),
+        },
+        iamInstanceProfileArn=event.get("computeInstanceProfileArn", ""),
+        tags=tags,
+    )
+    if compute_ami_id:
+        create_kwargs["amiId"] = compute_ami_id
+
+    compute_group_id = _create_or_adopt_node_group(
+        pcs_cluster_id, compute_node_group_name, create_kwargs, "compute",
+    )
 
     logger.info(
         "Compute node group '%s' created for cluster '%s'",
@@ -1221,6 +1352,87 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
     )
 
     return {**event, "computeNodeGroupId": compute_group_id}
+
+
+# ===================================================================
+# Step 9b — Wait for node groups to become ACTIVE
+# ===================================================================
+
+_NODE_GROUP_TERMINAL_FAILURE_STATES = {"CREATE_FAILED", "DELETE_IN_PROGRESS", "DELETED"}
+_NODE_GROUP_MAX_POLL_ATTEMPTS = 40  # 40 × 30s wait = 20 minutes max
+
+
+def check_node_groups_status(event: dict[str, Any]) -> dict[str, Any]:
+    """Poll PCS compute node group statuses for login and compute groups.
+
+    Returns the event with an added ``nodeGroupsActive`` boolean.
+    Step Functions uses this to decide whether to wait and retry.
+
+    Both the login and compute node groups must reach ACTIVE status
+    before the queue can be created — PCS rejects ``CreateQueue`` if
+    any referenced node group is still CREATING.
+
+    Raises ``InternalError`` if either node group enters a terminal
+    failure state or if the maximum number of poll attempts is exceeded.
+    """
+    pcs_cluster_id: str = event["pcsClusterId"]
+    cluster_name: str = event.get("clusterName", "")
+    login_group_id: str = event.get("loginNodeGroupId", "")
+    compute_group_id: str = event.get("computeNodeGroupId", "")
+
+    poll_count: int = event.get("nodeGroupPollCount", 0) + 1
+
+    all_active = True
+
+    for label, group_id in [("login", login_group_id), ("compute", compute_group_id)]:
+        if not group_id:
+            continue
+
+        try:
+            response = pcs_client.get_compute_node_group(
+                clusterIdentifier=pcs_cluster_id,
+                computeNodeGroupIdentifier=group_id,
+            )
+        except ClientError as exc:
+            raise InternalError(
+                f"Failed to describe {label} node group '{group_id}': {exc}"
+            )
+
+        node_group = response.get("computeNodeGroup", {})
+        status = node_group.get("status", "UNKNOWN")
+
+        logger.info(
+            "%s node group '%s' status: %s (poll %d/%d)",
+            label.capitalize(),
+            group_id,
+            status,
+            poll_count,
+            _NODE_GROUP_MAX_POLL_ATTEMPTS,
+        )
+
+        if status in _NODE_GROUP_TERMINAL_FAILURE_STATES:
+            error_details = ""
+            for error in node_group.get("errors", []):
+                error_details += f" {error.get('code', '')}: {error.get('message', '')}"
+            raise InternalError(
+                f"{label.capitalize()} node group '{group_id}' entered terminal "
+                f"state '{status}'.{error_details} Cluster creation cannot proceed."
+            )
+
+        if status != "ACTIVE":
+            all_active = False
+
+    if not all_active and poll_count >= _NODE_GROUP_MAX_POLL_ATTEMPTS:
+        raise InternalError(
+            f"Node groups for cluster '{cluster_name}' did not become active "
+            f"after {poll_count} attempts. Cluster creation timed out."
+        )
+
+    return {
+        **event,
+        "nodeGroupsActive": all_active,
+        "nodeGroupPollCount": poll_count,
+    }
 
 
 # ===================================================================
@@ -2052,6 +2264,7 @@ _STEP_DISPATCH.update({
     "check_pcs_cluster_status": check_pcs_cluster_status,
     "create_login_node_group": create_login_node_group,
     "create_compute_node_group": create_compute_node_group,
+    "check_node_groups_status": check_node_groups_status,
     "create_pcs_queue": create_pcs_queue,
     "tag_resources": tag_resources,
     "record_cluster": record_cluster,

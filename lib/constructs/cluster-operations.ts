@@ -128,6 +128,7 @@ export class ClusterOperations extends Construct {
         'pcs:DescribeCluster',
         'pcs:DescribeComputeNodeGroup',
         'pcs:DescribeQueue',
+        'pcs:GetComputeNodeGroup',
         'pcs:DeleteCluster',
         'pcs:DeleteComputeNodeGroup',
         'pcs:DeleteQueue',
@@ -184,6 +185,8 @@ export class ClusterOperations extends Construct {
         'ec2:DescribeInstanceTypes',
         'ec2:DescribeInstanceTypeOfferings',
         'ec2:DescribeImages',
+        'ec2:RunInstances',
+        'ec2:CreateFleet',
       ],
       resources: ['*'],
     }));
@@ -202,6 +205,23 @@ export class ClusterOperations extends Construct {
         'iam:GetRole',
       ],
       resources: ['*'],
+    }));
+
+    // PCS and Spot service-linked roles
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['iam:CreateServiceLinkedRole'],
+      resources: [
+        'arn:aws:iam::*:role/aws-service-role/pcs.amazonaws.com/AWSServiceRoleFor*',
+        'arn:aws:iam::*:role/aws-service-role/spot.amazonaws.com/AWSServiceRoleFor*',
+      ],
+      conditions: {
+        'StringLike': {
+          'iam:AWSServiceName': [
+            'pcs.amazonaws.com',
+            'spot.amazonaws.com',
+          ],
+        },
+      },
     }));
 
     // FSx for Lustre service-linked roles
@@ -485,6 +505,21 @@ export class ClusterOperations extends Construct {
       resultPath: '$',
     });
 
+    // Step 7b: Check node group statuses (with wait loop)
+    const checkNodeGroupsStatus = new tasks.LambdaInvoke(this, 'CheckNodeGroupsStatus', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'check_node_groups_status',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    const waitForNodeGroups = new sfn.Wait(this, 'WaitForNodeGroups', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
+    });
+
     // Step 8: Create PCS queue
     const createPcsQueue = new tasks.LambdaInvoke(this, 'CreatePcsQueue', {
       lambdaFunction: clusterCreationStepLambda,
@@ -581,6 +616,7 @@ export class ClusterOperations extends Construct {
     createIamResources.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
+    checkNodeGroupsStatus.addCatch(failureChain, catchConfig);
     createPcsQueue.addCatch(failureChain, catchConfig);
     tagResources.addCatch(failureChain, catchConfig);
     recordCluster.addCatch(failureChain, catchConfig);
@@ -596,6 +632,12 @@ export class ClusterOperations extends Construct {
     const isPcsClusterActive = new sfn.Choice(this, 'IsPcsClusterActive')
       .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), new sfn.Pass(this, 'PcsClusterReady'))
       .otherwise(pcsWaitLoop);
+
+    // Node group wait loop: check status → if not active, wait → check again
+    const nodeGroupWaitLoop = waitForNodeGroups.next(checkNodeGroupsStatus);
+    const areNodeGroupsActive = new sfn.Choice(this, 'AreNodeGroupsActive')
+      .when(sfn.Condition.booleanEquals('$.nodeGroupsActive', true), createPcsQueue)
+      .otherwise(nodeGroupWaitLoop);
 
     // --- Storage branch: choice between lustre (FSx) and mountpoint (S3 IAM) ---
 
@@ -693,7 +735,11 @@ export class ClusterOperations extends Construct {
     // Post-parallel chain: all branches converge here
     const postBranchChain = createLoginNodeGroup
       .next(createComputeNodeGroup)
-      .next(createPcsQueue)
+      .next(checkNodeGroupsStatus)
+      .next(areNodeGroupsActive);
+
+    // Continue after node groups are active: queue → tag → record → success
+    createPcsQueue
       .next(tagResources)
       .next(recordCluster)
       .next(creationSuccess);
@@ -872,7 +918,17 @@ export class ClusterOperations extends Construct {
         'ec2:DescribeSubnets',
         'ec2:DescribeSecurityGroups',
         'ec2:DescribeVpcs',
+        'ec2:RunInsances',
         'ec2:CreateTags',
+        'ec2:CreateFleet',
+        'ec2:CreateNetworkInterface',
+        'ec2:DescribeImages',
+        'ec2:DescribeInstanceTypes',
+        'ec2:DescribeInstanceTypeOfferings',
+        'ec2:DescribeLaunchTemplates',
+        'ec2:DescribeLaunchTemplateVersions',
+        'ec2:GetSecurityGroupsForVpc',
+        'ec2:DescribeCapacityReservations',
       ],
       resources: ['*'],
     }));
