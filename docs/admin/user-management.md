@@ -68,10 +68,35 @@ This means a Platform Administrator can perform any action a Project Administrat
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
-| `userId` | string | Yes | Unique identifier for the user (alphanumeric, used as the POSIX username) |
+| `userId` | string | Yes | Unique identifier for the user, used as the POSIX username on cluster nodes. Must start with a lowercase letter (`a-z`) or underscore (`_`), contain only lowercase letters, digits (`0-9`), underscores, and hyphens (`-`), and be 1–32 characters long. Examples: `jsmith`, `_admin01`, `dev-user`. |
 | `displayName` | string | Yes | Human-readable display name |
 | `email` | string | Yes | Email address for Cognito account and notifications |
 | `role` | string | No | Platform role: `User` (default) or `Administrator`. Administrators have full management access. |
+
+### POSIX Username Format
+
+The `userId` value is used as the Linux (POSIX) username on every cluster node. It must conform to the following rules:
+
+| Rule | Constraint |
+|------|-----------|
+| Allowed characters | Lowercase ASCII letters `a-z`, digits `0-9`, underscore `_`, hyphen `-` |
+| Start character | Must begin with a lowercase letter (`a-z`) or underscore (`_`) |
+| Length | 1 to 32 characters inclusive |
+
+**Valid examples:**
+
+| Username | Notes |
+|----------|-------|
+| `jsmith` | Lowercase letters only |
+| `_admin01` | Starts with underscore, contains digits |
+| `dev-user` | Contains a hyphen |
+
+**Invalid examples:**
+
+| Username | Why it is rejected |
+|----------|-------------------|
+| `Jane.Smith` | Contains uppercase letters and a dot (`.`) |
+| `admin@corp` | Contains an `@` symbol |
 
 ### What Happens
 
@@ -100,6 +125,7 @@ This means a Platform Administrator can perform any action a Project Administrat
 
 | Scenario | Error Code | HTTP Status |
 |----------|-----------|-------------|
+| Invalid userId format | `VALIDATION_ERROR` | 400 |
 | Duplicate userId | `DUPLICATE_ERROR` | 409 |
 | Missing required field | `VALIDATION_ERROR` | 400 |
 | Invalid role value | `VALIDATION_ERROR` | 400 |

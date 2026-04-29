@@ -35,6 +35,7 @@ from typing import Any
 
 import boto3
 from botocore.exceptions import ClientError
+from validators import validate_posix_username
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -108,6 +109,10 @@ def generate_user_creation_commands(user_id: str, uid: int, gid: int) -> list[st
         A list of bash command strings.
     """
     if not user_id:
+        return []
+    is_valid, _ = validate_posix_username(user_id)
+    if not is_valid:
+        logger.warning("Rejecting invalid POSIX username: %r", user_id)
         return []
     commands = [
         f"groupadd -g {gid} {user_id} 2>/dev/null || true",

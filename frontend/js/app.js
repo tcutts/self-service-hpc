@@ -163,6 +163,20 @@ const accountingTableConfig = {
 };
 
 /* ============================================================
+   POSIX Username Validation
+   ============================================================ */
+
+const POSIX_USERNAME_REGEX = /^[a-z_][a-z0-9_-]{0,31}$/;
+
+function validatePosixUsername(username) {
+  if (!username) return 'User ID is required.';
+  if (username.length > 32) return `User ID must be at most 32 characters (got ${username.length}).`;
+  if (!/^[a-z_]/.test(username)) return 'User ID must start with a lowercase letter (a-z) or underscore (_).';
+  if (!/^[a-z0-9_-]+$/.test(username)) return 'User ID contains invalid characters. Only lowercase letters (a-z), digits (0-9), underscores (_), and hyphens (-) are allowed.';
+  return '';
+}
+
+/* ============================================================
    Cognito Authentication (USER_PASSWORD_AUTH via InitiateAuth)
    ============================================================ */
 
@@ -569,7 +583,8 @@ function renderUsersPage(container) {
       <h3>Add New User</h3>
       <div class="form-group">
         <label for="new-user-id">User ID</label>
-        <input type="text" id="new-user-id" placeholder="jsmith" />
+        <input type="text" id="new-user-id" placeholder="jsmith" maxlength="32" />
+        <div id="user-id-error" class="field-error" role="alert" aria-live="polite"></div>
       </div>
       <div class="form-group">
         <label for="new-user-name">Display Name</label>
@@ -586,7 +601,7 @@ function renderUsersPage(container) {
           <option value="Administrator">Administrator</option>
         </select>
       </div>
-      <button class="btn btn-primary" id="btn-submit-user">Create User</button>
+      <button class="btn btn-primary" id="btn-submit-user" disabled>Create User</button>
       <button class="btn" id="btn-cancel-user" style="margin-left:0.5rem">Cancel</button>
     </div>
   `;
@@ -610,6 +625,22 @@ function renderUsersPage(container) {
       document.getElementById('add-user-form').style.display = 'none';
       loadUsers();
     } catch (e) { showToast(e.message, 'error'); }
+  });
+
+  document.getElementById('new-user-id').addEventListener('input', () => {
+    const userId = document.getElementById('new-user-id').value.trim();
+    const errorMsg = validatePosixUsername(userId);
+    const errorDiv = document.getElementById('user-id-error');
+    const submitBtn = document.getElementById('btn-submit-user');
+    if (errorMsg) {
+      errorDiv.textContent = errorMsg;
+      errorDiv.style.display = 'block';
+      submitBtn.disabled = true;
+    } else {
+      errorDiv.textContent = '';
+      errorDiv.style.display = 'none';
+      submitBtn.disabled = false;
+    }
   });
 
   document.getElementById('btn-bulk-clear-users').addEventListener('click', () => {

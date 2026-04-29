@@ -12,6 +12,7 @@ import boto3
 from botocore.exceptions import ClientError
 
 from errors import DuplicateError, InternalError, NotFoundError, ValidationError
+from validators import validate_posix_username
 
 logger = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ def create_user(
             f"Invalid role '{role}'. Must be one of: {', '.join(VALID_ROLES)}.",
             {"field": "role"},
         )
+
+    is_valid, error_msg = validate_posix_username(user_id)
+    if not is_valid:
+        raise ValidationError(error_msg, {"field": "userId"})
 
     posix_uid = _allocate_posix_uid(table_name)
 
