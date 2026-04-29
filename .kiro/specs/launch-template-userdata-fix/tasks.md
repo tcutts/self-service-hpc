@@ -1,0 +1,133 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Launch Template Missing UserData, EFS Mount Missing, AMI Not Validated
+  - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bugs exist
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the three defects exist
+  - **Scoped PBT Approach**: Scope the property to the concrete failing cases for each defect:
+    - Defect 1: Call `create_launch_templates()` with a valid event (mocking `ec2_client.create_launch_template`) and assert that the `LaunchTemplateData` dict passed to the mock contains a `UserData` key with a non-empty base64-encoded string
+    - Defect 2: Call `generate_user_data_script()` with `efs_filesystem_id="fs-abc123"` and assert the output contains `mount -t efs` and `amazon-efs-utils`. On unfixed code this will raise `TypeError` (unexpected keyword argument) — confirming the parameter is missing
+    - Defect 3: Call `_validate_template_fields()` with `ami_id="ami-doesnotexist"` (mocking `ec2_client.describe_images` to return no images) and assert it raises `ValidationError`. On unfixed code it will pass validation since only non-empty string check exists
+  - Test file: `tests/test_bug_condition_launch_template.py`
+  - Mock `ec2_client`, `dynamodb`, and other AWS clients to isolate unit behavior
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves the bugs exist)
+  - Document counterexamples found:
+    - `create_launch_templates()` creates templates with `LaunchTemplateData` containing no `UserData` key
+    - `generate_user_data_script()` raises `TypeError` when called with `efs_filesystem_id` parameter
+    - `_validate_template_fields()` accepts `ami_id="ami-doesnotexist"` without EC2 API validation
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 1.8_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Existing Launch Template Fields, POSIX Script Content, and Workflow Structure
+  - **IMPORTANT**: Follow observation-first methodology
+  - **Observe on UNFIXED code**:
+    - `create_launch_templates()` passes correct `SecurityGroupIds` (head node SG for login, compute node SG for compute) to `ec2_client.create_launch_template`
+    - `create_launch_templates()` passes correct `ImageId` (login AMI for login template, compute AMI for compute template) to `ec2_client.create_launch_template`
+    - `create_launch_templates()` passes correct `TagSpecifications` with project and cluster tags
+    - `create_launch_templates()` adopts existing templates when `InvalidLaunchTemplateName.AlreadyExistsException` is raised
+    - `generate_user_data_script()` with `storage_mode="mountpoint"` and valid `s3_bucket_name` produces script containing Mountpoint for S3 mount commands
+    - `generate_user_data_script()` with `storage_mode="lustre"` and valid FSx parameters produces script containing FSx for Lustre mount commands
+    - `generate_user_data_script()` with no storage mode omits storage mount commands
+    - `generate_user_data_script()` always produces POSIX user creation commands, generic account disabling, PAM exec logging, and CloudWatch agent commands
+  - **Write property-based tests** capturing observed behavior patterns:
+    - For random valid events with varying security groups and AMI IDs, verify `create_launch_templates()` preserves `SecurityGroupIds` and `ImageId` in `LaunchTemplateData`
+    - For random combinations of project members (0 to N users with valid POSIX UIDs/GIDs) and storage modes (`""`, `"mountpoint"`, `"lustre"`), verify `generate_user_data_script()` produces scripts containing the same POSIX and storage commands as observed
+    - For random valid events, verify launch template `TagSpecifications` are unchanged
+  - Test file: `tests/test_preservation_launch_template.py`
+  - Use Hypothesis for property-based testing with constrained strategies
+  - Run tests on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8, 3.9, 3.10_
+
+- [x] 3. Fix for launch template UserData, EFS mount, and AMI validation defects
+
+  - [x] 3.1 Add `generate_efs_mount_commands()` function and update `generate_user_data_script()` in `posix_provisioning.py`
+    - Create new `generate_efs_mount_commands(efs_filesystem_id: str, mount_path: str = "/home") -> list[str]` function that generates:
+      - Install `amazon-efs-utils` via yum/apt
+      - `mkdir -p /home`
+      - Add fstab entry: `{efs_filesystem_id}:/ /home efs _netdev,tls 0 0`
+      - Run `mount -a -t efs`
+    - Add `efs_filesystem_id: str = ""` parameter to `generate_user_data_script()`
+    - Insert EFS mount commands BEFORE POSIX user creation section (so `/home` is available when home directories are created)
+    - When `efs_filesystem_id` is empty, omit EFS mount commands (preserves existing behavior)
+    - _Bug_Condition: isBugCondition(input) where generate_user_data_script has no efs_filesystem_id parameter and no EFS mount logic_
+    - _Expected_Behavior: generate_user_data_script accepts efs_filesystem_id and produces EFS mount commands before POSIX user creation_
+    - _Preservation: Existing POSIX user creation, generic account disabling, PAM logging, CloudWatch agent, and storage mount commands unchanged_
+    - _Requirements: 2.4, 2.6, 3.5, 3.6, 3.7, 3.8_
+
+  - [x] 3.2 Update `create_launch_templates()` in `cluster_creation.py` to include UserData and remove redundant calls
+    - Call `generate_user_data_script()` within `create_launch_templates()`, passing `efs_filesystem_id=event.get("efsFileSystemId", "")` along with `project_id`, `users_table_name=USERS_TABLE_NAME`, `projects_table_name=PROJECTS_TABLE_NAME`, `storage_mode`, `s3_bucket_name`, `fsx_dns_name`, `fsx_mount_name`
+    - Base64-encode the generated script and set as `UserData` field in `LaunchTemplateData` for both login and compute templates
+    - Remove the `generate_user_data_script()` call and `user_data_script` variable from `create_login_node_group()` — remove the associated logger.info call and the `userDataScript` key from the return dict
+    - Remove the `generate_user_data_script()` call and `user_data_script` variable from `create_compute_node_group()` — remove the associated logger.info call
+    - _Bug_Condition: isBugCondition(input) where LaunchTemplateData has no UserData field_
+    - _Expected_Behavior: LaunchTemplateData contains base64-encoded UserData with POSIX provisioning, EFS mount, and storage mount commands_
+    - _Preservation: SecurityGroupIds, ImageId, TagSpecifications unchanged; workflow structure unchanged_
+    - _Requirements: 2.1, 2.2, 2.3, 2.5, 2.7, 3.1, 3.2, 3.3, 3.4, 3.9_
+
+  - [x] 3.3 Add `validate_ami_available()` function and update `_validate_template_fields()` in `templates.py`
+    - Create new `validate_ami_available(ami_id: str) -> None` function that:
+      - Calls `ec2_client.describe_images(ImageIds=[ami_id])` 
+      - Checks that the response contains at least one image with `State == "available"`
+      - Raises `ValidationError` if no images found or image state is not `available`
+      - Handles `ClientError` (e.g., `InvalidAMIID.Malformed`, `InvalidAMIID.NotFound`) and raises `ValidationError`
+    - Update `_validate_template_fields()` to call `validate_ami_available(ami_id)` after the existing non-empty string check
+    - Also validate `login_ami_id` if provided (add parameter to `_validate_template_fields` and call from `create_template`/`update_template`)
+    - _Bug_Condition: isBugCondition(input) where ami_id is not validated via ec2:DescribeImages_
+    - _Expected_Behavior: Invalid AMIs rejected with ValidationError at template create/update time_
+    - _Preservation: Auto-detected AMIs from get_latest_pcs_ami() continue to work without additional validation_
+    - _Requirements: 2.8, 3.10_
+
+  - [x] 3.4 Add AMI validation to `create_launch_templates()` in `cluster_creation.py`
+    - Call `validate_ami_available()` for both `ami_id` and `login_ami_id` before creating the launch templates as a fail-fast check
+    - Import `validate_ami_available` from `templates` module (or duplicate the function in `cluster_creation.py` to avoid cross-Lambda imports — prefer adding a shared utility or duplicating since these are separate Lambda packages)
+    - _Bug_Condition: isBugCondition(input) where create_launch_templates uses AMI without validation_
+    - _Expected_Behavior: Invalid AMIs rejected before launch template creation with clear error_
+    - _Preservation: Valid AMIs continue to work as before_
+    - _Requirements: 2.9_
+
+  - [x] 3.5 Add `ec2:DescribeImages` permission to cluster creation Lambda IAM policy in `cluster-operations.ts`
+    - Add `ec2:DescribeImages` to the existing EC2 policy statement for `clusterCreationStepLambda` (the one that already has `ec2:DescribeInstanceTypes`, `ec2:DescribeLaunchTemplates`, etc.)
+    - _Requirements: 2.9_
+
+  - [x] 3.6 Update documentation
+    - Update `docs/user/data-management.md`: Add a note in the Home Directories section clarifying that EFS home directories are automatically mounted at `/home` on every cluster node at boot time via the EC2 launch template user data script
+    - Update `docs/project-admin/cluster-management.md`: Add a note in the Creating a Cluster section that AMI IDs are validated against EC2 at template creation/update time and at cluster creation time, and that invalid AMIs are rejected with a clear error
+    - _Requirements: 2.4, 2.8, 2.9_
+
+  - [x] 3.7 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Launch Template Contains UserData, EFS Mount Present, AMI Validated
+    - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
+    - The test from task 1 encodes the expected behavior
+    - When this test passes, it confirms the expected behavior is satisfied:
+      - `create_launch_templates()` includes `UserData` in `LaunchTemplateData`
+      - `generate_user_data_script()` accepts `efs_filesystem_id` and produces EFS mount commands
+      - `_validate_template_fields()` rejects invalid AMIs via EC2 DescribeImages
+    - Run bug condition exploration test from step 1
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bugs are fixed)
+    - _Requirements: 2.1, 2.4, 2.6, 2.7, 2.8_
+
+  - [x] 3.8 Verify preservation tests still pass
+    - **Property 2: Preservation** - Existing Launch Template Fields, POSIX Script Content, and Workflow Structure
+    - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
+    - Run preservation property tests from step 2
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions)
+    - Confirm all tests still pass after fix:
+      - SecurityGroupIds preserved in launch templates
+      - ImageId preserved in launch templates
+      - TagSpecifications preserved
+      - POSIX user creation, generic account disabling, PAM logging, CloudWatch agent commands unchanged
+      - Mountpoint for S3 and FSx for Lustre mount commands unchanged
+      - No storage mount commands when no storage mode specified
+
+- [x] 4. Checkpoint — Ensure all tests pass
+  - Run full test suite to confirm no regressions
+  - Ensure bug condition exploration test passes (task 1 test on fixed code)
+  - Ensure preservation property tests pass (task 2 tests on fixed code)
+  - Ensure any existing project tests still pass
+  - Ask the user if questions arise
