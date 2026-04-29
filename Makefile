@@ -29,24 +29,30 @@ help: ## Show available targets
 		awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
 
 .PHONY: venv
-venv: ## Create Python virtual environment and install dependencies
+venv: .venv/.installed ## Create Python virtual environment and install dependencies
+
+.venv/.installed: requirements.txt
 	@if [ ! -d "$(VENV_DIR)" ]; then python3 -m venv $(VENV_DIR); fi
 	$(PIP) install --quiet -r requirements.txt
+	@touch .venv/.installed
 
 .PHONY: node_modules
-node_modules: package.json package-lock.json ## Install Node.js dependencies
+node_modules: node_modules/.installed ## Install Node.js dependencies
+
+node_modules/.installed: package.json package-lock.json
 	npm ci
+	@touch node_modules/.installed
 
 .PHONY: build
-build: node_modules ## Compile CDK TypeScript
+build: node_modules/.installed ## Compile CDK TypeScript
 	npm run build
 
 .PHONY: synth
-synth: build venv ## Synthesise CloudFormation templates
+synth: build .venv/.installed ## Synthesise CloudFormation templates
 	npx cdk synth --profile $(AWS_PROFILE)
 
 .PHONY: test
-test: build venv ## Run CDK (jest) and Python (pytest) tests
+test: build .venv/.installed ## Run CDK (jest) and Python (pytest) tests
 	npm test
 	$(PYTEST) test/lambda/ -v
 
@@ -55,7 +61,7 @@ test: build venv ## Run CDK (jest) and Python (pytest) tests
 # ---------------------------------------------------------------------------
 
 .PHONY: deploy
-deploy: build venv ## Deploy foundation and all project stacks
+deploy: build .venv/.installed ## Deploy foundation and all project stacks
 	npx cdk deploy HpcFoundationStack --require-approval never --profile $(AWS_PROFILE)
 	@echo "--- Deploying project stacks (HpcProject-*) ---"
 	@for stack in $$(npx cdk list --profile $(AWS_PROFILE) 2>/dev/null | grep '^HpcProject-'); do \
@@ -69,7 +75,7 @@ deploy: build venv ## Deploy foundation and all project stacks
 # ---------------------------------------------------------------------------
 
 .PHONY: teardown
-teardown: venv ## Destroy all clusters and projects, retain foundation stack
+teardown: .venv/.installed ## Destroy all clusters and projects, retain foundation stack
 	$(PYTHON) scripts/teardown_workloads.py --profile $(AWS_PROFILE)
 
 # ---------------------------------------------------------------------------
