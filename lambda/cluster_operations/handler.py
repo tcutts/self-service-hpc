@@ -20,6 +20,7 @@ import time
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Add shared utilities to the module search path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
@@ -445,8 +446,8 @@ def _handle_get_cluster(
             login_ip, instance_id, ssh_port, dcv_port
         )
 
-    # Include progress fields for clusters in CREATING status
-    if cluster.get("status") == "CREATING":
+    # Include progress fields for clusters in CREATING or DESTROYING status
+    if cluster.get("status") in ("CREATING", "DESTROYING"):
         cluster["progress"] = {
             "currentStep": int(cluster.get("currentStep", 0)),
             "totalSteps": int(cluster.get("totalSteps", 0)),
@@ -530,8 +531,10 @@ def _handle_delete_cluster(
 ) -> dict[str, Any]:
     """Handle DELETE /projects/{projectId}/clusters/{clusterName} — destroy a cluster.
 
-    Validates authorisation, retrieves the cluster record, then starts
-    the destruction Step Functions execution.
+    Validates authorisation, retrieves the cluster record for resource IDs,
+    then uses an atomic DynamoDB conditional update to transition the status
+    from ACTIVE or FAILED to DESTROYING (initialising progress fields) before
+    starting the destruction Step Functions execution.
     """
     caller = get_caller_identity(event)
     if not is_project_user(event, project_id):
@@ -546,12 +549,41 @@ def _handle_delete_cluster(
         cluster_name=cluster_name,
     )
 
-    if cluster.get("status") not in ("ACTIVE", "FAILED"):
-        raise ConflictError(
-            f"Cluster '{cluster_name}' cannot be destroyed in its current state "
-            f"(status: {cluster.get('status')}).",
-            {"clusterName": cluster_name, "status": cluster.get("status")},
+    # Atomically transition status to DESTROYING and initialise progress fields.
+    # The ConditionExpression ensures only ACTIVE or FAILED clusters can be
+    # destroyed, and prevents concurrent deletion requests from both succeeding.
+    now = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    clusters_table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    try:
+        clusters_table.update_item(
+            Key={
+                "PK": f"PROJECT#{project_id}",
+                "SK": f"CLUSTER#{cluster_name}",
+            },
+            UpdateExpression=(
+                "SET #st = :destroying, currentStep = :zero, totalSteps = :total, "
+                "stepDescription = :desc, updatedAt = :now"
+            ),
+            ConditionExpression="#st IN (:active, :failed)",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":destroying": "DESTROYING",
+                ":zero": 0,
+                ":total": 8,
+                ":desc": "Starting cluster destruction",
+                ":active": "ACTIVE",
+                ":failed": "FAILED",
+                ":now": now,
+            },
         )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise ConflictError(
+                f"Cluster '{cluster_name}' cannot be destroyed in its current state "
+                f"(status: {cluster.get('status')}).",
+                {"clusterName": cluster_name, "status": cluster.get("status")},
+            )
+        raise
 
     # Start the destruction Step Functions execution
     timestamp = int(time.time())

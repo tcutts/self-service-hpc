@@ -92,23 +92,9 @@ const projectsTableConfig = {
         if (status === 'CREATED') {
           return `<button class="btn btn-primary btn-sm" onclick="deployProject('${esc(row.projectId)}')">Deploy</button>`;
         } else if (status === 'DEPLOYING') {
-          const cur = row.currentStep || 0;
-          const total = row.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = row.stepDescription || 'Deploying…';
-          return `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
+          return renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Deploying…');
         } else if (status === 'UPDATING') {
-          const cur = row.currentStep || 0;
-          const total = row.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = row.stepDescription || 'Updating…';
-          return `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
+          return renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Updating…');
         } else if (status === 'ACTIVE') {
           const isUpToDate = foundationStackTimestamp && row.statusChangedAt && row.statusChangedAt >= foundationStackTimestamp;
           const updateDisabled = isUpToDate ? ' disabled title="Project is up to date"' : '';
@@ -117,14 +103,7 @@ const projectsTableConfig = {
             <button class="${updateClass}" style="margin-left:0.25rem" onclick="updateProject('${esc(row.projectId)}')"${updateDisabled}>Update</button>
             <button class="btn btn-danger btn-sm" style="margin-left:0.25rem" onclick="showDestroyConfirmation('${esc(row.projectId)}')">Destroy</button>`;
         } else if (status === 'DESTROYING') {
-          const cur = row.currentStep || 0;
-          const total = row.totalSteps || 5;
-          const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-          const desc = row.stepDescription || 'Destroying…';
-          return `<div class="progress-container compact">
-            <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-            <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-          </div>`;
+          return renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Destroying…');
         }
         return '';
       },
@@ -402,7 +381,9 @@ async function apiCall(method, path, body) {
   const data = await resp.json();
   if (!resp.ok) {
     const msg = data?.error?.message || data?.message || `Request failed (${resp.status})`;
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = resp.status;
+    throw err;
   }
   return data;
 }
@@ -933,7 +914,11 @@ function showDestroyConfirmation(projectId) {
       modal.remove();
       loadProjects();
     } catch (e) {
-      showToast(e.message, 'error');
+      if (e.status === 409) {
+        showToast('This resource is already being destroyed', 'error');
+      } else {
+        showToast(e.message, 'error');
+      }
       modal.remove();
     }
   });
@@ -1886,19 +1871,14 @@ async function loadClusters(projectId) {
           key: '_progress', label: 'Progress', type: 'custom', sortable: false,
           render: (row) => {
             if (row.status === 'CREATING') {
-              const cur = row.currentStep || 0;
-              const total = row.totalSteps || 10;
-              const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
-              const desc = row.stepDescription || 'Initialising…';
               const isStale = row.createdAt && (Date.now() - new Date(row.createdAt).getTime()) > CONFIG.clusterCreationTimeoutMs;
-              let html = `<div class="progress-container compact">
-                <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
-                <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
-              </div>`;
+              let html = renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Initialising…');
               if (isStale) {
                 html += `<span class="badge badge-stale-warning" role="alert">Creation may have failed</span>`;
               }
               return html;
+            } else if (row.status === 'DESTROYING') {
+              return renderProgressBar(row.currentStep, row.totalSteps, row.stepDescription, 'Destroying…');
             } else if (row.status === 'FAILED') {
               return `<span style="color:var(--color-danger);font-size:0.8rem">${esc(row.errorMessage || 'Unknown error')}</span>`;
             }
@@ -1980,7 +1960,13 @@ async function destroyCluster(projectId, clusterName) {
     await apiCall('DELETE', `/projects/${encodeURIComponent(projectId)}/clusters/${encodeURIComponent(clusterName)}`);
     showToast(`Cluster '${clusterName}' destruction started`);
     loadClusters(projectId);
-  } catch (e) { showToast(e.message, 'error'); }
+  } catch (e) {
+    if (e.status === 409) {
+      showToast('This resource is already being destroyed', 'error');
+    } else {
+      showToast(e.message, 'error');
+    }
+  }
 }
 
 async function recreateCluster(projectId, clusterName) {
@@ -2046,6 +2032,8 @@ async function loadClusterDetail(projectId, clusterName) {
       showToast(`Cluster '${clusterName}' is now ACTIVE`, 'success');
     } else if (prev === 'CREATING' && cluster.status === 'FAILED') {
       showToast(`Cluster '${clusterName}' creation FAILED`, 'error');
+    } else if (prev === 'DESTROYING' && cluster.status === 'DESTROYED') {
+      showToast(`Cluster '${clusterName}' has been destroyed`, 'success');
     }
     state.clusterStatusCache[clusterName] = cluster.status;
 
@@ -2135,6 +2123,19 @@ async function loadClusterDetail(projectId, clusterName) {
       startClusterDetailPolling(projectId, clusterName);
     }
 
+    // DESTROYING: show progress
+    if (cluster.status === 'DESTROYING') {
+      const progress = cluster.progress || {};
+      html += `<div class="info-box">
+        <h4>Destruction Progress</h4>
+        ${renderProgressBar(progress.currentStep, progress.totalSteps, progress.stepDescription, 'Destroying…', false)}
+        <p style="font-size:0.8rem;margin:0.5rem 0 0;color:var(--color-text-muted)">
+          This page refreshes automatically. You can navigate away and return to check progress.
+        </p>
+      </div>`;
+      startClusterDetailPolling(projectId, clusterName);
+    }
+
     // FAILED: show error
     if (cluster.status === 'FAILED') {
       html += `<div class="error-box">
@@ -2150,7 +2151,7 @@ async function loadClusterDetail(projectId, clusterName) {
         DESTROYING: 'Cluster is being destroyed. Data is being exported to S3.',
         DESTROYED: 'This cluster has been destroyed. Home directories and project storage have been retained.',
       };
-      if (cluster.status !== 'CREATING') { // CREATING already has progress box
+      if (cluster.status !== 'CREATING' && cluster.status !== 'DESTROYING') { // CREATING and DESTROYING already have progress boxes
         html += `<div class="info-box">${msgs[cluster.status]}</div>`;
       }
     }
@@ -2555,6 +2556,27 @@ function esc(str) {
   const div = document.createElement('div');
   div.textContent = String(str);
   return div.innerHTML;
+}
+
+/**
+ * Render a progress bar with step info and percentage.
+ * @param {number} currentStep - Current step number
+ * @param {number} totalSteps - Total number of steps
+ * @param {string} stepDescription - Human-readable step description
+ * @param {string} defaultLabel - Fallback label if stepDescription is empty
+ * @param {boolean} [compact=true] - Whether to use compact styling
+ * @returns {string} HTML string for the progress bar
+ */
+function renderProgressBar(currentStep, totalSteps, stepDescription, defaultLabel, compact = true) {
+  const cur = currentStep || 0;
+  const total = totalSteps || 1;
+  const pct = total > 0 ? Math.round((cur / total) * 100) : 0;
+  const desc = stepDescription || defaultLabel;
+  const compactClass = compact ? ' compact' : '';
+  return `<div class="progress-container${compactClass}">
+    <div class="progress-label">${esc(desc)} (${cur}/${total})</div>
+    <div class="progress-bar-track"><div class="progress-bar-fill" style="width:${pct}%">${pct}%</div></div>
+  </div>`;
 }
 
 /* ============================================================

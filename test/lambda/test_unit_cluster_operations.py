@@ -880,6 +880,7 @@ class TestClusterDestructionWorkflow:
 
             from conftest import _CLUSTER_OPS_DIR, _load_module_from
             errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
             destruction_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_destruction")
 
             yield {
@@ -929,8 +930,12 @@ class TestClusterDestructionWorkflow:
         assert result["fsxDeleted"] is False
 
     def test_record_cluster_destroyed_updates_status(self, _env):
-        # Seed a cluster first
-        _seed_cluster(_env["clusters_table"], "proj-d", "destroy-me", status="DESTROYING")
+        # Seed a cluster with progress fields to verify they are cleared
+        _seed_cluster(
+            _env["clusters_table"], "proj-d", "destroy-me",
+            status="DESTROYING",
+            currentStep=7, totalSteps=8, stepDescription="Cleaning up IAM and templates",
+        )
 
         event = {"projectId": "proj-d", "clusterName": "destroy-me"}
         result = _env["destruction_mod"].record_cluster_destroyed(event)
@@ -944,6 +949,10 @@ class TestClusterDestructionWorkflow:
         )
         assert item["Item"]["status"] == "DESTROYED"
         assert "destroyedAt" in item["Item"]
+        # Progress fields must be cleared (REMOVEd) on destruction
+        assert "currentStep" not in item["Item"]
+        assert "totalSteps" not in item["Item"]
+        assert "stepDescription" not in item["Item"]
 
     def test_remove_mountpoint_s3_policy_removes_from_both_roles(self, _env):
         """remove_mountpoint_s3_policy deletes MountpointS3Access from login and compute roles."""
@@ -1638,11 +1647,16 @@ class TestClusterDestructionStartsSFN:
 
     def test_destruction_payload_defaults_storage_mode_to_mountpoint(self, _env):
         """Legacy clusters without storageMode default to 'mountpoint' in the destruction payload."""
+        _seed_cluster(
+            _env["clusters_table"], "proj-destroy", "legacy-no-mode-cl",
+            status="ACTIVE",
+            pcsClusterId="pcs-legacy", fsxFilesystemId="fs-legacy",
+        )
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
             mock_sfn.start_execution = MagicMock(return_value={})
             event = _project_user_event(
                 "DELETE", "/projects/{projectId}/clusters/{clusterName}", "proj-destroy",
-                path_parameters={"projectId": "proj-destroy", "clusterName": "active-cl"},
+                path_parameters={"projectId": "proj-destroy", "clusterName": "legacy-no-mode-cl"},
             )
             _env["handler_mod"].handler(event, None)
             payload = json.loads(mock_sfn.start_execution.call_args[1]["input"])
@@ -2741,7 +2755,9 @@ class TestCreateLaunchTemplates:
 
         with patch.object(
             creation_mod, "ec2_client"
-        ) as mock_ec2:
+        ) as mock_ec2, patch.object(
+            creation_mod, "validate_ami_available"
+        ):
             mock_ec2.create_launch_template = MagicMock(side_effect=mock_responses)
 
             event = {
@@ -2771,7 +2787,9 @@ class TestCreateLaunchTemplates:
 
         with patch.object(
             creation_mod, "ec2_client"
-        ) as mock_ec2:
+        ) as mock_ec2, patch.object(
+            creation_mod, "validate_ami_available"
+        ):
             mock_ec2.create_launch_template = MagicMock(side_effect=ec2_error)
 
             event = {
@@ -2796,7 +2814,8 @@ class TestCreateLaunchTemplates:
         """The compute launch template must include ImageId from amiId."""
         creation_mod = _env["creation_mod"]
 
-        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "validate_ami_available"):
             mock_ec2.create_launch_template = MagicMock(
                 return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
             )
@@ -2824,7 +2843,8 @@ class TestCreateLaunchTemplates:
         """The login launch template must include ImageId — defaults to amiId."""
         creation_mod = _env["creation_mod"]
 
-        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "validate_ami_available"):
             mock_ec2.create_launch_template = MagicMock(
                 return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
             )
@@ -2852,7 +2872,8 @@ class TestCreateLaunchTemplates:
         """When loginAmiId is set, the login template uses it instead of amiId."""
         creation_mod = _env["creation_mod"]
 
-        with patch.object(creation_mod, "ec2_client") as mock_ec2:
+        with patch.object(creation_mod, "ec2_client") as mock_ec2, \
+             patch.object(creation_mod, "validate_ami_available"):
             mock_ec2.create_launch_template = MagicMock(
                 return_value={"LaunchTemplate": {"LaunchTemplateId": "lt-001"}}
             )
@@ -2937,6 +2958,7 @@ class TestDeleteLaunchTemplates:
 
             from conftest import _CLUSTER_OPS_DIR, _load_module_from
             errors_mod = _load_module_from(_CLUSTER_OPS_DIR, "errors")
+            _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
             destruction_mod = _load_module_from(_CLUSTER_OPS_DIR, "cluster_destruction")
 
             yield {
@@ -3324,6 +3346,8 @@ class TestUnchangedBehaviourRegression:
             "check_pcs_cluster_status",
             "create_login_node_group",
             "create_compute_node_group",
+            "check_node_groups_status",
+            "resolve_login_node_details",
             "create_pcs_queue",
             "tag_resources",
             "record_cluster",
@@ -3354,6 +3378,9 @@ class TestUnchangedBehaviourRegression:
             "create_fsx_export_task",
             "check_fsx_export_status",
             "delete_pcs_resources",
+            "check_pcs_deletion_status",
+            "delete_pcs_cluster",
+            "deregister_cluster_name",
             "delete_fsx_filesystem",
             "remove_mountpoint_s3_policy",
             "delete_iam_resources",

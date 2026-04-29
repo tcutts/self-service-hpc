@@ -59,6 +59,71 @@ pcs_client = boto3.client("pcs")
 CLUSTERS_TABLE_NAME = os.environ.get("CLUSTERS_TABLE_NAME", "Clusters")
 
 # ---------------------------------------------------------------------------
+# Step progress tracking
+# ---------------------------------------------------------------------------
+TOTAL_STEPS = 8
+
+STEP_LABELS: dict[int, str] = {
+    1: "Exporting data to S3",
+    2: "Checking export status",
+    3: "Deleting compute resources",
+    4: "Waiting for resource cleanup",
+    5: "Deleting cluster",
+    6: "Deleting filesystem",
+    7: "Cleaning up IAM and templates",
+    8: "Finalising destruction",
+}
+
+
+def _update_step_progress(
+    project_id: str,
+    cluster_name: str,
+    step_number: int,
+) -> None:
+    """Write the current step progress to the DynamoDB Clusters record.
+
+    Creates or updates the cluster record with ``currentStep``,
+    ``totalSteps``, and ``stepDescription`` so the GET endpoint can
+    report progress to the UI.
+    """
+    step_description = STEP_LABELS.get(step_number, f"Step {step_number}")
+
+    table = dynamodb.Table(CLUSTERS_TABLE_NAME)
+    try:
+        table.update_item(
+            Key={
+                "PK": f"PROJECT#{project_id}",
+                "SK": f"CLUSTER#{cluster_name}",
+            },
+            UpdateExpression=(
+                "SET currentStep = :step, totalSteps = :total, "
+                "stepDescription = :desc, #st = :status"
+            ),
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":step": step_number,
+                ":total": TOTAL_STEPS,
+                ":desc": step_description,
+                ":status": "DESTROYING",
+            },
+        )
+        logger.info(
+            "Progress updated for cluster '%s': step %d/%d — %s",
+            cluster_name,
+            step_number,
+            TOTAL_STEPS,
+            step_description,
+        )
+    except ClientError as exc:
+        # Progress tracking failure is non-fatal — log and continue
+        logger.warning(
+            "Failed to update progress for cluster '%s': %s",
+            cluster_name,
+            exc,
+        )
+
+
+# ---------------------------------------------------------------------------
 # Step dispatcher — maps step names from the Step Functions state machine
 # to the corresponding handler functions in this module.
 # ---------------------------------------------------------------------------
@@ -94,6 +159,10 @@ def create_fsx_export_task(event: dict[str, Any]) -> dict[str, Any]:
 
     Adds ``exportTaskId`` to the returned event.
     """
+    project_id: str = event.get("projectId", "")
+    cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 1)
+
     fsx_filesystem_id: str = event.get("fsxFilesystemId", "")
 
     if not fsx_filesystem_id:
@@ -152,6 +221,10 @@ def check_fsx_export_status(event: dict[str, Any]) -> dict[str, Any]:
     that the administrator can investigate and retry or accept data
     loss.
     """
+    project_id: str = event.get("projectId", "")
+    cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 2)
+
     if event.get("exportSkipped", False):
         logger.info("Export was skipped — marking as complete")
         return {**event, "exportComplete": True, "exportFailed": False}
@@ -231,11 +304,14 @@ def delete_pcs_resources(event: dict[str, Any]) -> dict[str, Any]:
 
     Adds ``pcsCleanupResults`` to the returned event.
     """
+    project_id: str = event.get("projectId", "")
+    cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 3)
+
     pcs_cluster_id: str = event.get("pcsClusterId", "")
     compute_node_group_id: str = event.get("computeNodeGroupId", "")
     login_node_group_id: str = event.get("loginNodeGroupId", "")
     queue_id: str = event.get("queueId", "")
-    cluster_name: str = event.get("clusterName", "")
 
     cleanup_results: list[str] = []
 
@@ -282,6 +358,10 @@ def check_pcs_deletion_status(event: dict[str, Any]) -> dict[str, Any]:
     all sub-resources are confirmed deleted, or False if any are still
     in progress.  Empty IDs are skipped (treated as already deleted).
     """
+    project_id: str = event.get("projectId", "")
+    cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 4)
+
     pcs_cluster_id: str = event.get("pcsClusterId", "")
     compute_node_group_id: str = event.get("computeNodeGroupId", "")
     login_node_group_id: str = event.get("loginNodeGroupId", "")
@@ -371,8 +451,11 @@ def delete_pcs_cluster_step(event: dict[str, Any]) -> dict[str, Any]:
     ``ResourceNotFoundException`` is treated as already deleted (success).
     Any other failure raises ``InternalError`` to halt the workflow.
     """
-    pcs_cluster_id: str = event.get("pcsClusterId", "")
+    project_id: str = event.get("projectId", "")
     cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 5)
+
+    pcs_cluster_id: str = event.get("pcsClusterId", "")
 
     if not pcs_cluster_id:
         logger.info("No PCS cluster to delete — skipping")
@@ -447,8 +530,11 @@ def delete_fsx_filesystem(event: dict[str, Any]) -> dict[str, Any]:
 
     Adds ``fsxDeleted`` to the returned event.
     """
-    fsx_filesystem_id: str = event.get("fsxFilesystemId", "")
+    project_id: str = event.get("projectId", "")
     cluster_name: str = event.get("clusterName", "")
+    _update_step_progress(project_id, cluster_name, 6)
+
+    fsx_filesystem_id: str = event.get("fsxFilesystemId", "")
 
     if not fsx_filesystem_id:
         logger.info("No FSx filesystem to delete — skipping")
@@ -601,6 +687,7 @@ def delete_iam_resources(event: dict[str, Any]) -> dict[str, Any]:
     """
     project_id: str = event["projectId"]
     cluster_name: str = event["clusterName"]
+    _update_step_progress(project_id, cluster_name, 7)
 
     login_role_name = f"AWSPCS-{project_id}-{cluster_name}-login"
     compute_role_name = f"AWSPCS-{project_id}-{cluster_name}-compute"
@@ -728,9 +815,15 @@ def record_cluster_destroyed(event: dict[str, Any]) -> dict[str, Any]:
     Sets:
     - ``status`` → ``DESTROYED``
     - ``destroyedAt`` → current UTC ISO 8601 timestamp
+
+    Removes:
+    - ``currentStep``, ``totalSteps``, ``stepDescription`` — progress
+      fields are cleared so stale data does not appear if the record
+      is queried after destruction.
     """
     project_id: str = event["projectId"]
     cluster_name: str = event["clusterName"]
+    _update_step_progress(project_id, cluster_name, 8)
     now = datetime.now(timezone.utc).isoformat()
 
     table = dynamodb.Table(CLUSTERS_TABLE_NAME)
@@ -741,7 +834,10 @@ def record_cluster_destroyed(event: dict[str, Any]) -> dict[str, Any]:
                 "PK": f"PROJECT#{project_id}",
                 "SK": f"CLUSTER#{cluster_name}",
             },
-            UpdateExpression="SET #s = :status, destroyedAt = :ts",
+            UpdateExpression=(
+                "SET #s = :status, destroyedAt = :ts "
+                "REMOVE currentStep, totalSteps, stepDescription"
+            ),
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":status": "DESTROYED",

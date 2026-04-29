@@ -19,9 +19,11 @@ import json
 import logging
 import os
 import sys
+from datetime import datetime, timezone
 from typing import Any
 
 import boto3
+from botocore.exceptions import ClientError
 
 # Add shared utilities to the module search path
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "shared"))
@@ -452,25 +454,17 @@ def _handle_deploy_project(event: dict[str, Any], project_id: str) -> dict[str, 
 
 
 def _handle_destroy_project_infra(event: dict[str, Any], project_id: str) -> dict[str, Any]:
-    """Handle POST /projects/{projectId}/destroy — start infrastructure destruction."""
+    """Handle POST /projects/{projectId}/destroy — start infrastructure destruction.
+
+    Uses an atomic DynamoDB conditional update to transition the project status
+    from ACTIVE to DESTROYING and initialise progress fields in a single
+    operation, preventing concurrent destruction requests from both succeeding.
+    """
     caller = get_caller_identity(event)
     if not is_administrator(event):
         raise AuthorisationError("Only administrators can destroy project infrastructure.")
 
-    # Verify project exists and status is ACTIVE
-    project_record = get_project(table_name=PROJECTS_TABLE_NAME, project_id=project_id)
-    if project_record.get("status") != "ACTIVE":
-        raise ConflictError(
-            f"Cannot destroy project '{project_id}': project status is "
-            f"'{project_record.get('status')}', expected 'ACTIVE'.",
-            {
-                "projectId": project_id,
-                "currentStatus": project_record.get("status"),
-                "requiredStatus": "ACTIVE",
-            },
-        )
-
-    # Check for active/creating clusters
+    # Check for active/creating clusters (business rule — checked before atomic update)
     active_clusters = _get_active_clusters(CLUSTERS_TABLE_NAME, project_id)
     if active_clusters:
         cluster_names = [c["clusterName"] for c in active_clusters]
@@ -480,24 +474,43 @@ def _handle_destroy_project_infra(event: dict[str, Any], project_id: str) -> dic
             {"projectId": project_id, "activeClusters": cluster_names},
         )
 
-    # Transition to DESTROYING
-    lifecycle.transition_project(
-        table_name=PROJECTS_TABLE_NAME,
-        project_id=project_id,
-        target_status="DESTROYING",
-    )
-
-    # Set initial progress tracking
+    # Atomically transition status to DESTROYING and initialise progress fields.
+    # The ConditionExpression ensures only ACTIVE projects can be destroyed,
+    # and prevents concurrent destruction requests from both succeeding.
+    now = datetime.now(timezone.utc).isoformat()
     dynamodb = boto3.resource("dynamodb")
     table = dynamodb.Table(PROJECTS_TABLE_NAME)
-    table.update_item(
-        Key={"PK": f"PROJECT#{project_id}", "SK": "METADATA"},
-        UpdateExpression="SET currentStep = :step, totalSteps = :total",
-        ExpressionAttributeValues={
-            ":step": 0,
-            ":total": 5,
-        },
-    )
+    try:
+        table.update_item(
+            Key={"PK": f"PROJECT#{project_id}", "SK": "METADATA"},
+            UpdateExpression=(
+                "SET #st = :destroying, currentStep = :zero, totalSteps = :total, "
+                "stepDescription = :desc, statusChangedAt = :now, updatedAt = :now, "
+                "errorMessage = :empty"
+            ),
+            ConditionExpression="#st = :active",
+            ExpressionAttributeNames={"#st": "status"},
+            ExpressionAttributeValues={
+                ":destroying": "DESTROYING",
+                ":zero": 0,
+                ":total": 5,
+                ":desc": "Starting project destruction",
+                ":active": "ACTIVE",
+                ":now": now,
+                ":empty": "",
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConditionalCheckFailedException":
+            raise ConflictError(
+                f"Cannot destroy project '{project_id}': project status is not ACTIVE "
+                f"or has been changed by another request.",
+                {
+                    "projectId": project_id,
+                    "requiredStatus": "ACTIVE",
+                },
+            )
+        raise
 
     # Start Step Functions execution
     if PROJECT_DESTROY_STATE_MACHINE_ARN:

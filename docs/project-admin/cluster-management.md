@@ -258,6 +258,48 @@ Home directories (EFS) and project storage (S3) are **preserved** after cluster 
 | Cluster does not exist | `NOT_FOUND` | 404 |
 | Caller is not a project member | `AUTHORISATION_ERROR` | 403 |
 
+### Concurrent Deletion Prevention
+
+Only one destruction workflow can run for a given cluster at a time. When you initiate cluster destruction, the system uses an atomic status transition to ensure that exactly one request succeeds if multiple users click "Destroy" simultaneously.
+
+If another user has already started destroying the cluster, you will receive a **409 Conflict** error and the web portal will display a toast notification: **"This resource is already being destroyed"**. No duplicate workflow is started — the original destruction continues normally.
+
+### Monitoring Destruction Progress
+
+While a cluster is being destroyed, the web portal displays a progress bar in both the **cluster list table** and the **cluster detail page**. The progress bar shows the current step, total steps, a description of the operation in progress, and the percentage complete.
+
+The destruction workflow consists of **8 steps**:
+
+| Step | Description | What Happens |
+|------|-------------|--------------|
+| 1 | Exporting data to S3 | Starts an FSx data repository export task to sync filesystem data back to the project S3 bucket. Skipped for `mountpoint` clusters. |
+| 2 | Checking export status | Polls the FSx export task until it completes. Skipped for `mountpoint` clusters. |
+| 3 | Deleting compute resources | Initiates deletion of PCS compute node groups and the queue. |
+| 4 | Waiting for resource cleanup | Polls PCS until the compute node groups and queue are fully removed. |
+| 5 | Deleting cluster | Deletes the PCS cluster resource. |
+| 6 | Deleting filesystem | Deletes the FSx for Lustre filesystem. Skipped for `mountpoint` clusters. |
+| 7 | Cleaning up IAM and templates | Removes IAM roles, instance profiles, launch templates, Mountpoint S3 policies, and deregisters the cluster name. |
+| 8 | Finalising destruction | Sets the cluster status to DESTROYED and clears progress fields. |
+
+The page refreshes automatically during destruction — you can navigate away and return later to check progress. When destruction completes, a toast notification confirms the cluster has been destroyed.
+
+#### API Response During Destruction
+
+```json
+{
+  "clusterName": "genomics-run-42",
+  "projectId": "genomics-team",
+  "status": "DESTROYING",
+  "progress": {
+    "currentStep": 3,
+    "totalSteps": 8,
+    "stepDescription": "Deleting compute resources"
+  }
+}
+```
+
+If destruction fails at any step, the progress bar remains at the last successfully started step so you can see where the failure occurred.
+
 ## Recreating a Cluster
 
 **Endpoint:** `POST /projects/{projectId}/clusters/{clusterName}/recreate`

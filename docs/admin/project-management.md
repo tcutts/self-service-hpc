@@ -313,9 +313,44 @@ In the web UI, clicking the "Destroy" button opens a confirmation dialog. The Ad
 4. On success, the project transitions to `ARCHIVED`.
 5. On failure, the project transitions back to `ACTIVE` with an error message stored in the record.
 
+### Concurrent Deletion Prevention
+
+Only one destruction workflow can run for a given project at a time. When you initiate project destruction, the system uses an atomic status transition to ensure that exactly one request succeeds if multiple users click "Destroy" simultaneously.
+
+If another user has already started destroying the project, you will receive a **409 Conflict** error and the web portal will display a toast notification: **"This resource is already being destroyed"**. No duplicate workflow is started — the original destruction continues normally.
+
 ### Progress Tracking
 
-While the project is in `DESTROYING` status, the `GET /projects/{projectId}` endpoint includes a `progress` object, identical in format to the deploy progress. The UI displays a progress bar and polls every 5 seconds.
+While the project is in `DESTROYING` status, the `GET /projects/{projectId}` endpoint includes a `progress` object, identical in format to the deploy progress. The web portal displays a progress bar in the project list table showing the current step, total steps, a description of the operation in progress, and the percentage complete.
+
+The destruction workflow consists of **5 steps**:
+
+| Step | Description | What Happens |
+|------|-------------|--------------|
+| 1 | Validating project state | Re-checks the project status and verifies no active clusters remain. |
+| 2 | Starting CDK destruction | Starts a CDK destroy via CodeBuild to tear down the `HpcProject-{projectId}` CloudFormation stack. |
+| 3 | Destroying infrastructure | Polls the CDK destroy operation until the CloudFormation stack deletion completes. |
+| 4 | Clearing infrastructure records | Removes infrastructure IDs (VPC, EFS, S3 bucket) from the project record in DynamoDB. |
+| 5 | Archiving project | Sets the project status to ARCHIVED and clears progress fields. |
+
+The page refreshes automatically during destruction — you can navigate away and return later to check progress. When destruction completes, a toast notification confirms the project has been archived.
+
+#### API Response During Destruction
+
+```json
+{
+  "projectId": "genomics-team",
+  "projectName": "Genomics Research Team",
+  "status": "DESTROYING",
+  "progress": {
+    "currentStep": 2,
+    "totalSteps": 5,
+    "stepDescription": "Starting CDK destruction"
+  }
+}
+```
+
+If destruction fails at any step, the progress bar remains at the last successfully started step so you can see where the failure occurred.
 
 ### Response (202 Accepted)
 

@@ -1561,8 +1561,9 @@ class TestDestroyRoute:
         assert response["statusCode"] == 409
         body = json.loads(response["body"])
         assert body["error"]["code"] == "CONFLICT"
-        assert "CREATED" in body["error"]["message"]
-        assert "ACTIVE" in body["error"]["message"]
+        # Atomic conditional update doesn't expose the current status —
+        # it only knows the condition (status = ACTIVE) was not met.
+        assert "not ACTIVE" in body["error"]["message"] or "ACTIVE" in body["error"]["message"]
 
     def test_destroy_archived_project_returns_409(self, project_mgmt_env):
         handler_mod, _, _, _ = project_mgmt_env["modules"]
