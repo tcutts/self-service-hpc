@@ -22,6 +22,8 @@ Each user has a personal home directory within each project they belong to. Home
 - **Private by default** — standard POSIX permissions (mode 700) prevent other users from reading your files
 - **Backed by Amazon EFS** — durable, elastic storage that scales automatically
 
+> **Note:** EFS home directories are automatically mounted at `/home` on every cluster node at boot time via the EC2 launch template user data script. No manual mount steps are required — when you SSH into a cluster node, your home directory is already available.
+
 ### Working with Home Directories
 
 Once connected to a cluster via SSH:

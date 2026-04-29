@@ -17,6 +17,7 @@ from pcs_versions import DEFAULT_SLURM_VERSION, SUPPORTED_SLURM_VERSIONS
 logger = logging.getLogger(__name__)
 
 dynamodb = boto3.resource("dynamodb")
+ec2_client = boto3.client("ec2")
 
 VALID_INSTANCE_TYPE_PREFIXES = (
     "c5", "c5n", "c6g", "c6i", "c6gn", "c7g", "c7gn", "c7i",
@@ -29,6 +30,39 @@ VALID_INSTANCE_TYPE_PREFIXES = (
     "trn1", "inf1", "inf2",
     "dl1",
 )
+
+
+def validate_ami_available(ami_id: str) -> None:
+    """Verify that an AMI exists in the current region and is available.
+
+    Calls EC2 DescribeImages and checks that the AMI has state ``available``.
+
+    Raises:
+        ValidationError: If the AMI does not exist, is malformed, or is not
+            in the ``available`` state.
+    """
+    try:
+        response = ec2_client.describe_images(ImageIds=[ami_id])
+    except ClientError as exc:
+        error_code = exc.response["Error"]["Code"]
+        raise ValidationError(
+            f"AMI '{ami_id}' is not valid: {error_code}.",
+            {"field": "amiId", "amiId": ami_id},
+        )
+
+    images = response.get("Images", [])
+    if not images:
+        raise ValidationError(
+            f"AMI '{ami_id}' not found in the current region.",
+            {"field": "amiId", "amiId": ami_id},
+        )
+
+    state = images[0].get("State", "")
+    if state != "available":
+        raise ValidationError(
+            f"AMI '{ami_id}' exists but is not available (state: {state}).",
+            {"field": "amiId", "amiId": ami_id, "state": state},
+        )
 
 
 def create_template(
@@ -58,6 +92,7 @@ def create_template(
         max_nodes=max_nodes,
         ami_id=ami_id,
         software_stack=software_stack,
+        login_ami_id=login_ami_id,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -123,6 +158,7 @@ def update_template(
         max_nodes=max_nodes,
         ami_id=ami_id,
         software_stack=software_stack,
+        login_ami_id=login_ami_id,
     )
 
     now = datetime.now(timezone.utc).isoformat()
@@ -279,6 +315,7 @@ def _validate_template_fields(
     max_nodes: int,
     ami_id: str,
     software_stack: dict[str, Any] | None = None,
+    login_ami_id: str = "",
 ) -> None:
     """Validate template fields and raise ValidationError on failure."""
     if not template_id or not template_id.strip():
@@ -329,6 +366,11 @@ def _validate_template_fields(
             "amiId is required and must be a non-empty string.",
             {"field": "amiId"},
         )
+
+    validate_ami_available(ami_id)
+
+    if login_ami_id and isinstance(login_ami_id, str) and login_ami_id.strip():
+        validate_ami_available(login_ami_id)
 
     if software_stack is not None:
         scheduler_version = software_stack.get("schedulerVersion")

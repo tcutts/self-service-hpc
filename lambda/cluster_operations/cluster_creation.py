@@ -25,6 +25,7 @@ computeNodeGroupId (set by create_compute_node_group)
 queueId           (set by create_pcs_queue)
 """
 
+import base64
 import json
 import logging
 import os
@@ -38,11 +39,44 @@ from botocore.exceptions import ClientError
 from cluster_names import register_cluster_name, validate_cluster_name
 from errors import BudgetExceededError, InternalError, ValidationError
 from pcs_versions import DEFAULT_SLURM_VERSION
-from posix_provisioning import generate_user_data_script
+from posix_provisioning import generate_user_data_script, wrap_user_data_mime
 from tagging import build_resource_tags, tags_as_dict
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
+
+
+def validate_ami_available(ami_id: str) -> None:
+    """Verify that an AMI exists in the current region and is available.
+
+    Calls EC2 DescribeImages and checks that the AMI has state ``available``.
+
+    Raises:
+        ValidationError: If the AMI does not exist, is malformed, or is not
+            in the ``available`` state.
+    """
+    try:
+        response = ec2_client.describe_images(ImageIds=[ami_id])
+    except ClientError as exc:
+        error_code = exc.response["Error"]["Code"]
+        raise ValidationError(
+            f"AMI '{ami_id}' is not valid: {error_code}.",
+            {"field": "amiId", "amiId": ami_id},
+        )
+
+    images = response.get("Images", [])
+    if not images:
+        raise ValidationError(
+            f"AMI '{ami_id}' not found in the current region.",
+            {"field": "amiId", "amiId": ami_id},
+        )
+
+    state = images[0].get("State", "")
+    if state != "available":
+        raise ValidationError(
+            f"AMI '{ami_id}' exists but is not available (state: {state}).",
+            {"field": "amiId", "amiId": ami_id, "state": state},
+        )
 
 # ---------------------------------------------------------------------------
 # AWS clients
@@ -581,6 +615,32 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
 
     login_ami_id: str = event.get("loginAmiId", "") or ami_id
 
+    # Fail-fast: validate both AMIs exist and are available before proceeding
+    validate_ami_available(ami_id)
+    if login_ami_id != ami_id:
+        validate_ami_available(login_ami_id)
+
+    # Generate user data script once for both templates
+    storage_mode: str = event.get("storageMode", "")
+    s3_bucket_name: str = event.get("s3BucketName", "")
+    fsx_dns_name: str = event.get("fsxDnsName", "")
+    fsx_mount_name: str = event.get("fsxMountName", "")
+    efs_filesystem_id: str = event.get("efsFileSystemId", "")
+
+    user_data_script = generate_user_data_script(
+        project_id=project_id,
+        users_table_name=USERS_TABLE_NAME,
+        projects_table_name=PROJECTS_TABLE_NAME,
+        storage_mode=storage_mode,
+        s3_bucket_name=s3_bucket_name,
+        fsx_dns_name=fsx_dns_name,
+        fsx_mount_name=fsx_mount_name,
+        efs_filesystem_id=efs_filesystem_id,
+    )
+    # Wrap in MIME multipart format (required by PCS) and base64-encode
+    mime_user_data = wrap_user_data_mime(user_data_script)
+    encoded_user_data = base64.b64encode(mime_user_data.encode("utf-8")).decode("utf-8")
+
     tags = build_resource_tags(project_id, cluster_name)
     tag_specs = [
         {"ResourceType": "launch-template", "Tags": tags},
@@ -607,6 +667,7 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
         lt_data: dict[str, Any] = {
             "SecurityGroupIds": [sg_id],
             "ImageId": template_ami_id,
+            "UserData": encoded_user_data,
         }
 
         try:
@@ -1050,22 +1111,6 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
     # Resolve instance type from template or use a sensible default
     login_instance_type = event.get("loginInstanceType", "c7g.medium")
 
-    # Generate POSIX user data script for login nodes.
-    # In production, the user data would be set via a custom launch template.
-    user_data_script = generate_user_data_script(
-        project_id=project_id,
-        users_table_name=USERS_TABLE_NAME,
-        projects_table_name=PROJECTS_TABLE_NAME,
-        storage_mode=event.get("storageMode", ""),
-        s3_bucket_name=event.get("s3BucketName", ""),
-        fsx_dns_name=event.get("fsxDnsName", ""),
-        fsx_mount_name=event.get("fsxMountName", ""),
-    )
-    logger.info(
-        "Generated POSIX user data script for login nodes (%d bytes)",
-        len(user_data_script),
-    )
-
     tags = tags_as_dict(project_id, cluster_name)
 
     try:
@@ -1104,7 +1149,7 @@ def create_login_node_group(event: dict[str, Any]) -> dict[str, Any]:
         cluster_name,
     )
 
-    return {**event, "loginNodeGroupId": login_group_id, "userDataScript": user_data_script}
+    return {**event, "loginNodeGroupId": login_group_id}
 
 
 # ===================================================================
@@ -1136,22 +1181,6 @@ def create_compute_node_group(event: dict[str, Any]) -> dict[str, Any]:
     max_nodes = event.get("maxNodes", 10)
     min_nodes = event.get("minNodes", 0)
     purchase_option = event.get("purchaseOption", "ONDEMAND")
-
-    # Generate POSIX user data script for compute nodes.
-    # In production, the user data would be set via a custom launch template.
-    user_data_script = generate_user_data_script(
-        project_id=project_id,
-        users_table_name=USERS_TABLE_NAME,
-        projects_table_name=PROJECTS_TABLE_NAME,
-        storage_mode=event.get("storageMode", ""),
-        s3_bucket_name=event.get("s3BucketName", ""),
-        fsx_dns_name=event.get("fsxDnsName", ""),
-        fsx_mount_name=event.get("fsxMountName", ""),
-    )
-    logger.info(
-        "Generated POSIX user data script for compute nodes (%d bytes)",
-        len(user_data_script),
-    )
 
     tags = tags_as_dict(project_id, cluster_name)
 

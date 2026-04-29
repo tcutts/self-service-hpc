@@ -80,6 +80,8 @@ Before creating a cluster, review the available templates:
 | `minNodes` | integer | No | Minimum number of compute nodes. Must be >= 0 and <= `maxNodes`. When omitted, the template's default value is used. |
 | `maxNodes` | integer | No | Maximum number of compute nodes. Must be >= 1 and >= `minNodes`. When omitted, the template's default value is used. |
 
+> **Note:** AMI IDs are validated against EC2 at both template creation/update time and at cluster creation time. If an AMI does not exist in the current region or is not in the `available` state, the request is rejected with a clear validation error. This prevents late failures during compute node group creation. Auto-detected AMIs (via the "Auto-detect AMI" button) are already verified as available and do not require additional validation.
+
 ### Cluster Naming Rules
 
 - Must be **non-empty** and contain only alphanumeric characters, hyphens (`-`), and underscores (`_`).

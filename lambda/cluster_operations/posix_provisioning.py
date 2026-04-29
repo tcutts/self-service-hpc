@@ -29,6 +29,8 @@ Clusters table:
 import logging
 import os
 import time
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 from typing import Any
 
 import boto3
@@ -59,6 +61,31 @@ PROPAGATION_PENDING = "PENDING_PROPAGATION"
 # ===================================================================
 # User data script generation
 # ===================================================================
+
+
+def wrap_user_data_mime(script: str) -> str:
+    """Wrap a bash script in MIME multipart format for EC2 user data.
+
+    AWS Parallel Computing Service (PCS) requires launch template user
+    data to be in MIME multipart format.  This function wraps a plain
+    bash script in a ``multipart/mixed`` MIME message with a single
+    ``text/x-shellscript`` part.
+
+    Parameters
+    ----------
+    script : str
+        The bash script content (should start with ``#!/bin/bash``).
+
+    Returns
+    -------
+    str
+        The MIME-wrapped user data string, starting with the
+        ``Content-Type: multipart/mixed`` header.
+    """
+    mime_msg = MIMEMultipart()
+    part = MIMEText(script, "x-shellscript")
+    mime_msg.attach(part)
+    return mime_msg.as_string()
 
 def generate_user_creation_commands(user_id: str, uid: int, gid: int) -> list[str]:
     """Generate bash commands to create a single POSIX user account.
@@ -202,6 +229,33 @@ def generate_cloudwatch_agent_commands(
     return commands
 
 
+def generate_efs_mount_commands(efs_filesystem_id: str, mount_path: str = "/home") -> list[str]:
+    """Generate bash commands to mount an EFS filesystem.
+
+    Installs ``amazon-efs-utils``, creates the mount point, adds an
+    fstab entry for TLS-encrypted mounting, and runs ``mount -a -t efs``.
+
+    Parameters
+    ----------
+    efs_filesystem_id : str
+        The EFS filesystem ID (e.g. ``fs-abc123``).
+    mount_path : str
+        The local mount path. Defaults to ``/home``.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    return [
+        "# --- Mount EFS filesystem ---",
+        "yum install -y amazon-efs-utils || apt-get install -y amazon-efs-utils",
+        f"mkdir -p {mount_path}",
+        f"echo '{efs_filesystem_id}:/ {mount_path} efs _netdev,tls 0 0' >> /etc/fstab",
+        "mount -a -t efs",
+    ]
+
+
 def generate_mountpoint_s3_commands(s3_bucket_name: str, mount_path: str = "/data") -> list[str]:
     """Generate bash commands to install and mount S3 via Mountpoint.
 
@@ -263,16 +317,18 @@ def generate_user_data_script(
     s3_bucket_name: str = "",
     fsx_dns_name: str = "",
     fsx_mount_name: str = "",
+    efs_filesystem_id: str = "",
 ) -> str:
     """Generate a bash user data script for EC2 launch templates.
 
     The script:
     1. Fetches project members from the Projects DynamoDB table.
     2. Looks up each member's POSIX UID/GID from the PlatformUsers table.
-    3. Creates POSIX user accounts with the correct UID/GID.
-    4. Sets home directory ownership.
-    5. Disables interactive login for generic accounts.
-    6. Mounts project storage at ``/data`` based on the storage mode.
+    3. Mounts the EFS filesystem at ``/home`` (if *efs_filesystem_id* is provided).
+    4. Creates POSIX user accounts with the correct UID/GID.
+    5. Sets home directory ownership.
+    6. Disables interactive login for generic accounts.
+    7. Mounts project storage at ``/data`` based on the storage mode.
 
     Parameters
     ----------
@@ -291,6 +347,9 @@ def generate_user_data_script(
         The FSx DNS name (required when *storage_mode* is ``"lustre"``).
     fsx_mount_name : str
         The FSx mount name (required when *storage_mode* is ``"lustre"``).
+    efs_filesystem_id : str
+        The EFS filesystem ID to mount at ``/home``.  When empty, EFS
+        mount commands are omitted (preserving existing behaviour).
 
     Returns
     -------
@@ -307,8 +366,15 @@ def generate_user_data_script(
         f"# POSIX user provisioning for project: {project_id}",
         f"# Generated for {len(users)} user(s)",
         "",
-        "# --- Create project user accounts ---",
     ]
+
+    # --- EFS mount (before user creation so /home is available) ---
+    if efs_filesystem_id:
+        for cmd in generate_efs_mount_commands(efs_filesystem_id):
+            lines.append(cmd)
+        lines.append("")
+
+    lines.append("# --- Create project user accounts ---")
 
     for user in users:
         user_id = user["userId"]

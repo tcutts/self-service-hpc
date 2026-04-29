@@ -183,6 +183,7 @@ export class ClusterOperations extends Construct {
         'ec2:DescribeLaunchTemplateVersions',
         'ec2:DescribeInstanceTypes',
         'ec2:DescribeInstanceTypeOfferings',
+        'ec2:DescribeImages',
       ],
       resources: ['*'],
     }));
