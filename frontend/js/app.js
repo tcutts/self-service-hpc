@@ -17,6 +17,8 @@ const state = {
   user: null,        // { username, email, groups }
   currentPage: null,
   pollTimers: {},    // clusterName → intervalId
+  forceProjectPollUntil: null, // timestamp: force project polling until this time expires
+  forceClusterPollUntil: null, // timestamp: force cluster polling until this time expires
   clusterStatusCache: {}, // clusterName → last known status (for transition detection)
   projectStatusCache: {}, // projectId → last known status (for transition detection)
   projectContext: localStorage.getItem('hpc_project_context') || null,
@@ -257,6 +259,8 @@ function clearSession() {
   state.projectContext = null;
   Object.values(state.pollTimers).forEach(clearInterval);
   state.pollTimers = {};
+  state.forceProjectPollUntil = null;
+  state.forceClusterPollUntil = null;
   state.clusterStatusCache = {};
   state.projectStatusCache = {};
   localStorage.removeItem('hpc_id_token');
@@ -499,6 +503,8 @@ function navigate(page, params = {}) {
   // Stop any active polling when navigating away
   Object.values(state.pollTimers).forEach(clearInterval);
   state.pollTimers = {};
+  state.forceProjectPollUntil = null;
+  state.forceClusterPollUntil = null;
 
   // Reset table sort/filter state when switching pages
   TableModule.clearAllState();
@@ -806,7 +812,12 @@ async function loadProjects() {
     const transitional = projects.filter(p => ['DEPLOYING', 'DESTROYING', 'UPDATING'].includes(p.status));
     if (transitional.length > 0) {
       startProjectListPolling();
+    } else if (state.forceProjectPollUntil && Date.now() < state.forceProjectPollUntil) {
+      // Force-poll window still active — keep polling even without transitional states
+      startProjectListPolling();
     } else {
+      // No transitional states and force-poll expired (or never set) — stop polling
+      state.forceProjectPollUntil = null;
       stopProjectListPolling();
     }
 
@@ -846,6 +857,8 @@ async function deployProject(projectId) {
   try {
     await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/deploy`);
     showToast(`Project '${projectId}' deployment started`);
+    state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startProjectListPolling();
     loadProjects();
   } catch (e) { showToast(e.message, 'error'); }
 }
@@ -854,6 +867,8 @@ async function updateProject(projectId) {
   try {
     await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/update`);
     showToast(`Project '${projectId}' update started`);
+    state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startProjectListPolling();
     loadProjects();
   } catch (e) { showToast(e.message, 'error'); }
 }
@@ -912,6 +927,8 @@ function showDestroyConfirmation(projectId) {
       await apiCall('POST', `/projects/${encodeURIComponent(projectId)}/destroy`);
       showToast(`Project '${projectId}' destruction started`);
       modal.remove();
+      state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+      startProjectListPolling();
       loadProjects();
     } catch (e) {
       if (e.status === 409) {
@@ -1031,6 +1048,8 @@ async function bulkUpdateProjects(ids) {
     TableModule.clearSelection('projects');
     const toolbar = document.getElementById('projects-bulk-toolbar');
     if (toolbar) toolbar.style.display = 'none';
+    state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startProjectListPolling();
     loadProjects();
   } catch (e) {
     showToast(e.message, 'error');
@@ -1046,6 +1065,8 @@ async function bulkDeployProjects(ids) {
     TableModule.clearSelection('projects');
     const toolbar = document.getElementById('projects-bulk-toolbar');
     if (toolbar) toolbar.style.display = 'none';
+    state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startProjectListPolling();
     loadProjects();
   } catch (e) {
     showToast(e.message, 'error');
@@ -1104,6 +1125,8 @@ function bulkDestroyProjects(ids) {
       TableModule.clearSelection('projects');
       const toolbar = document.getElementById('projects-bulk-toolbar');
       if (toolbar) toolbar.style.display = 'none';
+      state.forceProjectPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+      startProjectListPolling();
       loadProjects();
     } catch (e) {
       showToast(e.message, 'error');
@@ -1825,6 +1848,8 @@ function renderClustersPage(container, params) {
       document.getElementById('create-cluster-form').style.display = 'none';
       document.getElementById('template-preview').style.display = 'none';
       document.getElementById('lustre-capacity-group').style.display = 'none';
+      state.forceClusterPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+      startClusterListPolling(pid);
       loadClusters(pid);
     } catch (e) { showToast(e.message, 'error'); }
   });
@@ -1910,7 +1935,12 @@ async function loadClusters(projectId) {
     const transitionalClusters = clusters.filter(c => ['CREATING', 'DESTROYING'].includes(c.status));
     if (transitionalClusters.length > 0) {
       startClusterListPolling(projectId);
+    } else if (state.forceClusterPollUntil && Date.now() < state.forceClusterPollUntil) {
+      // Force-poll window still active — keep polling even without transitional states
+      startClusterListPolling(projectId);
     } else {
+      // No transitional states and force-poll expired (or never set) — stop polling
+      state.forceClusterPollUntil = null;
       stopClusterListPolling(projectId);
     }
 
@@ -1959,6 +1989,8 @@ async function destroyCluster(projectId, clusterName) {
   try {
     await apiCall('DELETE', `/projects/${encodeURIComponent(projectId)}/clusters/${encodeURIComponent(clusterName)}`);
     showToast(`Cluster '${clusterName}' destruction started`);
+    state.forceClusterPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startClusterListPolling(projectId);
     loadClusters(projectId);
   } catch (e) {
     if (e.status === 409) {
@@ -1976,6 +2008,8 @@ async function recreateCluster(projectId, clusterName) {
       `/projects/${encodeURIComponent(projectId)}/clusters/${encodeURIComponent(clusterName)}/recreate`
     );
     showToast(`Cluster '${clusterName}' recreation started`);
+    state.forceClusterPollUntil = Date.now() + CONFIG.forcePollDurationMs;
+    startClusterListPolling(projectId);
     loadClusters(projectId);
   } catch (e) { showToast(e.message, 'error'); }
 }

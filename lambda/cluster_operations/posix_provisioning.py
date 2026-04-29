@@ -309,6 +309,46 @@ def generate_fsx_lustre_mount_commands(
     ]
 
 
+def generate_ssm_agent_commands() -> list[str]:
+    """Generate bash commands to ensure the SSM Agent is installed and running.
+
+    AWS Systems Manager Session Manager requires the SSM Agent to be
+    running on the instance.  Most AWS-provided AMIs (Amazon Linux 2,
+    AL2023, Ubuntu 20.04+) ship with the agent pre-installed, but
+    custom or PCS sample AMIs may not have it enabled by default.
+
+    This function generates idempotent commands that:
+    1. Install the SSM Agent if it is not already present.
+    2. Enable and start the ``amazon-ssm-agent`` systemd service.
+    3. Verify the agent is running and log the result.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    return [
+        "# --- Ensure SSM Agent is installed and running ---",
+        "if ! command -v amazon-ssm-agent &>/dev/null && "
+        "! systemctl list-unit-files amazon-ssm-agent.service &>/dev/null; then",
+        "  echo 'SSM Agent not found — installing...'",
+        "  if command -v yum &>/dev/null; then",
+        "    yum install -y amazon-ssm-agent",
+        "  elif command -v apt-get &>/dev/null; then",
+        "    snap install amazon-ssm-agent --classic || "
+        "apt-get install -y amazon-ssm-agent",
+        "  fi",
+        "fi",
+        "systemctl enable amazon-ssm-agent || true",
+        "systemctl start amazon-ssm-agent || true",
+        "if systemctl is-active --quiet amazon-ssm-agent; then",
+        "  echo 'SSM Agent is running.'",
+        "else",
+        "  echo 'WARNING: SSM Agent failed to start.' >&2",
+        "fi",
+    ]
+
+
 def generate_user_data_script(
     project_id: str,
     users_table_name: str,
@@ -367,6 +407,11 @@ def generate_user_data_script(
         f"# Generated for {len(users)} user(s)",
         "",
     ]
+
+    # --- SSM Agent (ensure running before anything else) ---
+    for cmd in generate_ssm_agent_commands():
+        lines.append(cmd)
+    lines.append("")
 
     # --- EFS mount (before user creation so /home is available) ---
     if efs_filesystem_id:

@@ -166,6 +166,58 @@ class TestDisableGenericAccounts:
 
 
 # ---------------------------------------------------------------------------
+# generate_ssm_agent_commands
+# ---------------------------------------------------------------------------
+
+@pytest.mark.usefixtures("_aws_env_vars")
+class TestGenerateSsmAgentCommands:
+    """Validates: SSM Agent verification on login nodes."""
+
+    @pytest.fixture(autouse=True, scope="class")
+    def _setup(self):
+        with mock_aws():
+            os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
+            os.environ["AWS_ACCESS_KEY_ID"] = "testing"
+            os.environ["AWS_SECRET_ACCESS_KEY"] = "testing"
+            mod = _load_posix_module()
+            yield {"mod": mod}
+
+    def test_enables_ssm_agent_service(self, _setup):
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        enable_cmds = [c for c in cmds if "systemctl enable amazon-ssm-agent" in c]
+        assert len(enable_cmds) == 1
+
+    def test_starts_ssm_agent_service(self, _setup):
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        start_cmds = [c for c in cmds if "systemctl start amazon-ssm-agent" in c]
+        assert len(start_cmds) == 1
+
+    def test_installs_agent_if_missing(self, _setup):
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        joined = "\n".join(cmds)
+        assert "yum install -y amazon-ssm-agent" in joined
+        assert "apt-get install -y amazon-ssm-agent" in joined
+
+    def test_verifies_agent_is_running(self, _setup):
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        joined = "\n".join(cmds)
+        assert "systemctl is-active --quiet amazon-ssm-agent" in joined
+
+    def test_commands_are_idempotent(self, _setup):
+        """Enable and start use '|| true' to avoid failing if already active."""
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        enable_cmd = [c for c in cmds if "systemctl enable" in c][0]
+        start_cmd = [c for c in cmds if "systemctl start" in c][0]
+        assert "|| true" in enable_cmd
+        assert "|| true" in start_cmd
+
+    def test_logs_warning_on_failure(self, _setup):
+        cmds = _setup["mod"].generate_ssm_agent_commands()
+        joined = "\n".join(cmds)
+        assert "WARNING: SSM Agent failed to start" in joined
+
+
+# ---------------------------------------------------------------------------
 # generate_user_data_script
 # ---------------------------------------------------------------------------
 
@@ -256,6 +308,18 @@ class TestGenerateUserDataScript:
             "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
         )
         assert "proj-alpha" in script
+
+    def test_script_includes_ssm_agent_verification(self, _env):
+        """SSM Agent commands should appear early in the user data script."""
+        script = _env["mod"].generate_user_data_script(
+            "proj-alpha", USERS_TABLE_NAME, PROJECTS_TABLE_NAME,
+        )
+        assert "amazon-ssm-agent" in script
+        assert "systemctl enable amazon-ssm-agent" in script
+        # SSM commands should appear before user creation
+        ssm_pos = script.index("amazon-ssm-agent")
+        useradd_pos = script.index("useradd")
+        assert ssm_pos < useradd_pos, "SSM agent setup should run before user creation"
 
     def test_script_contains_groupadd(self, _env):
         script = _env["mod"].generate_user_data_script(

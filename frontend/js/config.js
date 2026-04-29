@@ -17,6 +17,7 @@ const CONFIG = {
   // Polling
   clusterPollIntervalMs: 5000, // poll every 5 seconds for CREATING clusters
   projectPollIntervalMs: 5000, // poll every 5 seconds for DEPLOYING/DESTROYING projects
+  forcePollDurationMs: 60000, // force-poll for 60s after workflow actions
 
   // Staleness detection
   clusterCreationTimeoutMs: 9000000, // 2.5 hours — if a cluster has been CREATING longer than this, warn the user

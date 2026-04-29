@@ -91,6 +91,7 @@ Replace `<instanceId>` with the login node's EC2 instance ID from the cluster de
 - SSM sessions do not require inbound security group rules — traffic is routed through the Systems Manager service.
 - You connect as the `ssm-user` by default. To switch to your POSIX user account after connecting, run `sudo su - <your-username>`.
 - Session activity can be logged to CloudWatch or S3 if configured by the platform administrator.
+- The SSM Agent is automatically verified and started on all cluster login nodes during provisioning. If you encounter a `TargetNotConnected` error, the instance may still be initialising — wait a minute and try again.
 
 ## Submitting Jobs with Slurm
 
@@ -180,5 +181,6 @@ Platform administrators can also query job accounting data across all clusters v
 | `Connection refused` on SSH | Verify the cluster is in ACTIVE status; check that your IP is in the trusted CIDR range |
 | `Permission denied` on SSH | Verify you are using your platform user ID, not `ec2-user` or `ubuntu` |
 | `BUDGET_EXCEEDED` error | Contact your Project Administrator to increase the budget limit |
+| `TargetNotConnected` on SSM | The instance may still be starting up — wait 1–2 minutes and retry. Verify the cluster is ACTIVE and the instance ID is correct |
 | Jobs stuck in `PENDING` | Check `sinfo` for available nodes; the cluster may be scaling up compute nodes |
 | Cannot see connection details | The cluster may still be in CREATING status — check the progress endpoint |

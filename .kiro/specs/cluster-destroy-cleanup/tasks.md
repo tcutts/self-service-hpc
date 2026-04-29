@@ -1,0 +1,32 @@
+# Tasks
+
+- [x] 1. Add `deregister_cluster_name` function to cluster_names.py
+  - [x] 1.1 Add `deregister_cluster_name(table_name: str, cluster_name: str) -> bool` function that deletes the `CLUSTERNAME#{cluster_name}` / `REGISTRY` item from the ClusterNameRegistry table, returns True if deleted, False if not found, and logs the outcome
+  - [x] 1.2 Write unit tests for `deregister_cluster_name` — test successful deletion, item-not-found (graceful), and unexpected ClientError propagation
+  - [x] 1.3 [PBT: Property 3] Write property-based test: for any valid cluster name string, `deregister_cluster_name` after `register_cluster_name` should result in the item no longer existing in the table
+- [x] 2. Add PCS deletion polling and failure propagation to cluster_destruction.py
+  - [x] 2.1 Add `check_pcs_deletion_status` step handler that polls PCS to check if node groups and queues have finished deleting (catches `ResourceNotFoundException` as confirmation of deletion), returns `pcsSubResourcesDeleted: true/false`
+  - [x] 2.2 Add `delete_pcs_cluster_step` step handler that deletes the PCS cluster only after sub-resources are confirmed deleted, and raises `InternalError` on failure instead of swallowing the error
+  - [x] 2.3 Refactor `delete_pcs_resources` to only initiate deletion of node groups and queues (remove the cluster deletion call), keeping best-effort for the initiation calls but logging clearly
+  - [x] 2.4 Add `deregister_cluster_name` step handler to `cluster_destruction.py` that reads `CLUSTER_NAME_REGISTRY_TABLE_NAME` from environment and calls `cluster_names.deregister_cluster_name`, add to `_STEP_DISPATCH`
+  - [x] 2.5 Update `_STEP_DISPATCH` to include `check_pcs_deletion_status` and `delete_pcs_cluster` entries
+  - [x] 2.6 Write unit tests for `check_pcs_deletion_status` — test all-deleted (ResourceNotFoundException), still-deleting, mixed states, and no PCS resources (empty IDs skip polling)
+  - [x] 2.7 Write unit tests for `delete_pcs_cluster_step` — test successful deletion and failure propagation (raises InternalError)
+  - [x] 2.8 Write unit tests for refactored `delete_pcs_resources` — test it no longer attempts cluster deletion, only initiates node group and queue deletions
+  - [x] 2.9 Write unit tests for `deregister_cluster_name` step handler — test successful deregistration and graceful handling when registry entry doesn't exist
+  - [x] 2.10 [PBT: Property 1] Write property-based test: for any destruction event with non-empty pcsClusterId and at least one non-empty sub-resource ID, `check_pcs_deletion_status` returns `pcsSubResourcesDeleted: false` when any sub-resource is still in DELETING state
+  - [x] 2.11 [PBT: Property 2] Write property-based test: for any destruction event where PCS cluster deletion fails, `delete_pcs_cluster_step` raises an error (does not return successfully)
+  - [x] 2.12 [PBT: Property 4] Write property-based test: for any destruction event where all PCS deletions succeed (sub-resources not found, cluster deletion succeeds), the workflow steps produce the same event structure fields as the original `delete_pcs_resources` (preservation of successful-path output shape)
+- [x] 3. Update CDK state machine and Lambda configuration
+  - [x] 3.1 Add `CLUSTER_NAME_REGISTRY_TABLE_NAME` environment variable to `clusterDestructionStepLambda` in `lib/constructs/cluster-operations.ts`
+  - [x] 3.2 Grant `clusterNameRegistryTable.grantReadWriteData(clusterDestructionStepLambda)` for DynamoDB permissions
+  - [x] 3.3 Add `CheckPcsDeletionStatus` Lambda invoke step with a wait loop (similar to FSx export wait loop) — poll until `pcsSubResourcesDeleted` is true, then proceed to `DeletePcsCluster`
+  - [x] 3.4 Add `DeletePcsCluster` Lambda invoke step that calls the new `delete_pcs_cluster` step handler
+  - [x] 3.5 Add `DeregisterClusterName` Lambda invoke step that calls the new `deregister_cluster_name` step handler, placed after PCS/FSx cleanup and before `RecordClusterDestroyed`
+  - [x] 3.6 Add error catching on PCS deletion steps (`DeletePcsResources`, `CheckPcsDeletionStatus`, `DeletePcsCluster`) that routes to a `DestructionFailed` Fail state instead of continuing to `RecordClusterDestroyed`
+  - [x] 3.7 Verify CDK synthesis succeeds with `npx cdk synth`
+- [x] 4. Write integration tests and verify end-to-end behavior
+  - [x] 4.1 Write integration test: full destruction workflow with mocked AWS services — verify PCS sub-resources are polled, cluster deletion waits, failures halt workflow, and cluster name is deregistered
+  - [x] 4.2 Write integration test: destruction of cluster with no PCS resources (empty IDs) — verify workflow completes, skips PCS polling, and still deregisters the name
+  - [x] 4.3 Write integration test: destruction with PCS cluster deletion failure — verify workflow does NOT reach `record_cluster_destroyed` and does NOT mark cluster as DESTROYED
+  - [x] 4.4 Run full test suite to verify no regressions
