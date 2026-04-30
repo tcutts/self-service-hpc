@@ -821,10 +821,12 @@ class TestCloudWatchAgentDiagnosticsConfiguration:
     """[PBT: Property 6] CloudWatch Agent diagnostics configuration.
 
     For any valid ``project_id``, the ``generate_cloudwatch_agent_commands``
-    function SHALL produce commands that configure collection of both
-    ``/var/log/messages`` (with log stream ``{instance_id}/syslog``) and
+    function SHALL produce commands that configure collection of
+    ``/var/log/messages`` (with log stream ``{instance_id}/syslog``),
     ``/var/log/cloud-init-output.log`` (with log stream
-    ``{instance_id}/cloud-init-output``), targeting the log group
+    ``{instance_id}/cloud-init-output``), and
+    ``/var/log/amazon/pcs/bootstrap.log`` (with log stream
+    ``{instance_id}/pcs-bootstrap``), targeting the log group
     ``/hpc-platform/clusters/{project_id}/node-diagnostics``, using
     ``append-config`` mode.
 
@@ -844,7 +846,8 @@ class TestCloudWatchAgentDiagnosticsConfiguration:
         project_id,
     ):
         """generate_cloudwatch_agent_commands output contains
-        /var/log/messages, /var/log/cloud-init-output.log, the correct
+        /var/log/messages, /var/log/cloud-init-output.log,
+        /var/log/amazon/pcs/bootstrap.log, the correct
         node-diagnostics log group, correct stream name patterns, and
         append-config mode.
 
@@ -888,6 +891,18 @@ class TestCloudWatchAgentDiagnosticsConfiguration:
         assert "{instance_id}/cloud-init-output" in combined, (
             f"Output missing stream name pattern "
             f"'{{instance_id}}/cloud-init-output'. Output:\n{combined}"
+        )
+
+        # --- PCS bootstrap log collection -------------------------------
+        assert "/var/log/amazon/pcs/bootstrap.log" in combined, (
+            f"Output missing '/var/log/amazon/pcs/bootstrap.log' for "
+            f"project_id='{project_id}'. Output:\n{combined}"
+        )
+
+        # --- PCS bootstrap stream name pattern --------------------------
+        assert "{instance_id}/pcs-bootstrap" in combined, (
+            f"Output missing stream name pattern "
+            f"'{{instance_id}}/pcs-bootstrap'. Output:\n{combined}"
         )
 
         # --- Requirement 8.6: append-config mode ------------------------

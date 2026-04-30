@@ -490,6 +490,30 @@ Because each cluster has its own isolated IAM roles, this enables future per-clu
 
 If cluster creation fails, any partially created IAM resources are automatically rolled back as part of the cleanup process.
 
+## Security Groups
+
+Each project has two security groups that control traffic between the PCS cluster controller (slurmctld) and the EC2 node instances (slurmd). These are created as part of the project infrastructure and shared by all clusters in the project.
+
+**Head Node SG** (attached to login node instances):
+
+| Port | Source | Purpose |
+|------|--------|---------|
+| 22 (TCP) | Trusted CIDR ranges | SSH access |
+| 8443 (TCP) | Trusted CIDR ranges | DCV remote desktop |
+| 6818 (TCP) | Compute Node SG | slurmctld → slurmd communication |
+| 60001–63000 (TCP) | Compute Node SG | srun relay traffic from compute nodes |
+| All outbound | 0.0.0.0/0 | Outbound traffic (package installs, AWS APIs) |
+
+**Compute Node SG** (attached to the PCS cluster ENI and compute node instances):
+
+| Port | Source | Purpose |
+|------|--------|---------|
+| All traffic | Head Node SG | Login node → compute node communication |
+| All traffic | Self | Inter-compute-node traffic (Slurm, MPI, srun) |
+| All outbound | 0.0.0.0/0 | Outbound traffic |
+
+The Slurm port rules (6818 and 60001–63000) on the Head Node SG are required by PCS so the cluster controller can reach slurmd on login nodes and srun traffic can flow between compute and login nodes. Without these rules, PCS may repeatedly terminate and replace login node instances because the controller cannot verify node health.
+
 ## Best Practices
 
 - **Destroy clusters when not in use** — clusters incur costs while running, even if no jobs are active.

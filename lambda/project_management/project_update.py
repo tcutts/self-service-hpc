@@ -519,6 +519,54 @@ def handle_update_failure(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Consolidated step handlers
+# ===================================================================
+
+def consolidated_pre_loop(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute pre-loop steps sequentially in a single invocation.
+
+    Calls validate_update_state and start_cdk_update in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from both steps.
+    """
+    steps = [
+        validate_update_state,
+        start_cdk_update,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+def consolidated_post_loop(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute post-loop steps sequentially in a single invocation.
+
+    Calls extract_stack_outputs and record_updated_infrastructure in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from both steps.
+    """
+    steps = [
+        extract_stack_outputs,
+        record_updated_infrastructure,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+# ===================================================================
 # Step Functions Lambda entry point
 # ===================================================================
 
@@ -529,6 +577,8 @@ STEP_DISPATCH: dict[str, Any] = {
     "extract_stack_outputs": extract_stack_outputs,
     "record_updated_infrastructure": record_updated_infrastructure,
     "handle_update_failure": handle_update_failure,
+    "consolidated_pre_loop": consolidated_pre_loop,
+    "consolidated_post_loop": consolidated_post_loop,
 }
 
 

@@ -368,45 +368,12 @@ export class ClusterOperations extends Construct {
     // Cluster Creation State Machine Definition
     // ---------------------------------------------------------------
 
-    // Step 1: Validate and register cluster name
-    const validateAndRegisterName = new tasks.LambdaInvoke(this, 'ValidateAndRegisterName', {
+    // Consolidated pre-parallel step: validate name, check budget, resolve template, create IAM resources
+    const consolidatedPreParallel = new tasks.LambdaInvoke(this, 'ConsolidatedPreParallel', {
       lambdaFunction: clusterCreationStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'validate_and_register_name',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 2: Check budget breach
-    const checkBudgetBreach = new tasks.LambdaInvoke(this, 'CheckBudgetBreach', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'check_budget_breach',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 2b: Resolve template fields from ClusterTemplates table
-    const resolveTemplate = new tasks.LambdaInvoke(this, 'ResolveTemplate', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'resolve_template',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 2c: Create per-cluster IAM resources (roles + instance profiles)
-    const createIamResources = new tasks.LambdaInvoke(this, 'CreateIamResources', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'create_iam_resources',
+        'step': 'consolidated_pre_parallel',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -538,45 +505,12 @@ export class ClusterOperations extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    // Step 7c: Resolve login node details (IP + instance ID)
-    const resolveLoginNodeDetails = new tasks.LambdaInvoke(this, 'ResolveLoginNodeDetails', {
+    // Consolidated post-parallel step: resolve login node details, create PCS queue, tag resources, record cluster
+    const consolidatedPostParallel = new tasks.LambdaInvoke(this, 'ConsolidatedPostParallel', {
       lambdaFunction: clusterCreationStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'resolve_login_node_details',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 8: Create PCS queue
-    const createPcsQueue = new tasks.LambdaInvoke(this, 'CreatePcsQueue', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'create_pcs_queue',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 9: Tag resources
-    const tagResources = new tasks.LambdaInvoke(this, 'TagResources', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'tag_resources',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 10: Record cluster in DynamoDB
-    const recordCluster = new tasks.LambdaInvoke(this, 'RecordCluster', {
-      lambdaFunction: clusterCreationStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'record_cluster',
+        'step': 'consolidated_post_parallel',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -639,17 +573,11 @@ export class ClusterOperations extends Construct {
     // If the rollback handler itself fails, route through MarkClusterFailed
     handleCreationFailure.addCatch(markClusterFailed, { resultPath: '$.error' });
 
-    validateAndRegisterName.addCatch(failureChain, catchConfig);
-    checkBudgetBreach.addCatch(failureChain, catchConfig);
-    resolveTemplate.addCatch(failureChain, catchConfig);
-    createIamResources.addCatch(failureChain, catchConfig);
+    consolidatedPreParallel.addCatch(failureChain, catchConfig);
     createLoginNodeGroup.addCatch(failureChain, catchConfig);
     createComputeNodeGroup.addCatch(failureChain, catchConfig);
     checkNodeGroupsStatus.addCatch(failureChain, catchConfig);
-    resolveLoginNodeDetails.addCatch(failureChain, catchConfig);
-    createPcsQueue.addCatch(failureChain, catchConfig);
-    tagResources.addCatch(failureChain, catchConfig);
-    recordCluster.addCatch(failureChain, catchConfig);
+    consolidatedPostParallel.addCatch(failureChain, catchConfig);
 
     // FSx wait loop: check status → if not available, wait → check again
     const fsxWaitLoop = waitForFsx.next(checkFsxStatus);
@@ -666,7 +594,7 @@ export class ClusterOperations extends Construct {
     // Node group wait loop: check status → if not active, wait → check again
     const nodeGroupWaitLoop = waitForNodeGroups.next(checkNodeGroupsStatus);
     const areNodeGroupsActive = new sfn.Choice(this, 'AreNodeGroupsActive')
-      .when(sfn.Condition.booleanEquals('$.nodeGroupsActive', true), resolveLoginNodeDetails)
+      .when(sfn.Condition.booleanEquals('$.nodeGroupsActive', true), consolidatedPostParallel)
       .otherwise(nodeGroupWaitLoop);
 
     // --- Storage branch: choice between lustre (FSx) and mountpoint (S3 IAM) ---
@@ -694,8 +622,14 @@ export class ClusterOperations extends Construct {
       .when(sfn.Condition.stringEquals('$.storageMode', 'lustre'), lustreStorageBranch)
       .otherwise(configureMountpointS3Iam);
 
-    // PCS branch: create cluster → wait for active
+    // Pre-soak wait: 270s before first PCS cluster status check (calibrated to ~80th percentile)
+    const preSoakWaitPcsCluster = new sfn.Wait(this, 'PreSoakWaitPcsCluster', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(270)),
+    });
+
+    // PCS branch: create cluster → pre-soak wait 270s → check status → fallback poll loop
     const pcsBranch = createPcsCluster
+      .next(preSoakWaitPcsCluster)
       .next(checkPcsClusterStatus)
       .next(isPcsClusterActive);
 
@@ -754,27 +688,25 @@ export class ClusterOperations extends Construct {
     parallelProvision.branch(storageModeChoice, pcsBranch, launchTemplateBranch);
     parallelProvision.addCatch(failureChain, catchConfig);
 
-    // Chain: validate → budget → resolve template → create IAM → parallel(storage + PCS + launch templates)
+    // Chain: consolidated pre-parallel → parallel(storage + PCS + launch templates)
     //   → login nodes → compute → queue → tag → record → success
-    const creationDefinition = validateAndRegisterName
-      .next(checkBudgetBreach)
-      .next(resolveTemplate)
-      .next(createIamResources)
+    const creationDefinition = consolidatedPreParallel
       .next(parallelProvision);
+
+    // Pre-soak wait: 270s before first node groups status check (calibrated to ~80th percentile)
+    const preSoakWaitNodeGroups = new sfn.Wait(this, 'PreSoakWaitNodeGroups', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(270)),
+    });
 
     // Post-parallel chain: all branches converge here
     const postBranchChain = createLoginNodeGroup
       .next(createComputeNodeGroup)
+      .next(preSoakWaitNodeGroups)
       .next(checkNodeGroupsStatus)
       .next(areNodeGroupsActive);
 
-    // Continue after node groups are active: resolve login node → queue → tag → record → success
-    resolveLoginNodeDetails.next(createPcsQueue);
-
-    createPcsQueue
-      .next(tagResources)
-      .next(recordCluster)
-      .next(creationSuccess);
+    // Continue after node groups are active: consolidated post-parallel → success
+    consolidatedPostParallel.next(creationSuccess);
 
     parallelProvision.next(createLoginNodeGroup);
 
@@ -841,84 +773,29 @@ export class ClusterOperations extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    // Step 3c: Delete PCS cluster (after sub-resources confirmed deleted)
-    const deletePcsCluster = new tasks.LambdaInvoke(this, 'DeletePcsCluster', {
+    // Consolidated delete resources: delete PCS cluster, FSx filesystem, and conditionally remove mountpoint S3 policy
+    const consolidatedDeleteResources = new tasks.LambdaInvoke(this, 'ConsolidatedDeleteResources', {
       lambdaFunction: clusterDestructionStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'delete_pcs_cluster',
+        'step': 'consolidated_delete_resources',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
     });
 
-    // Step 4: Delete FSx filesystem
-    const deleteFsxFilesystem = new tasks.LambdaInvoke(this, 'DeleteFsxFilesystem', {
+    // Consolidated cleanup: delete IAM resources, launch templates, deregister cluster name, record destroyed
+    const consolidatedCleanup = new tasks.LambdaInvoke(this, 'ConsolidatedCleanup', {
       lambdaFunction: clusterDestructionStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'delete_fsx_filesystem',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 5: Record cluster as destroyed
-    const recordClusterDestroyed = new tasks.LambdaInvoke(this, 'RecordClusterDestroyed', {
-      lambdaFunction: clusterDestructionStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'record_cluster_destroyed',
+        'step': 'consolidated_cleanup',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
     });
 
     const destructionSuccess = new sfn.Succeed(this, 'DestructionSucceeded');
-
-    // Step 5b: Delete per-cluster IAM resources (roles + instance profiles)
-    const deleteIamResources = new tasks.LambdaInvoke(this, 'DeleteIamResources', {
-      lambdaFunction: clusterDestructionStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'delete_iam_resources',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 5c: Delete per-cluster launch templates
-    const deleteLaunchTemplates = new tasks.LambdaInvoke(this, 'DeleteLaunchTemplates', {
-      lambdaFunction: clusterDestructionStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'delete_launch_templates',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step: Remove Mountpoint S3 inline policy (mountpoint clusters only)
-    const removeMountpointS3Policy = new tasks.LambdaInvoke(this, 'RemoveMountpointS3Policy', {
-      lambdaFunction: clusterDestructionStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'remove_mountpoint_s3_policy',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$.removePolicyResult',
-    });
-
-    // Step: Deregister cluster name from ClusterNameRegistry
-    const deregisterClusterName = new tasks.LambdaInvoke(this, 'DeregisterClusterName', {
-      lambdaFunction: clusterDestructionStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'deregister_cluster_name',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
 
     // Failure handler: record DESTRUCTION_FAILED status in DynamoDB before failing
     const recordClusterDestructionFailed = new tasks.LambdaInvoke(this, 'RecordClusterDestructionFailed', {
@@ -943,11 +820,6 @@ export class ClusterOperations extends Construct {
     // If the failure handler itself fails, proceed to the fail state anyway
     recordClusterDestructionFailed.addCatch(destructionFailed, { resultPath: '$.error' });
 
-    // Storage mode choice for destruction: remove S3 policy before IAM cleanup for mountpoint clusters
-    const storageModeDestroyChoice = new sfn.Choice(this, 'StorageModeDestroyChoice')
-      .when(sfn.Condition.stringEquals('$.storageMode', 'mountpoint'), removeMountpointS3Policy)
-      .otherwise(deleteIamResources);
-
     // Error catching — all failure paths route through RecordClusterDestructionFailed
     const destructionCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
 
@@ -958,7 +830,10 @@ export class ClusterOperations extends Construct {
     // Catch errors on PCS deletion steps
     deletePcsResources.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
     checkPcsDeletionStatus.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
-    deletePcsCluster.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+
+    // Catch errors on consolidated destruction steps
+    consolidatedDeleteResources.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
+    consolidatedCleanup.addCatch(recordClusterDestructionFailed, destructionCatchConfig);
 
     // Export wait loop: check status → if not complete, wait → check again
     const exportWaitLoop = waitForExport.next(checkFsxExportStatus);
@@ -969,7 +844,7 @@ export class ClusterOperations extends Construct {
     // PCS deletion wait loop: check status → if not all deleted, wait → check again
     const pcsDeletionWaitLoop = waitForPcsDeletion.next(checkPcsDeletionStatus);
     const arePcsSubResourcesDeleted = new sfn.Choice(this, 'ArePcsSubResourcesDeleted')
-      .when(sfn.Condition.booleanEquals('$.pcsSubResourcesDeleted', true), deletePcsCluster)
+      .when(sfn.Condition.booleanEquals('$.pcsSubResourcesDeleted', true), consolidatedDeleteResources)
       .otherwise(pcsDeletionWaitLoop);
 
     // Chain: steps 1-2 → export wait loop → steps 3-5 → success
@@ -977,21 +852,13 @@ export class ClusterOperations extends Construct {
       .next(checkFsxExportStatus)
       .next(isExportComplete);
 
-    // Post-export chain: DeletePcsResources → CheckPcsDeletionStatus → wait loop → DeletePcsCluster → FSx → StorageMode → IAM → LaunchTemplates → DeregisterClusterName → Record → success
+    // Post-export chain: DeletePcsResources → CheckPcsDeletionStatus → wait loop → ConsolidatedDeleteResources → ConsolidatedCleanup → success
     deletePcsResources
       .next(checkPcsDeletionStatus)
       .next(arePcsSubResourcesDeleted);
 
-    deletePcsCluster
-      .next(deleteFsxFilesystem)
-      .next(storageModeDestroyChoice);
-
-    // Both branches converge at deleteIamResources
-    removeMountpointS3Policy.next(deleteIamResources);
-    deleteIamResources
-      .next(deleteLaunchTemplates)
-      .next(deregisterClusterName)
-      .next(recordClusterDestroyed)
+    consolidatedDeleteResources
+      .next(consolidatedCleanup)
       .next(destructionSuccess);
 
     this.clusterDestructionStateMachine = new sfn.StateMachine(this, 'ClusterDestructionStateMachine', {

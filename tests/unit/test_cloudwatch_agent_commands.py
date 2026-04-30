@@ -92,6 +92,12 @@ class TestNodeDiagnosticsConfig:
         joined = "\n".join(cmds)
         assert "/var/log/cloud-init-output.log" in joined
 
+    def test_pcs_bootstrap_file_path(self) -> None:
+        """Collect /var/log/amazon/pcs/bootstrap.log (PCS bootstrap log)."""
+        cmds = generate_cloudwatch_agent_commands("proj-xyz")
+        joined = "\n".join(cmds)
+        assert "/var/log/amazon/pcs/bootstrap.log" in joined
+
     def test_diagnostics_log_group_name(self) -> None:
         """Requirement 8.5: log group uses project_id."""
         cmds = generate_cloudwatch_agent_commands("proj-xyz")
@@ -109,6 +115,12 @@ class TestNodeDiagnosticsConfig:
         cmds = generate_cloudwatch_agent_commands("proj-xyz")
         joined = "\n".join(cmds)
         assert "{instance_id}/cloud-init-output" in joined
+
+    def test_pcs_bootstrap_stream_name(self) -> None:
+        """PCS bootstrap stream is {instance_id}/pcs-bootstrap."""
+        cmds = generate_cloudwatch_agent_commands("proj-xyz")
+        joined = "\n".join(cmds)
+        assert "{instance_id}/pcs-bootstrap" in joined
 
     def test_project_id_embedded_in_log_group(self) -> None:
         """Different project IDs produce different log group names."""

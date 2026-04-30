@@ -131,6 +131,36 @@ describe('ProjectInfrastructureStack', () => {
           }
         }
       });
+
+      it('has slurmd (6818) ingress from Compute Node SG', () => {
+        const ingressResources = template.findResources('AWS::EC2::SecurityGroupIngress');
+        const headFromCompute6818 = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'slurmd from slurmctld (Compute Node SG)' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 6818 &&
+            props.ToPort === 6818 &&
+            props.SourceSecurityGroupId != null
+          );
+        });
+        expect(headFromCompute6818).toBe(true);
+      });
+
+      it('has srun (60001-63000) ingress from Compute Node SG', () => {
+        const ingressResources = template.findResources('AWS::EC2::SecurityGroupIngress');
+        const headFromComputeSrun = Object.values(ingressResources).some((resource: any) => {
+          const props = resource.Properties ?? {};
+          return (
+            props.Description === 'srun from Compute Node SG' &&
+            props.IpProtocol === 'tcp' &&
+            props.FromPort === 60001 &&
+            props.ToPort === 63000 &&
+            props.SourceSecurityGroupId != null
+          );
+        });
+        expect(headFromComputeSrun).toBe(true);
+      });
     });
 
     describe('Compute Node SG', () => {

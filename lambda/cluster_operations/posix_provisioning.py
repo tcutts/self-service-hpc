@@ -193,8 +193,9 @@ def generate_cloudwatch_agent_commands(
     1. **Access log config** (``hpc-access-log.json``) — ships the PAM
        access log to the project's access-logs log group.
     2. **Node diagnostics config** (``hpc-node-diagnostics.json``) —
-       ships ``/var/log/messages`` and ``/var/log/cloud-init-output.log``
-       to the project's node-diagnostics log group.
+       ships ``/var/log/messages``, ``/var/log/cloud-init-output.log``,
+       and ``/var/log/amazon/pcs/bootstrap.log`` to the project's
+       node-diagnostics log group.
 
     Both configs use ``append-config`` mode so they coexist without
     overwriting each other.
@@ -261,6 +262,12 @@ def generate_cloudwatch_agent_commands(
         '            "file_path": "/var/log/cloud-init-output.log",',
         f'            "log_group_name": "{diag_log_group}",',
         '            "log_stream_name": "{instance_id}/cloud-init-output",',
+        '            "timezone": "UTC"',
+        "          },",
+        "          {",
+        '            "file_path": "/var/log/amazon/pcs/bootstrap.log",',
+        f'            "log_group_name": "{diag_log_group}",',
+        '            "log_stream_name": "{instance_id}/pcs-bootstrap",',
         '            "timezone": "UTC"',
         "          }",
         "        ]",
@@ -355,6 +362,32 @@ def generate_fsx_lustre_mount_commands(
         f"mkdir -p {mount_path}",
         f"mount -t lustre {fsx_dns_name}@tcp:/{fsx_mount_name} {mount_path}",
         f"echo '{fsx_dns_name}@tcp:/{fsx_mount_name} {mount_path} lustre defaults,noatime,flock,_netdev 0 0' >> /etc/fstab",
+    ]
+
+
+def generate_slurm_path_commands() -> list[str]:
+    """Generate bash commands to add PCS Slurm binaries to the system PATH.
+
+    PCS installs Slurm under ``/opt/aws/pcs/scheduler/slurm-<version>/bin``
+    which is not on the default PATH.  This creates a ``/etc/profile.d``
+    script that detects the installed version and adds the bin directory
+    so users can run ``sinfo``, ``squeue``, ``sbatch``, etc. without
+    specifying the full path.
+
+    Returns
+    -------
+    list[str]
+        A list of bash command strings.
+    """
+    return [
+        "# --- Add PCS Slurm binaries to system PATH ---",
+        "cat > /etc/profile.d/slurm-path.sh << 'PATHEOF'",
+        "# Added by HPC platform user data — PCS Slurm PATH",
+        "for d in /opt/aws/pcs/scheduler/slurm-*/bin; do",
+        '  [ -d "$d" ] && export PATH="$d:$PATH" && break',
+        "done",
+        "PATHEOF",
+        "chmod 644 /etc/profile.d/slurm-path.sh",
     ]
 
 
@@ -465,11 +498,12 @@ def generate_user_data_script(
     The script:
     1. Fetches project members from the Projects DynamoDB table.
     2. Looks up each member's POSIX UID/GID from the PlatformUsers table.
-    3. Mounts the EFS filesystem at ``/home`` (if *efs_filesystem_id* is provided).
-    4. Creates POSIX user accounts with the correct UID/GID.
-    5. Sets home directory ownership.
-    6. Disables interactive login for generic accounts.
-    7. Mounts project storage at ``/data`` based on the storage mode.
+    3. Adds PCS Slurm binaries to the system PATH via ``/etc/profile.d``.
+    4. Mounts the EFS filesystem at ``/home`` (if *efs_filesystem_id* is provided).
+    5. Creates POSIX user accounts with the correct UID/GID.
+    6. Sets home directory ownership.
+    7. Disables interactive login for generic accounts.
+    8. Mounts project storage at ``/data`` based on the storage mode.
 
     Parameters
     ----------
@@ -519,6 +553,11 @@ def generate_user_data_script(
     # --- SSM Agent (ensure running before anything else) ---
     _append_wrapped_section(
         lines, "SSM Agent", generate_ssm_agent_commands(),
+    )
+
+    # --- Slurm PATH (before user creation so interactive shells have it) ---
+    _append_wrapped_section(
+        lines, "Slurm PATH", generate_slurm_path_commands(),
     )
 
     # --- EFS mount (before user creation so /home is available) ---

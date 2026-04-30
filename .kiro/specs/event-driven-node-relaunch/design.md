@@ -150,6 +150,7 @@ Extended to produce two CloudWatch Agent config files:
 | `hpc-access-log.json` (existing) | `/var/log/hpc-access.log` | `/hpc-platform/clusters/{projectId}/access-logs` | `{instance_id}/access-log` |
 | `hpc-node-diagnostics.json` (new) | `/var/log/messages` | `/hpc-platform/clusters/{projectId}/node-diagnostics` | `{instance_id}/syslog` |
 | `hpc-node-diagnostics.json` (new) | `/var/log/cloud-init-output.log` | `/hpc-platform/clusters/{projectId}/node-diagnostics` | `{instance_id}/cloud-init-output` |
+| `hpc-node-diagnostics.json` (new) | `/var/log/amazon/pcs/bootstrap.log` | `/hpc-platform/clusters/{projectId}/node-diagnostics` | `{instance_id}/pcs-bootstrap` |
 
 Both configs use `append-config` mode so they coexist without overwriting each other.
 
@@ -259,7 +260,7 @@ The existing `LoginNodeRefreshScheduleRule` changes from `rate(5 minutes)` to `r
 
 ### Property 6: CloudWatch Agent diagnostics configuration
 
-*For any* valid `project_id`, the `generate_cloudwatch_agent_commands` function SHALL produce commands that configure collection of both `/var/log/messages` (with log stream `{instance_id}/syslog`) and `/var/log/cloud-init-output.log` (with log stream `{instance_id}/cloud-init-output`), targeting the log group `/hpc-platform/clusters/{project_id}/node-diagnostics`, using `append-config` mode.
+*For any* valid `project_id`, the `generate_cloudwatch_agent_commands` function SHALL produce commands that configure collection of `/var/log/messages` (with log stream `{instance_id}/syslog`), `/var/log/cloud-init-output.log` (with log stream `{instance_id}/cloud-init-output`), and `/var/log/amazon/pcs/bootstrap.log` (with log stream `{instance_id}/pcs-bootstrap`), targeting the log group `/hpc-platform/clusters/{project_id}/node-diagnostics`, using `append-config` mode.
 
 **Validates: Requirements 8.1, 8.2, 8.5, 8.6**
 
@@ -310,7 +311,7 @@ Property-based testing is appropriate for this feature because the Lambda handle
 | Property 3: Multi-cluster update | Generate 2-5 cluster records sharing the same loginNodeGroupId. Mock DynamoDB scan to return all. Verify: DynamoDB update is called once per matching cluster. | `st.integers(min_value=2, max_value=5)` for cluster count |
 | Property 4: Successful update logging | Generate random event data leading to a successful update. Capture log output. Verify: INFO log contains all required fields (instance_id, state, cluster_name, project_id, old/new instance IDs, old/new IPs). | Composite strategy combining instance, cluster, and IP generators |
 | Property 5: Skip reason logging | Generate random events for each skip scenario (no tag, no cluster match, compute-only match). Capture log output. Verify: DEBUG log contains a reason string. | `st.sampled_from()` for skip scenarios |
-| Property 6: CloudWatch agent diagnostics config | Generate random project IDs. Call `generate_cloudwatch_agent_commands`. Verify: output contains `/var/log/messages`, `/var/log/cloud-init-output.log`, correct log group name, correct stream name patterns, and `append-config`. | `st.from_regex()` for project IDs |
+| Property 6: CloudWatch agent diagnostics config | Generate random project IDs. Call `generate_cloudwatch_agent_commands`. Verify: output contains `/var/log/messages`, `/var/log/cloud-init-output.log`, `/var/log/amazon/pcs/bootstrap.log`, correct log group name, correct stream name patterns, and `append-config`. | `st.from_regex()` for project IDs |
 
 ### CDK Assertion Tests (Jest)
 

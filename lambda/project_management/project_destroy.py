@@ -393,6 +393,54 @@ def handle_destroy_failure(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ===================================================================
+# Consolidated step handlers
+# ===================================================================
+
+def consolidated_pre_loop(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute pre-loop steps sequentially in a single invocation.
+
+    Calls validate_and_check_clusters and start_cdk_destroy in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from both steps.
+    """
+    steps = [
+        validate_and_check_clusters,
+        start_cdk_destroy,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+def consolidated_post_loop(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute post-loop steps sequentially in a single invocation.
+
+    Calls clear_infrastructure and archive_project in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from both steps.
+    """
+    steps = [
+        clear_infrastructure,
+        archive_project,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+# ===================================================================
 # Step Functions Lambda entry point
 # ===================================================================
 
@@ -403,6 +451,8 @@ STEP_DISPATCH: dict[str, Any] = {
     "clear_infrastructure": clear_infrastructure,
     "archive_project": archive_project,
     "handle_destroy_failure": handle_destroy_failure,
+    "consolidated_pre_loop": consolidated_pre_loop,
+    "consolidated_post_loop": consolidated_post_loop,
 }
 
 

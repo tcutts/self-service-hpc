@@ -1093,6 +1093,62 @@ def _delete_pcs_cluster(cluster_id: str) -> str:
         logger.warning("Failed to delete PCS cluster '%s': %s", cluster_id, exc)
         return f"cluster:{cluster_id}:failed"
 
+# ===================================================================
+# Consolidated step handlers
+# ===================================================================
+
+def consolidated_delete_resources(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute resource deletion steps sequentially in a single invocation.
+
+    Calls delete_pcs_cluster_step, delete_fsx_filesystem, and
+    conditionally remove_mountpoint_s3_policy (when storageMode == 'mountpoint').
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from all steps.
+    """
+    steps = [
+        delete_pcs_cluster_step,
+        delete_fsx_filesystem,
+    ]
+    if event.get("storageMode") == "mountpoint":
+        steps.append(remove_mountpoint_s3_policy)
+
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+def consolidated_cleanup(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute cleanup steps sequentially in a single invocation.
+
+    Calls delete_iam_resources, delete_launch_templates,
+    deregister_cluster_name_step, and record_cluster_destroyed in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from all four steps.
+    """
+    steps = [
+        delete_iam_resources,
+        delete_launch_templates,
+        deregister_cluster_name_step,
+        record_cluster_destroyed,
+    ]
+
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
 # ---------------------------------------------------------------------------
 # Populate the step dispatch table now that all functions are defined.
 # ---------------------------------------------------------------------------
@@ -1109,4 +1165,6 @@ _STEP_DISPATCH.update({
     "delete_launch_templates": delete_launch_templates,
     "record_cluster_destroyed": record_cluster_destroyed,
     "record_cluster_destruction_failed": record_cluster_destruction_failed,
+    "consolidated_delete_resources": consolidated_delete_resources,
+    "consolidated_cleanup": consolidated_cleanup,
 })

@@ -33,7 +33,8 @@ export interface ProjectInfrastructureStackProps extends cdk.StackProps {
  *  - Cost_Allocation_Tag applied to all resources
  *
  * Security groups:
- *  - Head Node SG: SSH (22) and DCV (8443) from trusted CIDR ranges only
+ *  - Head Node SG: SSH (22) and DCV (8443) from trusted CIDR ranges only,
+ *    plus slurmd (6818) and srun (60001-63000) from Compute Node SG
  *  - Compute Node SG: all traffic from Head Node SG and self (other compute nodes)
  *  - EFS SG: NFS (2049) from Head Node and Compute Node SGs
  *  - FSx for Lustre SG: Lustre (988, 1018-1023) from Head Node SG, Compute Node SG, and self
@@ -88,7 +89,9 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     // Security Groups — least-privilege, no 0.0.0.0/0
     // -----------------------------------------------------------------
 
-    // Head Node (Login Node) SG: SSH (22) and DCV (8443) from trusted CIDRs
+    // Head Node (Login Node) SG: SSH (22) and DCV (8443) from trusted CIDRs,
+    // plus Slurm traffic from the Compute Node SG so slurmctld can reach
+    // slurmd on login nodes (port 6818) and srun traffic flows correctly.
     this.headNodeSecurityGroup = new ec2.SecurityGroup(this, 'HeadNodeSG', {
       vpc: this.vpc,
       description: 'Head Node: SSH and DCV from trusted CIDR ranges',
@@ -124,6 +127,21 @@ export class ProjectInfrastructureStack extends cdk.Stack {
       this.computeNodeSecurityGroup,
       ec2.Port.allTraffic(),
       'All traffic from other Compute Nodes (self)',
+    );
+
+    // Head Node ← Compute Node SG: Slurm and srun traffic.
+    // PCS requires slurmctld (Compute Node SG) to reach slurmd on login
+    // nodes (port 6818) and srun relay traffic (60001-63000).
+    // See: https://docs.aws.amazon.com/pcs/latest/userguide/working-with_networking_sg.html
+    this.headNodeSecurityGroup.addIngressRule(
+      this.computeNodeSecurityGroup,
+      ec2.Port.tcp(6818),
+      'slurmd from slurmctld (Compute Node SG)',
+    );
+    this.headNodeSecurityGroup.addIngressRule(
+      this.computeNodeSecurityGroup,
+      ec2.Port.tcpRange(60001, 63000),
+      'srun from Compute Node SG',
     );
 
     // EFS SG: NFS (2049) from Head Node and Compute Node SGs

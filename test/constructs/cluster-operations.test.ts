@@ -271,7 +271,7 @@ describe('ClusterOperations', () => {
     expect(definitionStr).toContain('StorageModeChoice');
   });
 
-  it('destruction state machine includes RemoveMountpointS3Policy step', () => {
+  it('destruction state machine includes ConsolidatedDeleteResources step (replaces individual delete steps including RemoveMountpointS3Policy)', () => {
     const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
       Properties: { StateMachineName: 'hpc-cluster-destruction' },
     });
@@ -279,7 +279,8 @@ describe('ClusterOperations', () => {
     expect(logicalIds).toHaveLength(1);
     const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
     const definitionStr = JSON.stringify(definition);
-    expect(definitionStr).toContain('RemoveMountpointS3Policy');
+    expect(definitionStr).toContain('ConsolidatedDeleteResources');
+    expect(definitionStr).toContain('consolidated_delete_resources');
   });
 
   it('grants IAM PutRolePolicy and DeleteRolePolicy permissions for Mountpoint policy management', () => {

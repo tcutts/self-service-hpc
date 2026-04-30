@@ -2376,6 +2376,64 @@ def mark_cluster_failed_from_event(event: dict[str, Any], context: Any = None) -
 
 
 # ---------------------------------------------------------------------------
+# Consolidated step handlers
+# ---------------------------------------------------------------------------
+
+
+def consolidated_pre_parallel(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute pre-parallel steps sequentially in a single invocation.
+
+    Calls validate_and_register_name, check_budget_breach,
+    resolve_template, and create_iam_resources in order.
+    Each step receives the accumulated payload from prior steps.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from all four steps.
+    """
+    steps = [
+        validate_and_register_name,
+        check_budget_breach,
+        resolve_template,
+        create_iam_resources,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+def consolidated_post_parallel(event: dict[str, Any]) -> dict[str, Any]:
+    """Execute post-parallel tail steps sequentially in a single invocation.
+
+    Calls resolve_login_node_details, create_pcs_queue, tag_resources,
+    and record_cluster in order.  Each step receives the accumulated
+    payload from prior steps.
+
+    Each sub-step internally calls _update_step_progress so progress
+    tracking is preserved within the consolidated invocation.
+
+    Raises the original error from whichever sub-step fails,
+    preserving the error type and message for the catch block.
+
+    Returns the merged payload with all fields from all four steps.
+    """
+    steps = [
+        resolve_login_node_details,
+        create_pcs_queue,
+        tag_resources,
+        record_cluster,
+    ]
+    result: dict[str, Any] = {}
+    for step_fn in steps:
+        payload = {**event, **result}
+        result = {**result, **step_fn(payload)}
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Populate the step dispatch table now that all functions are defined.
 # ---------------------------------------------------------------------------
 _STEP_DISPATCH.update({
@@ -2399,4 +2457,6 @@ _STEP_DISPATCH.update({
     "record_cluster": record_cluster,
     "handle_creation_failure": handle_creation_failure,
     "configure_mountpoint_s3_iam": configure_mountpoint_s3_iam,
+    "consolidated_pre_parallel": consolidated_pre_parallel,
+    "consolidated_post_parallel": consolidated_post_parallel,
 })

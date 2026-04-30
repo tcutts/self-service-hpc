@@ -95,7 +95,7 @@ Replace `<instanceId>` with the login node's EC2 instance ID from the cluster de
 
 ## Submitting Jobs with Slurm
 
-Clusters use **Slurm** as the job scheduler. Once connected to the login node via SSH, you can submit and manage jobs using standard Slurm commands.
+Clusters use **Slurm** as the job scheduler. Once connected to the login node via SSH, you can submit and manage jobs using standard Slurm commands. The Slurm binaries (`sinfo`, `squeue`, `sbatch`, etc.) are automatically added to your PATH when you log in.
 
 ### Submitting a Batch Job
 

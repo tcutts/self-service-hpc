@@ -120,5 +120,6 @@ This feature replaces the polling mechanism with an event-driven approach. An Ev
 4. THE ProjectInfrastructureStack SHALL set the removal policy of the Node_Diagnostics_Log_Group to DESTROY, because the short retention period and diagnostic nature of the logs make them disposable.
 5. THE `generate_cloudwatch_agent_commands` function SHALL accept the `project_id` parameter and use it to construct both the existing access log group name and the new node diagnostics log group name.
 6. THE CloudWatch_Agent configuration SHALL use `append-config` mode so that the node diagnostics configuration coexists with the existing access log configuration without overwriting it.
-7. WHEN a node instance boots, THE user data script SHALL configure the CloudWatch_Agent to begin shipping syslog and cloud-init output logs within the same boot sequence that configures access log shipping.
+7. WHEN a node instance boots, THE user data script SHALL configure the CloudWatch_Agent to begin shipping syslog, cloud-init output, and PCS bootstrap logs within the same boot sequence that configures access log shipping.
+8. THE `generate_cloudwatch_agent_commands` function SHALL configure the CloudWatch_Agent to collect the PCS bootstrap log (`/var/log/amazon/pcs/bootstrap.log`) and ship it to the Node_Diagnostics_Log_Group with a log stream name of `{instance_id}/pcs-bootstrap`.
 

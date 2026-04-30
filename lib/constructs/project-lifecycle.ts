@@ -76,29 +76,23 @@ export class ProjectLifecycle extends Construct {
 
     // --- Project Deploy State Machine Definition ---
 
-    // Step 1: Validate project state
-    const validateProjectState = new tasks.LambdaInvoke(this, 'ValidateProjectState', {
+    // Consolidated pre-loop step: validate project state + start CDK deploy
+    const consolidatedDeployPreLoop = new tasks.LambdaInvoke(this, 'ConsolidatedPreLoop', {
       lambdaFunction: projectDeployStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'validate_project_state',
+        'step': 'consolidated_pre_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
     });
 
-    // Step 2: Start CDK deploy
-    const startCdkDeploy = new tasks.LambdaInvoke(this, 'StartCdkDeploy', {
-      lambdaFunction: projectDeployStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'start_cdk_deploy',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
+    // Pre-soak wait: 210s before first deploy status check (calibrated to ~80th percentile)
+    const preSoakWaitDeploy = new sfn.Wait(this, 'PreSoakWaitDeploy', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(210)),
     });
 
-    // Step 3: Check deploy status (with wait loop)
+    // Check deploy status (with wait loop)
     const checkDeployStatus = new tasks.LambdaInvoke(this, 'CheckDeployStatus', {
       lambdaFunction: projectDeployStepLambda,
       payloadResponseOnly: true,
@@ -113,23 +107,12 @@ export class ProjectLifecycle extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    // Step 4: Extract stack outputs
-    const extractStackOutputs = new tasks.LambdaInvoke(this, 'ExtractStackOutputs', {
+    // Consolidated post-loop step: extract stack outputs + record infrastructure
+    const consolidatedDeployPostLoop = new tasks.LambdaInvoke(this, 'ConsolidatedPostLoop', {
       lambdaFunction: projectDeployStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'extract_stack_outputs',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 5: Record infrastructure
-    const recordInfrastructure = new tasks.LambdaInvoke(this, 'RecordInfrastructure', {
-      lambdaFunction: projectDeployStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'record_infrastructure',
+        'step': 'consolidated_post_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -157,27 +140,24 @@ export class ProjectLifecycle extends Construct {
     const deployCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
     const deployFailureChain = handleDeployFailure.next(deployFailed);
 
-    validateProjectState.addCatch(deployFailureChain, deployCatchConfig);
-    startCdkDeploy.addCatch(deployFailureChain, deployCatchConfig);
+    consolidatedDeployPreLoop.addCatch(deployFailureChain, deployCatchConfig);
     checkDeployStatus.addCatch(deployFailureChain, deployCatchConfig);
-    extractStackOutputs.addCatch(deployFailureChain, deployCatchConfig);
-    recordInfrastructure.addCatch(deployFailureChain, deployCatchConfig);
+    consolidatedDeployPostLoop.addCatch(deployFailureChain, deployCatchConfig);
 
     // Deploy wait loop: check status → if not complete, wait → check again
     const deployWaitLoop = waitForDeploy.next(checkDeployStatus);
     const isDeployComplete = new sfn.Choice(this, 'IsDeployComplete')
-      .when(sfn.Condition.booleanEquals('$.deployComplete', true), extractStackOutputs)
+      .when(sfn.Condition.booleanEquals('$.deployComplete', true), consolidatedDeployPostLoop)
       .otherwise(deployWaitLoop);
 
-    // Chain: Validate → Start CDK Deploy → Check Status → wait loop → Extract Outputs → Record Infrastructure → Success
-    const deployDefinition = validateProjectState
-      .next(startCdkDeploy)
+    // Chain: ConsolidatedPreLoop → PreSoakWaitDeploy (210s) → CheckDeployStatus → wait loop → ConsolidatedPostLoop → Success
+    const deployDefinition = consolidatedDeployPreLoop
+      .next(preSoakWaitDeploy)
       .next(checkDeployStatus)
       .next(isDeployComplete);
 
     // Post-deploy chain (connected via the Choice "when complete" branch)
-    extractStackOutputs
-      .next(recordInfrastructure)
+    consolidatedDeployPostLoop
       .next(deploySuccess);
 
     this.projectDeployStateMachine = new sfn.StateMachine(this, 'ProjectDeployStateMachine', {
@@ -221,30 +201,25 @@ export class ProjectLifecycle extends Construct {
     }));
 
     // --- Project Destroy State Machine Definition ---
+    // Chain: ConsolidatedDestroyPreLoop → PreSoakWaitDestroy (210s) → CheckDestroyStatus → (complete → ConsolidatedDestroyPostLoop → Success | not complete → Wait 30s → CheckDestroyStatus)
 
-    // Step 1: Validate project state and check clusters
-    const validateAndCheckClusters = new tasks.LambdaInvoke(this, 'ValidateAndCheckClusters', {
+    // Consolidated pre-loop step: validate project state + check clusters + start CDK destroy
+    const consolidatedDestroyPreLoop = new tasks.LambdaInvoke(this, 'ConsolidatedDestroyPreLoop', {
       lambdaFunction: projectDestroyStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'validate_and_check_clusters',
+        'step': 'consolidated_pre_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
     });
 
-    // Step 2: Start CDK destroy
-    const startCdkDestroy = new tasks.LambdaInvoke(this, 'StartCdkDestroy', {
-      lambdaFunction: projectDestroyStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'start_cdk_destroy',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
+    // Pre-soak wait: 210s before first destroy status check (calibrated to ~80th percentile)
+    const preSoakWaitDestroy = new sfn.Wait(this, 'PreSoakWaitDestroy', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(210)),
     });
 
-    // Step 3: Check destroy status (with wait loop)
+    // Check destroy status (with wait loop)
     const checkDestroyStatus = new tasks.LambdaInvoke(this, 'CheckDestroyStatus', {
       lambdaFunction: projectDestroyStepLambda,
       payloadResponseOnly: true,
@@ -259,23 +234,12 @@ export class ProjectLifecycle extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    // Step 4: Clear infrastructure
-    const clearInfrastructure = new tasks.LambdaInvoke(this, 'ClearInfrastructure', {
+    // Consolidated post-loop step: clear infrastructure + archive project
+    const consolidatedDestroyPostLoop = new tasks.LambdaInvoke(this, 'ConsolidatedDestroyPostLoop', {
       lambdaFunction: projectDestroyStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'clear_infrastructure',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 5: Archive project
-    const archiveProject = new tasks.LambdaInvoke(this, 'ArchiveProject', {
-      lambdaFunction: projectDestroyStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'archive_project',
+        'step': 'consolidated_post_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -303,27 +267,24 @@ export class ProjectLifecycle extends Construct {
     const destroyCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
     const destroyFailureChain = handleDestroyFailure.next(projectDestroyFailed);
 
-    validateAndCheckClusters.addCatch(destroyFailureChain, destroyCatchConfig);
-    startCdkDestroy.addCatch(destroyFailureChain, destroyCatchConfig);
+    consolidatedDestroyPreLoop.addCatch(destroyFailureChain, destroyCatchConfig);
     checkDestroyStatus.addCatch(destroyFailureChain, destroyCatchConfig);
-    clearInfrastructure.addCatch(destroyFailureChain, destroyCatchConfig);
-    archiveProject.addCatch(destroyFailureChain, destroyCatchConfig);
+    consolidatedDestroyPostLoop.addCatch(destroyFailureChain, destroyCatchConfig);
 
     // Destroy wait loop: check status → if not complete, wait → check again
     const destroyWaitLoop = waitForDestroy.next(checkDestroyStatus);
     const isDestroyComplete = new sfn.Choice(this, 'IsDestroyComplete')
-      .when(sfn.Condition.booleanEquals('$.destroyComplete', true), clearInfrastructure)
+      .when(sfn.Condition.booleanEquals('$.destroyComplete', true), consolidatedDestroyPostLoop)
       .otherwise(destroyWaitLoop);
 
-    // Chain: Validate & Check Clusters → Start CDK Destroy → Check Status → wait loop → Clear Infrastructure → Archive → Success
-    const destroyDefinition = validateAndCheckClusters
-      .next(startCdkDestroy)
+    // Chain: ConsolidatedDestroyPreLoop → PreSoakWaitDestroy (210s) → CheckDestroyStatus → wait loop → ConsolidatedDestroyPostLoop → Success
+    const destroyDefinition = consolidatedDestroyPreLoop
+      .next(preSoakWaitDestroy)
       .next(checkDestroyStatus)
       .next(isDestroyComplete);
 
     // Post-destroy chain (connected via the Choice "when complete" branch)
-    clearInfrastructure
-      .next(archiveProject)
+    consolidatedDestroyPostLoop
       .next(projectDestroySuccess);
 
     this.projectDestroyStateMachine = new sfn.StateMachine(this, 'ProjectDestroyStateMachine', {
@@ -375,29 +336,23 @@ export class ProjectLifecycle extends Construct {
 
     // --- Project Update State Machine Definition ---
 
-    // Step 1: Validate update state
-    const validateUpdateState = new tasks.LambdaInvoke(this, 'ValidateUpdateState', {
+    // Consolidated pre-loop step: validate update state + start CDK update
+    const consolidatedUpdatePreLoop = new tasks.LambdaInvoke(this, 'ConsolidatedUpdatePreLoop', {
       lambdaFunction: projectUpdateStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'validate_update_state',
+        'step': 'consolidated_pre_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
     });
 
-    // Step 2: Start CDK update
-    const startCdkUpdate = new tasks.LambdaInvoke(this, 'StartCdkUpdate', {
-      lambdaFunction: projectUpdateStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'start_cdk_update',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
+    // Pre-soak wait: 90s before first update status check (calibrated to ~80th percentile)
+    const preSoakWaitUpdate = new sfn.Wait(this, 'PreSoakWaitUpdate', {
+      time: sfn.WaitTime.duration(cdk.Duration.seconds(90)),
     });
 
-    // Step 3: Check update status (with wait loop)
+    // Check update status (with wait loop)
     const checkUpdateStatus = new tasks.LambdaInvoke(this, 'CheckUpdateStatus', {
       lambdaFunction: projectUpdateStepLambda,
       payloadResponseOnly: true,
@@ -412,23 +367,12 @@ export class ProjectLifecycle extends Construct {
       time: sfn.WaitTime.duration(cdk.Duration.seconds(30)),
     });
 
-    // Step 4: Extract stack outputs
-    const extractUpdateStackOutputs = new tasks.LambdaInvoke(this, 'ExtractUpdateStackOutputs', {
+    // Consolidated post-loop step: extract stack outputs + record updated infrastructure
+    const consolidatedUpdatePostLoop = new tasks.LambdaInvoke(this, 'ConsolidatedUpdatePostLoop', {
       lambdaFunction: projectUpdateStepLambda,
       payloadResponseOnly: true,
       payload: sfn.TaskInput.fromObject({
-        'step': 'extract_stack_outputs',
-        'payload': sfn.JsonPath.entirePayload,
-      }),
-      resultPath: '$',
-    });
-
-    // Step 5: Record updated infrastructure
-    const recordUpdatedInfrastructure = new tasks.LambdaInvoke(this, 'RecordUpdatedInfrastructure', {
-      lambdaFunction: projectUpdateStepLambda,
-      payloadResponseOnly: true,
-      payload: sfn.TaskInput.fromObject({
-        'step': 'record_updated_infrastructure',
+        'step': 'consolidated_post_loop',
         'payload': sfn.JsonPath.entirePayload,
       }),
       resultPath: '$',
@@ -456,27 +400,24 @@ export class ProjectLifecycle extends Construct {
     const updateCatchConfig: sfn.CatchProps = { resultPath: '$.error' };
     const updateFailureChain = handleUpdateFailure.next(updateFailed);
 
-    validateUpdateState.addCatch(updateFailureChain, updateCatchConfig);
-    startCdkUpdate.addCatch(updateFailureChain, updateCatchConfig);
+    consolidatedUpdatePreLoop.addCatch(updateFailureChain, updateCatchConfig);
     checkUpdateStatus.addCatch(updateFailureChain, updateCatchConfig);
-    extractUpdateStackOutputs.addCatch(updateFailureChain, updateCatchConfig);
-    recordUpdatedInfrastructure.addCatch(updateFailureChain, updateCatchConfig);
+    consolidatedUpdatePostLoop.addCatch(updateFailureChain, updateCatchConfig);
 
     // Update wait loop: check status → if not complete, wait → check again
     const updateWaitLoop = waitForUpdate.next(checkUpdateStatus);
     const isUpdateComplete = new sfn.Choice(this, 'IsUpdateComplete')
-      .when(sfn.Condition.booleanEquals('$.updateComplete', true), extractUpdateStackOutputs)
+      .when(sfn.Condition.booleanEquals('$.updateComplete', true), consolidatedUpdatePostLoop)
       .otherwise(updateWaitLoop);
 
-    // Chain: Validate → Start CDK Update → Check Status → wait loop → Extract Outputs → Record Infrastructure → Success
-    const updateDefinition = validateUpdateState
-      .next(startCdkUpdate)
+    // Chain: ConsolidatedUpdatePreLoop → PreSoakWaitUpdate (90s) → CheckUpdateStatus → wait loop → ConsolidatedUpdatePostLoop → Success
+    const updateDefinition = consolidatedUpdatePreLoop
+      .next(preSoakWaitUpdate)
       .next(checkUpdateStatus)
       .next(isUpdateComplete);
 
     // Post-update chain (connected via the Choice "when complete" branch)
-    extractUpdateStackOutputs
-      .next(recordUpdatedInfrastructure)
+    consolidatedUpdatePostLoop
       .next(updateSuccess);
 
     this.projectUpdateStateMachine = new sfn.StateMachine(this, 'ProjectUpdateStateMachine', {

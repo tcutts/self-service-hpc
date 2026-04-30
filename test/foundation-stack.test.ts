@@ -1543,41 +1543,50 @@ describe('FoundationStack', () => {
       return false;
     }
 
-    // **Validates: Requirements 2.1**
-    it('creation state machine contains CreateIamResources invoking create_iam_resources', () => {
+    // **Validates: Requirements 2.1** (create_iam_resources is now inside consolidated_pre_parallel)
+    it('creation state machine contains ConsolidatedPreParallel invoking consolidated_pre_parallel (includes create_iam_resources)', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
       const states = def.States;
-      expect(states).toHaveProperty('CreateIamResources');
-      expect(stateInvokesStep(states['CreateIamResources'], 'create_iam_resources')).toBe(true);
+      expect(states).toHaveProperty('ConsolidatedPreParallel');
+      expect(stateInvokesStep(states['ConsolidatedPreParallel'], 'consolidated_pre_parallel')).toBe(true);
     });
 
-    // **Validates: Requirements 2.2**
-    it('creation state machine contains WaitForInstanceProfiles invoking wait_for_instance_profiles', () => {
+    // **Validates: Requirements 2.2** (WaitForInstanceProfiles is inside the Parallel branch)
+    it('creation state machine contains WaitForInstanceProfiles invoking wait_for_instance_profiles inside Parallel branch', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
       const states = def.States;
-      expect(states).toHaveProperty('WaitForInstanceProfiles');
-      expect(stateInvokesStep(states['WaitForInstanceProfiles'], 'wait_for_instance_profiles')).toBe(true);
+      // WaitForInstanceProfiles is now inside the ParallelProvision branches
+      const parallelState = states['ParallelProvision'];
+      expect(parallelState).toBeDefined();
+      const launchTemplateBranch = parallelState.Branches[2];
+      expect(launchTemplateBranch.States).toHaveProperty('WaitForInstanceProfiles');
+      expect(stateInvokesStep(launchTemplateBranch.States['WaitForInstanceProfiles'], 'wait_for_instance_profiles')).toBe(true);
     });
 
-    // **Validates: Requirements 2.2, 3.5**
-    it('creation state machine contains AreInstanceProfilesReady Choice and a Wait state for the loop', () => {
+    // **Validates: Requirements 2.2, 3.5** (AreInstanceProfilesReady is inside the Parallel branch)
+    it('creation state machine contains AreInstanceProfilesReady Choice and a Wait state for the loop inside Parallel branch', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
       const states = def.States;
-      expect(states).toHaveProperty('AreInstanceProfilesReady');
-      expect(states['AreInstanceProfilesReady'].Type).toBe('Choice');
+      // AreInstanceProfilesReady is now inside the ParallelProvision branches
+      const parallelState = states['ParallelProvision'];
+      expect(parallelState).toBeDefined();
+      const launchTemplateBranch = parallelState.Branches[2];
+      const branchStates = launchTemplateBranch.States;
+      expect(branchStates).toHaveProperty('AreInstanceProfilesReady');
+      expect(branchStates['AreInstanceProfilesReady'].Type).toBe('Choice');
       // There should be a Wait state for the instance profile propagation loop
-      const waitStateNames = Object.keys(states).filter(
-        (name) => states[name].Type === 'Wait' && name.toLowerCase().includes('instanceprofile'),
+      const waitStateNames = Object.keys(branchStates).filter(
+        (name) => branchStates[name].Type === 'Wait' && name.toLowerCase().includes('instanceprofile'),
       );
       expect(waitStateNames.length).toBeGreaterThanOrEqual(1);
     });
 
-    // **Validates: Requirements 2.3**
+    // **Validates: Requirements 2.3** (ParallelProvision replaces ParallelFsxAndPcs)
     it('Parallel resultSelector contains loginInstanceProfileArn and computeInstanceProfileArn, not instanceProfileArn', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
       const states = def.States;
-      // Find the Parallel state (ParallelFsxAndPcs)
-      const parallelState = states['ParallelFsxAndPcs'];
+      // Parallel state is now named ParallelProvision (after SFN consolidation)
+      const parallelState = states['ParallelProvision'];
       expect(parallelState).toBeDefined();
       expect(parallelState.Type).toBe('Parallel');
       const resultSelector = parallelState.ResultSelector;
@@ -1587,12 +1596,12 @@ describe('FoundationStack', () => {
       expect(resultSelector).not.toHaveProperty(['instanceProfileArn.$']);
     });
 
-    // **Validates: Requirements 2.6**
-    it('destruction state machine contains DeleteIamResources invoking delete_iam_resources', () => {
+    // **Validates: Requirements 2.6** (delete_iam_resources is now inside consolidated_cleanup)
+    it('destruction state machine contains ConsolidatedCleanup invoking consolidated_cleanup (includes delete_iam_resources)', () => {
       const def = parseStateMachineDefinition('hpc-cluster-destruction');
       const states = def.States;
-      expect(states).toHaveProperty('DeleteIamResources');
-      expect(stateInvokesStep(states['DeleteIamResources'], 'delete_iam_resources')).toBe(true);
+      expect(states).toHaveProperty('ConsolidatedCleanup');
+      expect(stateInvokesStep(states['ConsolidatedCleanup'], 'consolidated_cleanup')).toBe(true);
     });
   });
 
@@ -1650,24 +1659,23 @@ describe('FoundationStack', () => {
       return names;
     }
 
-    // **Validates: Requirements 3.1**
-    it('all original creation states exist', () => {
+    // **Validates: Requirements 3.1** (updated for SFN consolidation)
+    it('all original creation states exist (consolidated where applicable)', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
       const allNames = collectAllStateNames(def);
       const expectedStates = [
-        'ValidateAndRegisterName',
-        'CheckBudgetBreach',
-        'ResolveTemplate',
-        'ParallelFsxAndPcs',
+        // Pre-parallel steps consolidated into ConsolidatedPreParallel
+        'ConsolidatedPreParallel',
+        // Parallel state renamed to ParallelProvision
+        'ParallelProvision',
         'CreateFsxFilesystem',
         'CheckFsxStatus',
         'CreateFsxDra',
         'CreatePcsCluster',
         'CreateLoginNodeGroup',
         'CreateComputeNodeGroup',
-        'CreatePcsQueue',
-        'TagResources',
-        'RecordCluster',
+        // Post-parallel steps consolidated into ConsolidatedPostParallel
+        'ConsolidatedPostParallel',
       ];
       for (const stateName of expectedStates) {
         expect(allNames).toContain(stateName);
@@ -1694,11 +1702,11 @@ describe('FoundationStack', () => {
       expect(markFailed.Next === 'CreationFailed' || markFailed.Catch?.some((c: any) => c.Next === 'CreationFailed')).toBe(true);
     });
 
-    // **Validates: Requirements 3.2**
+    // **Validates: Requirements 3.2** (ParallelProvision replaces ParallelFsxAndPcs)
     it('FSx wait loop exists — IsFsxAvailable Choice and WaitForFsx Wait state', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
-      // IsFsxAvailable and WaitForFsx are inside the Parallel branches
-      const parallelState = def.States['ParallelFsxAndPcs'];
+      // IsFsxAvailable and WaitForFsx are inside the ParallelProvision branches
+      const parallelState = def.States['ParallelProvision'];
       expect(parallelState).toBeDefined();
       const fsxBranch = parallelState.Branches[0];
       const branchStates = fsxBranch.States;
@@ -1710,10 +1718,10 @@ describe('FoundationStack', () => {
       expect(branchStates['WaitForFsx'].Type).toBe('Wait');
     });
 
-    // **Validates: Requirements 3.2**
+    // **Validates: Requirements 3.2** (ParallelProvision replaces ParallelFsxAndPcs)
     it('all non-IAM resultSelector fields in the Parallel state are present', () => {
       const def = parseStateMachineDefinition('hpc-cluster-creation');
-      const parallelState = def.States['ParallelFsxAndPcs'];
+      const parallelState = def.States['ParallelProvision'];
       expect(parallelState).toBeDefined();
       expect(parallelState.Type).toBe('Parallel');
 
@@ -1751,16 +1759,17 @@ describe('FoundationStack', () => {
       }
     });
 
-    // **Validates: Requirements 3.4**
-    it('all original destruction states exist', () => {
+    // **Validates: Requirements 3.4** (updated for SFN consolidation)
+    it('all original destruction states exist (consolidated where applicable)', () => {
       const def = parseStateMachineDefinition('hpc-cluster-destruction');
       const states = def.States;
       const expectedStates = [
         'CreateFsxExportTask',
         'CheckFsxExportStatus',
         'DeletePcsResources',
-        'DeleteFsxFilesystem',
-        'RecordClusterDestroyed',
+        // DeleteFsxFilesystem and RecordClusterDestroyed are now inside consolidated steps
+        'ConsolidatedDeleteResources',
+        'ConsolidatedCleanup',
         'DestructionSucceeded',
       ];
       for (const stateName of expectedStates) {

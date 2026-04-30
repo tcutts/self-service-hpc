@@ -77,7 +77,7 @@ Implementation uses Python for Lambda functions and tests (pytest + Hypothesis),
 
 - [x] 4. Extend CloudWatch Agent commands for node diagnostics
   - [x] 4.1 Update `generate_cloudwatch_agent_commands()` in `posix_provisioning.py`
-    - Add a second CloudWatch Agent config file `hpc-node-diagnostics.json` that collects `/var/log/messages` (stream: `{instance_id}/syslog`) and `/var/log/cloud-init-output.log` (stream: `{instance_id}/cloud-init-output`)
+    - Add a second CloudWatch Agent config file `hpc-node-diagnostics.json` that collects `/var/log/messages` (stream: `{instance_id}/syslog`), `/var/log/cloud-init-output.log` (stream: `{instance_id}/cloud-init-output`), and `/var/log/amazon/pcs/bootstrap.log` (stream: `{instance_id}/pcs-bootstrap`)
     - Target log group: `/hpc-platform/clusters/{project_id}/node-diagnostics`
     - Use `append-config` mode so both configs coexist without overwriting
     - Preserve the existing access log configuration unchanged (backward compatibility)
@@ -92,7 +92,7 @@ Implementation uses Python for Lambda functions and tests (pytest + Hypothesis),
 
   - [x] 4.3 Write property test for CloudWatch Agent diagnostics configuration
     - **Property 6: CloudWatch Agent diagnostics configuration**
-    - Generate random project IDs. Call `generate_cloudwatch_agent_commands`. Verify: output contains `/var/log/messages`, `/var/log/cloud-init-output.log`, correct log group name, correct stream name patterns, and `append-config`.
+    - Generate random project IDs. Call `generate_cloudwatch_agent_commands`. Verify: output contains `/var/log/messages`, `/var/log/cloud-init-output.log`, `/var/log/amazon/pcs/bootstrap.log`, correct log group name, correct stream name patterns, and `append-config`.
     - Add to `tests/test_login_node_event_properties.py` or create a separate file
     - Use `st.from_regex()` for project IDs
     - Minimum 100 iterations
