@@ -1,0 +1,100 @@
+# Implementation Plan
+
+- [x] 1. Write bug condition exploration test
+  - **Property 1: Bug Condition** - Script Aborts on Section Failure Due to `set -euo pipefail`
+  - **CRITICAL**: This test MUST FAIL on unfixed code — failure confirms the bug exists
+  - **DO NOT attempt to fix the test or the code when it fails**
+  - **NOTE**: This test encodes the expected behavior — it will validate the fix when it passes after implementation
+  - **GOAL**: Surface counterexamples that demonstrate the bug exists
+  - **Scoped PBT Approach**: Scope the property to concrete failing cases — generate user data scripts with various configurations and assert the expected (fixed) behavior
+  - Create test file `tests/test_bug_condition_userdata_crash.py`
+  - Mock DynamoDB to return project members with POSIX identities (reuse `_build_mock_dynamodb` pattern from existing tests)
+  - Use Hypothesis strategies for `project_id`, `efs_filesystem_id`, `s3_bucket_name`, `fsx_dns_name`, `fsx_mount_name`, `storage_mode`, and user lists (reuse strategies from `test_preservation_launch_template.py`)
+  - **Bug Condition from design**: `isBugCondition(input) = input.containsSetEUOPipefail == true AND anyCommandInScript(input.commands) returns non-zero exit code AND scriptAbortsOnFailure(input) == true`
+  - **Test assertions (expected behavior from design)**:
+    - Assert generated script does NOT contain `set -euo pipefail` (will FAIL on unfixed code because line 2 of every script is `set -euo pipefail`)
+    - Assert generated script ends with `exit 0` (will FAIL on unfixed code because script ends with `echo 'POSIX user provisioning complete.'`)
+    - Assert each section is wrapped in error-isolation blocks using subshell pattern `(` ... `)` with exit code capture (will FAIL on unfixed code because no error isolation exists)
+    - Assert script contains section tracking variables `FAILED_SECTIONS` and `SUCCEEDED_SECTIONS` (will FAIL on unfixed code)
+    - Assert script contains a summary section at the end listing succeeded/failed sections (will FAIL on unfixed code)
+  - Run test on UNFIXED code
+  - **EXPECTED OUTCOME**: Test FAILS (this is correct — it proves the bug exists: `set -euo pipefail` is present, no error isolation, no exit 0)
+  - Document counterexamples found to understand root cause
+  - Mark task complete when test is written, run, and failure is documented
+  - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.6_
+
+- [x] 2. Write preservation property tests (BEFORE implementing fix)
+  - **Property 2: Preservation** - Successful Execution Produces Same Commands and Section Order
+  - **IMPORTANT**: Follow observation-first methodology
+  - Create test file `tests/test_preservation_userdata_crash.py`
+  - Mock DynamoDB to return project members with POSIX identities (reuse `_build_mock_dynamodb` pattern)
+  - Use Hypothesis strategies for `project_id`, `users` (0-5 users), `storage_mode`, `s3_bucket_name`, `fsx_dns_name`, `fsx_mount_name`, `efs_filesystem_id`
+  - **Observe on UNFIXED code** (cases where `isBugCondition` returns false — all commands succeed):
+    - Observe: `generate_user_data_script(project_id, ..., storage_mode="mountpoint", s3_bucket_name="bucket")` produces S3 mount commands
+    - Observe: `generate_user_data_script(project_id, ..., storage_mode="lustre", fsx_dns_name="fs-xxx.fsx...", fsx_mount_name="abc")` produces FSx mount commands
+    - Observe: `generate_user_data_script(project_id, ..., efs_filesystem_id="fs-abc123")` produces EFS mount commands
+    - Observe: Script always contains SSM Agent commands as the first section
+    - Observe: Script always contains user creation commands with correct UID/GID for each user
+    - Observe: Script always contains generic account disabling for ec2-user, centos, ubuntu
+    - Observe: Script always contains PAM exec logging commands
+    - Observe: Script always contains CloudWatch agent commands
+    - Observe: Section order is always SSM Agent → EFS → Users → Generic accounts → Access logging → CloudWatch → Storage
+  - **Write property-based tests capturing observed behavior**:
+    - For all random valid configurations, extract operational commands (useradd, groupadd, chown, yum install, mount, etc.) from the generated script and verify they are present and correct
+    - For all random valid configurations, verify section ordering by checking comment markers appear in the expected order
+    - For all random valid configurations with EFS, verify EFS mount commands are present with correct filesystem ID
+    - For all random valid configurations with S3, verify S3 mount commands are present with correct bucket name
+    - For all random valid configurations with FSx, verify FSx mount commands are present with correct DNS and mount names
+    - For all random valid configurations, verify `wrap_user_data_mime()` produces valid MIME multipart output containing the script
+    - For all random valid configurations, verify helper functions (`generate_efs_mount_commands`, `generate_mountpoint_s3_commands`, `generate_fsx_lustre_mount_commands`) return identical command lists (unchanged by fix)
+  - Verify tests PASS on UNFIXED code
+  - **EXPECTED OUTCOME**: Tests PASS (this confirms baseline behavior to preserve)
+  - Mark task complete when tests are written, run, and passing on unfixed code
+  - _Requirements: 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
+
+- [x] 3. Fix for login node user data crash — remove `set -euo pipefail` and add error-isolated section wrappers
+
+  - [x] 3.1 Implement the fix in `generate_user_data_script()`
+    - **File**: `lambda/cluster_operations/posix_provisioning.py`
+    - **Function**: `generate_user_data_script()` (line ~352)
+    - Remove `"set -euo pipefail"` from the `lines` list and replace with a comment explaining why strict mode is intentionally not used
+    - Add error-tracking infrastructure at the top of the generated script: declare `FAILED_SECTIONS=()` and `SUCCEEDED_SECTIONS=()` bash arrays
+    - Create a section-wrapper pattern: wrap each section's commands in a subshell `( set -e; ... ) 2>&1` with exit code capture, logging success/failure, and appending to the appropriate tracking array
+    - Apply the wrapper to each section:
+      - SSM Agent commands (section name: "SSM Agent")
+      - EFS mount commands (section name: "EFS Mount") — only when `efs_filesystem_id` is provided
+      - User creation commands as a group (section name: "User Creation")
+      - Generic account disabling commands (section name: "Generic Account Disabling")
+      - Access logging / PAM exec commands (section name: "Access Logging")
+      - CloudWatch agent commands (section name: "CloudWatch Agent")
+      - Storage mount commands — S3 (section name: "S3 Storage Mount") or FSx (section name: "FSx Lustre Mount")
+    - Add summary output at the end of the script: print succeeded sections, print failed sections, print total counts
+    - Force `exit 0` as the final line of the script
+    - **Do NOT modify** the `generate_*_commands()` helper functions — error isolation is applied only in `generate_user_data_script()` when assembling sections, preserving backward compatibility for SSM Run Command usage
+    - _Bug_Condition: isBugCondition(input) where input.containsSetEUOPipefail == true AND anyCommandInScript fails_
+    - _Expected_Behavior: Script continues after section failure, logs errors, outputs summary, exits 0_
+    - _Preservation: When all commands succeed, same commands execute in same order; helper function signatures unchanged; MIME wrapping unchanged_
+    - _Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 2.1, 2.2, 2.3, 2.4, 2.5, 2.6, 3.1, 3.2, 3.3, 3.4, 3.5, 3.6, 3.7, 3.8_
+
+  - [x] 3.2 Verify bug condition exploration test now passes
+    - **Property 1: Expected Behavior** - Script Continues After Section Failure
+    - **IMPORTANT**: Re-run the SAME test from task 1 — do NOT write a new test
+    - The test from task 1 encodes the expected behavior (no `set -euo pipefail`, error isolation present, `exit 0`, section tracking, summary output)
+    - Run `tests/test_bug_condition_userdata_crash.py`
+    - **EXPECTED OUTCOME**: Test PASSES (confirms bug is fixed — `set -euo pipefail` removed, error isolation added, script exits 0)
+    - _Requirements: 2.1, 2.2, 2.3, 2.4, 2.5, 2.6_
+
+  - [x] 3.3 Verify preservation tests still pass
+    - **Property 2: Preservation** - Successful Execution Produces Same Commands and Section Order
+    - **IMPORTANT**: Re-run the SAME tests from task 2 — do NOT write new tests
+    - Run `tests/test_preservation_userdata_crash.py`
+    - **EXPECTED OUTCOME**: Tests PASS (confirms no regressions — same commands, same order, same MIME wrapping, same helper function outputs)
+    - Confirm all tests still pass after fix (no regressions)
+
+- [x] 4. Checkpoint — Ensure all tests pass
+  - Run the full test suite to ensure no regressions across the project
+  - Verify `tests/test_bug_condition_userdata_crash.py` passes (bug is fixed)
+  - Verify `tests/test_preservation_userdata_crash.py` passes (no regressions)
+  - Verify existing tests in `tests/test_preservation_launch_template.py` still pass (no regressions to launch template behavior)
+  - Verify existing tests in `tests/test_bug_condition_launch_template.py` still pass (previous bugfixes not broken)
+  - Ensure all tests pass, ask the user if questions arise.

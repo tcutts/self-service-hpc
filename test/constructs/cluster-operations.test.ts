@@ -67,9 +67,9 @@ describe('ClusterOperations', () => {
     template = Template.fromStack(stack);
   });
 
-  it('creates 4 Lambda functions for cluster operations (operations + creation steps + destruction steps + reconciliation)', () => {
-    // 4 from ClusterOperations + 1 from ProjectManagement = 5 total
-    template.resourceCountIs('AWS::Lambda::Function', 5);
+  it('creates 6 Lambda functions for cluster operations (operations + creation steps + destruction steps + reconciliation + login node refresh + login node event handler)', () => {
+    // 6 from ClusterOperations + 1 from ProjectManagement = 7 total
+    template.resourceCountIs('AWS::Lambda::Function', 7);
   });
 
   it('creates 2 state machines (creation + destruction)', () => {
@@ -355,6 +355,89 @@ describe('ClusterOperations', () => {
           }),
         ]),
       },
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // EventBridge Rule — EC2 Instance State-change Notification
+  // Validates: Requirements 1.1, 1.2, 1.4
+  // ---------------------------------------------------------------------------
+  describe('EventBridge Login Node State Change Rule', () => {
+    it('creates an EventBridge rule with correct event pattern for EC2 running state', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        EventPattern: {
+          source: ['aws.ec2'],
+          'detail-type': ['EC2 Instance State-change Notification'],
+          detail: {
+            state: ['running'],
+          },
+        },
+      });
+    });
+
+    it('targets the Login Node Event Handler Lambda', () => {
+      template.hasResourceProperties('AWS::Events::Rule', {
+        EventPattern: Match.objectLike({
+          source: ['aws.ec2'],
+        }),
+        Targets: Match.arrayWith([
+          Match.objectLike({
+            Arn: Match.anyValue(),
+          }),
+        ]),
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Login Node Event Handler Lambda
+  // Validates: Requirements 3.1, 3.2, 3.3, 3.4, 3.5
+  // ---------------------------------------------------------------------------
+  describe('Login Node Event Handler Lambda', () => {
+    it('has correct runtime, timeout, and memory', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-login-node-event-handler',
+        Runtime: 'python3.13',
+        Timeout: 30,
+        MemorySize: 256,
+      });
+    });
+
+    it('has CLUSTERS_TABLE_NAME environment variable', () => {
+      template.hasResourceProperties('AWS::Lambda::Function', {
+        FunctionName: 'hpc-login-node-event-handler',
+        Environment: {
+          Variables: Match.objectLike({
+            CLUSTERS_TABLE_NAME: Match.anyValue(),
+          }),
+        },
+      });
+    });
+
+    it('has ec2:DescribeInstances and ec2:DescribeTags IAM permissions', () => {
+      template.hasResourceProperties('AWS::IAM::Policy', {
+        PolicyDocument: {
+          Statement: Match.arrayWith([
+            Match.objectLike({
+              Action: Match.arrayWith([
+                'ec2:DescribeInstances',
+                'ec2:DescribeTags',
+              ]),
+              Effect: 'Allow',
+            }),
+          ]),
+        },
+      });
+    });
+  });
+
+  // ---------------------------------------------------------------------------
+  // Login Node Refresh Schedule Rule — 60-minute fallback
+  // Validates: Requirements 4.1, 6.5
+  // ---------------------------------------------------------------------------
+  it('configures the Login Node Refresh schedule rule with rate(60 minutes)', () => {
+    template.hasResourceProperties('AWS::Events::Rule', {
+      ScheduleExpression: 'rate(1 hour)',
     });
   });
 });

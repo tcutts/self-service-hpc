@@ -37,6 +37,8 @@ export class ClusterOperations extends Construct {
   public readonly posixReconciliationLambda: lambda.Function;
   /** The login node refresh Lambda function. */
   public readonly loginNodeRefreshLambda: lambda.Function;
+  /** The login node event handler Lambda function. */
+  public readonly loginNodeEventLambda: lambda.Function;
   /** The cluster creation state machine. */
   public readonly clusterCreationStateMachine: sfn.StateMachine;
   /** The cluster destruction state machine. */
@@ -1159,7 +1161,7 @@ export class ClusterOperations extends Construct {
       environment: {
         CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
       },
-      description: 'Refreshes login node instance IDs and IPs for active clusters every 5 minutes',
+      description: 'Fallback safety net: refreshes login node instance IDs and IPs for active clusters',
     });
 
     // Grant DynamoDB read/write on Clusters table (read to scan, write to update)
@@ -1171,13 +1173,65 @@ export class ClusterOperations extends Construct {
       resources: ['*'],
     }));
 
-    // EventBridge rule to trigger login node refresh every 5 minutes
+    // EventBridge rule to trigger login node refresh every 60 minutes as a fallback safety net
     new events.Rule(this, 'LoginNodeRefreshScheduleRule', {
       ruleName: 'hpc-login-node-refresh-schedule',
-      description: 'Triggers the login node refresh Lambda every 5 minutes to detect replaced instances',
-      schedule: events.Schedule.rate(cdk.Duration.minutes(5)),
+      description: 'Fallback safety net: triggers the login node refresh Lambda every 60 minutes to reconcile any missed event-driven updates',
+      schedule: events.Schedule.rate(cdk.Duration.minutes(60)),
     }).addTarget(
       new eventsTargets.LambdaFunction(this.loginNodeRefreshLambda),
+    );
+
+    // ---------------------------------------------------------------
+    // Login Node Event Handler Lambda Function (Event-Driven)
+    // Processes EC2 Instance State-change Notification events from
+    // EventBridge.  When a login node instance enters the "running"
+    // state, this Lambda resolves the new instance details and updates
+    // the corresponding cluster record in DynamoDB immediately.
+    // ---------------------------------------------------------------
+    this.loginNodeEventLambda = new lambda.Function(this, 'LoginNodeEventLambda', {
+      functionName: 'hpc-login-node-event-handler',
+      runtime: lambda.Runtime.PYTHON_3_13,
+      handler: 'login_node_event.handler',
+      code: lambda.Code.fromAsset(path.join(__dirname, '..', '..', 'lambda', 'cluster_operations'), {
+        exclude: ['__pycache__', '**/__pycache__', '*.pyc'],
+      }),
+      layers: [props.sharedLayer],
+      timeout: cdk.Duration.seconds(30),
+      memorySize: 256,
+      environment: {
+        CLUSTERS_TABLE_NAME: props.clustersTable.tableName,
+      },
+      description: 'Processes EC2 state-change events to update login node details in DynamoDB immediately',
+    });
+
+    // Grant DynamoDB read/write on Clusters table (scan to find cluster, write to update)
+    props.clustersTable.grantReadWriteData(this.loginNodeEventLambda);
+
+    // Grant EC2 permissions to resolve instance tags and details
+    this.loginNodeEventLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'ec2:DescribeInstances',
+        'ec2:DescribeTags',
+      ],
+      resources: ['*'],
+    }));
+
+    // EventBridge rule to capture EC2 instances entering the "running" state
+    const loginNodeStateChangeRule = new events.Rule(this, 'LoginNodeStateChangeRule', {
+      ruleName: 'hpc-login-node-state-change',
+      description: 'Routes EC2 instance running state-change events to the login node event handler',
+      eventPattern: {
+        source: ['aws.ec2'],
+        detailType: ['EC2 Instance State-change Notification'],
+        detail: {
+          state: ['running'],
+        },
+      },
+    });
+
+    loginNodeStateChangeRule.addTarget(
+      new eventsTargets.LambdaFunction(this.loginNodeEventLambda),
     );
   }
 }

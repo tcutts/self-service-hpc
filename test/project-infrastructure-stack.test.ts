@@ -351,6 +351,31 @@ describe('ProjectInfrastructureStack', () => {
   });
 
   // ---------------------------------------------------------------------------
+  // Node Diagnostics Logging — CloudWatch Log Group for syslog/cloud-init
+  // Validates: Requirements 8.3, 8.4
+  // ---------------------------------------------------------------------------
+  describe('Node Diagnostics Logging', () => {
+    it('creates a CloudWatch Log Group for node diagnostics with correct name and 1-day retention', () => {
+      template.hasResourceProperties('AWS::Logs::LogGroup', {
+        LogGroupName: '/hpc-platform/clusters/test-project-001/node-diagnostics',
+        RetentionInDays: 1,
+      });
+    });
+
+    it('sets DESTROY removal policy on the node diagnostics log group', () => {
+      const logGroups = template.findResources('AWS::Logs::LogGroup', {
+        Properties: {
+          LogGroupName: '/hpc-platform/clusters/test-project-001/node-diagnostics',
+        },
+      });
+      const logicalIds = Object.keys(logGroups);
+      expect(logicalIds.length).toBe(1);
+      const resource = logGroups[logicalIds[0]] as any;
+      expect(resource.DeletionPolicy).toBe('Delete');
+    });
+  });
+
+  // ---------------------------------------------------------------------------
   // IAM — no project-level PCS instance profile or role
   // Validates: Requirement 3.1 (instance profiles created per-cluster at runtime)
   // ---------------------------------------------------------------------------

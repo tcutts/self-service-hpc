@@ -186,16 +186,23 @@ def generate_cloudwatch_agent_commands(
     project_id: str,
     log_file: str = "/var/log/hpc-access.log",
 ) -> list[str]:
-    """Generate bash commands to configure the CloudWatch agent for access log forwarding.
+    """Generate bash commands to configure the CloudWatch agent for log forwarding.
 
-    Writes a CloudWatch agent configuration that ships the access log
-    file to the project's CloudWatch Log Group, then starts (or
-    restarts) the agent.
+    Writes two CloudWatch agent configuration files:
+
+    1. **Access log config** (``hpc-access-log.json``) — ships the PAM
+       access log to the project's access-logs log group.
+    2. **Node diagnostics config** (``hpc-node-diagnostics.json``) —
+       ships ``/var/log/messages`` and ``/var/log/cloud-init-output.log``
+       to the project's node-diagnostics log group.
+
+    Both configs use ``append-config`` mode so they coexist without
+    overwriting each other.
 
     Parameters
     ----------
     project_id : str
-        The project identifier, used to construct the log group name.
+        The project identifier, used to construct log group names.
     log_file : str
         Path to the access log file. Defaults to ``/var/log/hpc-access.log``.
 
@@ -204,11 +211,12 @@ def generate_cloudwatch_agent_commands(
     list[str]
         A list of bash command strings.
     """
-    log_group = f"/hpc-platform/clusters/{project_id}/access-logs"
-    config_path = "/opt/aws/amazon-cloudwatch-agent/etc/hpc-access-log.json"
+    # --- Access log configuration (existing) ---
+    access_log_group = f"/hpc-platform/clusters/{project_id}/access-logs"
+    access_config_path = "/opt/aws/amazon-cloudwatch-agent/etc/hpc-access-log.json"
     commands = [
         "# --- Configure CloudWatch agent for access log forwarding ---",
-        f"cat > {config_path} << 'CWEOF'",
+        f"cat > {access_config_path} << 'CWEOF'",
         "{",
         '  "logs": {',
         '    "logs_collected": {',
@@ -216,7 +224,7 @@ def generate_cloudwatch_agent_commands(
         '        "collect_list": [',
         "          {",
         f'            "file_path": "{log_file}",',
-        f'            "log_group_name": "{log_group}",',
+        f'            "log_group_name": "{access_log_group}",',
         '            "log_stream_name": "{instance_id}/access-log",',
         '            "timezone": "UTC"',
         "          }",
@@ -226,11 +234,47 @@ def generate_cloudwatch_agent_commands(
         "  }",
         "}",
         "CWEOF",
-        # Start or restart the CloudWatch agent with the new config
-        f"if command -v amazon-cloudwatch-agent-ctl &>/dev/null; then",
-        f"  amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:{config_path}",
+        # Start or restart the CloudWatch agent with the access log config
+        "if command -v amazon-cloudwatch-agent-ctl &>/dev/null; then",
+        f"  amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:{access_config_path}",
         "fi",
     ]
+
+    # --- Node diagnostics configuration (new) ---
+    diag_log_group = f"/hpc-platform/clusters/{project_id}/node-diagnostics"
+    diag_config_path = "/opt/aws/amazon-cloudwatch-agent/etc/hpc-node-diagnostics.json"
+    commands.extend([
+        "# --- Configure CloudWatch agent for node diagnostics ---",
+        f"cat > {diag_config_path} << 'CWEOF'",
+        "{",
+        '  "logs": {',
+        '    "logs_collected": {',
+        '      "files": {',
+        '        "collect_list": [',
+        "          {",
+        '            "file_path": "/var/log/messages",',
+        f'            "log_group_name": "{diag_log_group}",',
+        '            "log_stream_name": "{instance_id}/syslog",',
+        '            "timezone": "UTC"',
+        "          },",
+        "          {",
+        '            "file_path": "/var/log/cloud-init-output.log",',
+        f'            "log_group_name": "{diag_log_group}",',
+        '            "log_stream_name": "{instance_id}/cloud-init-output",',
+        '            "timezone": "UTC"',
+        "          }",
+        "        ]",
+        "      }",
+        "    }",
+        "  }",
+        "}",
+        "CWEOF",
+        # Append the diagnostics config without overwriting the access log config
+        "if command -v amazon-cloudwatch-agent-ctl &>/dev/null; then",
+        f"  amazon-cloudwatch-agent-ctl -a append-config -m ec2 -s -c file:{diag_config_path}",
+        "fi",
+    ])
+
     return commands
 
 

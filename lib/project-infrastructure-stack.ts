@@ -55,6 +55,8 @@ export class ProjectInfrastructureStack extends cdk.Stack {
   public readonly fsxSecurityGroup: ec2.SecurityGroup;
   /** CloudWatch Log Group for cluster SSH/DCV access logs (365-day retention). */
   public readonly clusterAccessLogGroup: logs.LogGroup;
+  /** CloudWatch Log Group for node diagnostic logs (1-day retention). */
+  public readonly nodeDiagnosticsLogGroup: logs.LogGroup;
 
   constructor(scope: Construct, id: string, props: ProjectInfrastructureStackProps) {
     super(scope, id, props);
@@ -244,6 +246,15 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     });
 
     // -----------------------------------------------------------------
+    // CloudWatch Log Group — node diagnostics (1 day, disposable)
+    // -----------------------------------------------------------------
+    this.nodeDiagnosticsLogGroup = new logs.LogGroup(this, 'NodeDiagnosticsLogGroup', {
+      logGroupName: `/hpc-platform/clusters/${props.projectId}/node-diagnostics`,
+      retention: logs.RetentionDays.ONE_DAY,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+
+    // -----------------------------------------------------------------
     // Tags — Cost_Allocation_Tag on all resources
     // -----------------------------------------------------------------
     cdk.Tags.of(this).add('Project', tagValue);
@@ -299,6 +310,11 @@ export class ProjectInfrastructureStack extends cdk.Stack {
     new cdk.CfnOutput(this, 'ClusterAccessLogGroupName', {
       value: this.clusterAccessLogGroup.logGroupName,
       description: `CloudWatch Log Group for cluster access logs for project ${props.projectId}`,
+    });
+
+    new cdk.CfnOutput(this, 'NodeDiagnosticsLogGroupName', {
+      value: this.nodeDiagnosticsLogGroup.logGroupName,
+      description: `CloudWatch Log Group for node diagnostics for project ${props.projectId}`,
     });
 
   }
