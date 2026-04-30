@@ -51,6 +51,7 @@ dynamodb = boto3.resource("dynamodb")
 ec2_client = boto3.client("ec2")
 fsx_client = boto3.client("fsx")
 iam_client = boto3.client("iam")
+logs_client = boto3.client("logs")
 pcs_client = boto3.client("pcs")
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,11 @@ CLUSTERS_TABLE_NAME = os.environ.get("CLUSTERS_TABLE_NAME", "Clusters")
 # ---------------------------------------------------------------------------
 MAX_PCS_DELETION_RETRIES = 120  # 120 iterations × 30s wait = ~60 minutes
 MAX_EXPORT_RETRIES = 60         # 60 iterations × 60s wait = ~60 minutes
+
+# ---------------------------------------------------------------------------
+# PCS vended log delivery suffixes
+# ---------------------------------------------------------------------------
+_PCS_LOG_SUFFIXES = ["scheduler-logs", "scheduler-audit-logs", "jobcomp-logs"]
 
 # ---------------------------------------------------------------------------
 # Step progress tracking
@@ -1094,6 +1100,157 @@ def _delete_pcs_cluster(cluster_id: str) -> str:
         return f"cluster:{cluster_id}:failed"
 
 # ===================================================================
+# Scheduler log delivery cleanup helpers
+# ===================================================================
+
+def _delete_deliveries_by_name(source_names: list[str]) -> None:
+    """Delete deliveries whose source name matches any in *source_names*.
+
+    Lists all deliveries via ``describe_deliveries`` (paginated) and
+    deletes those whose ``deliverySourceName`` is in *source_names*.
+    ``ResourceNotFoundException`` is treated as already deleted.
+    """
+    next_token: str | None = None
+
+    while True:
+        kwargs: dict[str, Any] = {}
+        if next_token:
+            kwargs["nextToken"] = next_token
+
+        response = logs_client.describe_deliveries(**kwargs)
+
+        for delivery in response.get("deliveries", []):
+            if delivery.get("deliverySourceName") in source_names:
+                delivery_id = delivery["id"]
+                try:
+                    logs_client.delete_delivery(id=delivery_id)
+                    logger.info(
+                        "Deleted delivery '%s' (source: %s)",
+                        delivery_id,
+                        delivery.get("deliverySourceName"),
+                    )
+                except ClientError as exc:
+                    if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                        logger.info(
+                            "Delivery '%s' already deleted", delivery_id
+                        )
+                    else:
+                        raise
+
+        next_token = response.get("nextToken")
+        if not next_token:
+            break
+
+
+def _delete_delivery_destinations(destination_names: list[str]) -> None:
+    """Delete delivery destinations by name.
+
+    ``ResourceNotFoundException`` is treated as already deleted.
+    """
+    for name in destination_names:
+        try:
+            logs_client.delete_delivery_destination(name=name)
+            logger.info("Deleted delivery destination '%s'", name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info(
+                    "Delivery destination '%s' already deleted", name
+                )
+            else:
+                raise
+
+
+def _delete_delivery_sources(source_names: list[str]) -> None:
+    """Delete delivery sources by name.
+
+    ``ResourceNotFoundException`` is treated as already deleted.
+    """
+    for name in source_names:
+        try:
+            logs_client.delete_delivery_source(name=name)
+            logger.info("Deleted delivery source '%s'", name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+                logger.info(
+                    "Delivery source '%s' already deleted", name
+                )
+            else:
+                raise
+
+
+def _delete_scheduler_log_group(project_id: str, cluster_name: str) -> None:
+    """Delete the scheduler log group for a cluster.
+
+    ``ResourceNotFoundException`` is treated as already deleted.
+    """
+    log_group_name = (
+        f"/hpc-platform/clusters/{project_id}"
+        f"/scheduler-logs/{cluster_name}"
+    )
+    try:
+        logs_client.delete_log_group(logGroupName=log_group_name)
+        logger.info("Deleted scheduler log group '%s'", log_group_name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceNotFoundException":
+            logger.info(
+                "Scheduler log group '%s' already deleted", log_group_name
+            )
+        else:
+            raise
+
+
+def cleanup_scheduler_log_delivery(event: dict[str, Any]) -> dict[str, Any]:
+    """Delete all vended log delivery resources and the scheduler log group.
+
+    Deletes in the required order:
+    deliveries → destinations → sources → log group.
+
+    Handles ``ResourceNotFoundException`` for idempotency (already deleted).
+
+    Parameters
+    ----------
+    event : dict
+        State machine payload containing:
+        - projectId: str
+        - clusterName: str
+
+    Returns
+    -------
+    dict
+        Original event (unchanged — cleanup is side-effect only).
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+
+    source_names = [
+        f"{cluster_name}-{suffix}" for suffix in _PCS_LOG_SUFFIXES
+    ]
+    destination_names = [
+        f"{project_id}-{cluster_name}-{suffix}"
+        for suffix in _PCS_LOG_SUFFIXES
+    ]
+
+    logger.info(
+        "Cleaning up scheduler log delivery for cluster '%s' "
+        "in project '%s'",
+        cluster_name,
+        project_id,
+    )
+
+    _delete_deliveries_by_name(source_names)
+    _delete_delivery_destinations(destination_names)
+    _delete_delivery_sources(source_names)
+    _delete_scheduler_log_group(project_id, cluster_name)
+
+    logger.info(
+        "Scheduler log delivery cleanup complete for cluster '%s'",
+        cluster_name,
+    )
+
+    return event
+
+
+# ===================================================================
 # Consolidated step handlers
 # ===================================================================
 
@@ -1126,16 +1283,18 @@ def consolidated_delete_resources(event: dict[str, Any]) -> dict[str, Any]:
 def consolidated_cleanup(event: dict[str, Any]) -> dict[str, Any]:
     """Execute cleanup steps sequentially in a single invocation.
 
-    Calls delete_iam_resources, delete_launch_templates,
-    deregister_cluster_name_step, and record_cluster_destroyed in order.
+    Calls cleanup_scheduler_log_delivery, delete_iam_resources,
+    delete_launch_templates, deregister_cluster_name_step, and
+    record_cluster_destroyed in order.
     Each step receives the accumulated payload from prior steps.
 
     Raises the original error from whichever sub-step fails,
     preserving the error type and message for the catch block.
 
-    Returns the merged payload with all fields from all four steps.
+    Returns the merged payload with all fields from all five steps.
     """
     steps = [
+        cleanup_scheduler_log_delivery,
         delete_iam_resources,
         delete_launch_templates,
         deregister_cluster_name_step,

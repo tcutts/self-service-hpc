@@ -286,6 +286,27 @@ export class ClusterOperations extends Construct {
       ],
     }));
 
+    // Vended log delivery configuration
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'logs:PutDeliverySource',
+        'logs:PutDeliveryDestination',
+        'logs:CreateDelivery',
+        'logs:GetDelivery',
+        'logs:CreateLogGroup',
+        'logs:PutRetentionPolicy',
+        'logs:TagLogGroup',
+        'logs:DescribeLogGroups',
+      ],
+      resources: ['*'],
+    }));
+
+    // PCS vended log delivery permission
+    clusterCreationStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: ['pcs:AllowVendedLogDeliveryForResource'],
+      resources: ['*'],
+    }));
+
     // ---------------------------------------------------------------
     // Step Functions — Cluster Destruction Step Lambda
     // ---------------------------------------------------------------
@@ -362,6 +383,20 @@ export class ClusterOperations extends Construct {
         'arn:aws:iam::*:role/AWSPCS-*',
         'arn:aws:iam::*:instance-profile/AWSPCS-*',
       ],
+    }));
+
+    // Vended log delivery cleanup
+    clusterDestructionStepLambda.addToRolePolicy(new iam.PolicyStatement({
+      actions: [
+        'logs:DeleteDelivery',
+        'logs:DeleteDeliverySource',
+        'logs:DeleteDeliveryDestination',
+        'logs:DeleteLogGroup',
+        'logs:ListDeliveries',
+        'logs:ListDeliverySources',
+        'logs:ListDeliveryDestinations',
+      ],
+      resources: ['*'],
     }));
 
     // ---------------------------------------------------------------
@@ -587,8 +622,24 @@ export class ClusterOperations extends Construct {
 
     // PCS cluster wait loop: check status → if not active, wait → check again
     const pcsWaitLoop = waitForPcsCluster.next(checkPcsClusterStatus);
+
+    // Step 5c: Configure scheduler log delivery (after PCS cluster is ACTIVE)
+    const configureSchedulerLogDelivery = new tasks.LambdaInvoke(this, 'ConfigureSchedulerLogDelivery', {
+      lambdaFunction: clusterCreationStepLambda,
+      payloadResponseOnly: true,
+      payload: sfn.TaskInput.fromObject({
+        'step': 'configure_scheduler_log_delivery',
+        'payload': sfn.JsonPath.entirePayload,
+      }),
+      resultPath: '$',
+    });
+
+    // Note: catch for configureSchedulerLogDelivery is handled by the
+    // Parallel state's own addCatch — states inside a Parallel branch
+    // cannot reference states outside the Parallel directly.
+
     const isPcsClusterActive = new sfn.Choice(this, 'IsPcsClusterActive')
-      .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), new sfn.Pass(this, 'PcsClusterReady'))
+      .when(sfn.Condition.booleanEquals('$.pcsClusterActive', true), configureSchedulerLogDelivery)
       .otherwise(pcsWaitLoop);
 
     // Node group wait loop: check status → if not active, wait → check again

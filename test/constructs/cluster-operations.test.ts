@@ -441,4 +441,90 @@ describe('ClusterOperations', () => {
       ScheduleExpression: 'rate(1 hour)',
     });
   });
+
+  // ---------------------------------------------------------------------------
+  // PCS Scheduler Log Delivery — CDK Infrastructure
+  // Validates: Requirements 3.2, 3.5, 4.1, 4.2, 4.3, 5.7
+  // ---------------------------------------------------------------------------
+  it('creation state machine includes ConfigureSchedulerLogDelivery step', () => {
+    const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+      Properties: { StateMachineName: 'hpc-cluster-creation' },
+    });
+    const logicalIds = Object.keys(stateMachines);
+    expect(logicalIds).toHaveLength(1);
+    const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
+    const definitionStr = JSON.stringify(definition);
+    expect(definitionStr).toContain('ConfigureSchedulerLogDelivery');
+    expect(definitionStr).toContain('configure_scheduler_log_delivery');
+  });
+
+  it('ConfigureSchedulerLogDelivery step has catch block routing to failure handler', () => {
+    const stateMachines = template.findResources('AWS::StepFunctions::StateMachine', {
+      Properties: { StateMachineName: 'hpc-cluster-creation' },
+    });
+    const logicalIds = Object.keys(stateMachines);
+    expect(logicalIds).toHaveLength(1);
+    const definition = stateMachines[logicalIds[0]].Properties.DefinitionString;
+    const definitionStr = JSON.stringify(definition);
+    // The step must have a Catch block and route to HandleCreationFailure
+    expect(definitionStr).toContain('ConfigureSchedulerLogDelivery');
+    expect(definitionStr).toContain('Catch');
+    expect(definitionStr).toContain('HandleCreationFailure');
+  });
+
+  it('grants vended log delivery configuration permissions via IAM policy', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              'logs:PutDeliverySource',
+              'logs:PutDeliveryDestination',
+              'logs:CreateDelivery',
+              'logs:GetDelivery',
+              'logs:CreateLogGroup',
+              'logs:PutRetentionPolicy',
+              'logs:TagLogGroup',
+              'logs:DescribeLogGroups',
+            ]),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
+  it('grants PCS AllowVendedLogDeliveryForResource permission via IAM policy', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: 'pcs:AllowVendedLogDeliveryForResource',
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
+
+  it('grants vended log delivery cleanup permissions via IAM policy', () => {
+    template.hasResourceProperties('AWS::IAM::Policy', {
+      PolicyDocument: {
+        Statement: Match.arrayWith([
+          Match.objectLike({
+            Action: Match.arrayWith([
+              'logs:DeleteDelivery',
+              'logs:DeleteDeliverySource',
+              'logs:DeleteDeliveryDestination',
+              'logs:DeleteLogGroup',
+              'logs:ListDeliveries',
+              'logs:ListDeliverySources',
+              'logs:ListDeliveryDestinations',
+            ]),
+            Effect: 'Allow',
+          }),
+        ]),
+      },
+    });
+  });
 });

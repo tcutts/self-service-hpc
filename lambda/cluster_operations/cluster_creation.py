@@ -86,6 +86,7 @@ dynamodb = boto3.resource("dynamodb")
 ec2_client = boto3.client("ec2")
 fsx_client = boto3.client("fsx")
 iam_client = boto3.client("iam")
+logs_client = boto3.client("logs")
 pcs_client = boto3.client("pcs")
 sfn_client = boto3.client("stepfunctions")
 tagging_client = boto3.client("resourcegroupstaggingapi")
@@ -2434,6 +2435,292 @@ def consolidated_post_parallel(event: dict[str, Any]) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# PCS vended log delivery configuration
+# ---------------------------------------------------------------------------
+_PCS_LOG_TYPES = [
+    {"logType": "PCS_SCHEDULER_LOGS", "suffix": "scheduler-logs", "service": "pcs"},
+    {"logType": "PCS_SCHEDULER_AUDIT_LOGS", "suffix": "scheduler-audit-logs", "service": "pcs"},
+    {"logType": "PCS_JOBCOMP_LOGS", "suffix": "jobcomp-logs", "service": "pcs"},
+]
+
+_SCHEDULER_LOG_RETENTION_DAYS = 30
+
+
+def _create_scheduler_log_group(
+    project_id: str,
+    cluster_name: str,
+) -> tuple[str, str]:
+    """Create the CloudWatch Log Group for PCS scheduler logs.
+
+    Creates the log group at
+    ``/hpc-platform/clusters/{projectId}/scheduler-logs/{clusterName}``
+    with 30-day retention and a ``Project`` tag.  Handles
+    ``ResourceAlreadyExistsException`` for idempotent retries.
+
+    Parameters
+    ----------
+    project_id:
+        The project identifier used in the log group path and tag.
+    cluster_name:
+        The cluster name used in the log group path.
+
+    Returns
+    -------
+    tuple[str, str]
+        A tuple of (log_group_name, log_group_arn).
+
+    Raises
+    ------
+    ClientError
+        If an unexpected CloudWatch Logs API error occurs.
+    """
+    log_group_name = (
+        f"/hpc-platform/clusters/{project_id}"
+        f"/scheduler-logs/{cluster_name}"
+    )
+
+    try:
+        logs_client.create_log_group(logGroupName=log_group_name)
+        logger.info("Created scheduler log group: %s", log_group_name)
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ResourceAlreadyExistsException":
+            logger.info(
+                "Scheduler log group already exists, reusing: %s",
+                log_group_name,
+            )
+        else:
+            logger.error(
+                "Failed to create log group '%s': %s",
+                log_group_name,
+                exc.response["Error"].get("Message", str(exc)),
+            )
+            raise
+
+    try:
+        logs_client.put_retention_policy(
+            logGroupName=log_group_name,
+            retentionInDays=_SCHEDULER_LOG_RETENTION_DAYS,
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed PutRetentionPolicy on '%s': %s",
+            log_group_name,
+            exc.response["Error"].get("Message", str(exc)),
+        )
+        raise
+
+    try:
+        logs_client.tag_log_group(
+            logGroupName=log_group_name,
+            tags={"Project": project_id},
+        )
+    except ClientError as exc:
+        logger.error(
+            "Failed TagLogGroup on '%s': %s",
+            log_group_name,
+            exc.response["Error"].get("Message", str(exc)),
+        )
+        raise
+
+    # Construct the log group ARN from the cluster ARN's region/account.
+    # We derive region from the boto3 session and account from describe.
+    # However, the simplest approach is to call describe_log_groups.
+    resp = logs_client.describe_log_groups(
+        logGroupNamePrefix=log_group_name,
+        limit=1,
+    )
+    log_groups = resp.get("logGroups", [])
+    log_group_arn = ""
+    for lg in log_groups:
+        if lg.get("logGroupName") == log_group_name:
+            log_group_arn = lg["arn"]
+            break
+
+    if not log_group_arn:
+        # Fallback: construct ARN from pcsClusterArn pattern if needed
+        # This shouldn't happen since we just created/confirmed the group
+        logger.warning(
+            "Could not retrieve ARN for log group '%s' via "
+            "DescribeLogGroups; delivery configuration may fail.",
+            log_group_name,
+        )
+
+    return log_group_name, log_group_arn
+
+
+def _configure_delivery_for_log_type(
+    cluster_name: str,
+    project_id: str,
+    cluster_arn: str,
+    log_group_arn: str,
+    log_type: str,
+    suffix: str,
+) -> str:
+    """Configure vended log delivery for a single PCS log type.
+
+    Calls ``PutDeliverySource``, ``PutDeliveryDestination``, and
+    ``CreateDelivery`` with deterministic naming.  Handles
+    ``ConflictException`` for idempotent retries.
+
+    Parameters
+    ----------
+    cluster_name:
+        Human-readable cluster name for resource naming.
+    project_id:
+        Project identifier for destination naming.
+    cluster_arn:
+        The PCS cluster ARN used as the delivery source resource.
+    log_group_arn:
+        The CloudWatch Log Group ARN used as the delivery destination.
+    log_type:
+        The PCS log type (e.g. ``PCS_SCHEDULER_LOGS``).
+    suffix:
+        The naming suffix (e.g. ``scheduler-logs``).
+
+    Returns
+    -------
+    str
+        The delivery ID, or ``"existing"`` if the delivery already existed.
+
+    Raises
+    ------
+    ClientError
+        If an unexpected CloudWatch Logs API error occurs.
+    """
+    source_name = f"{cluster_name}-{suffix}"
+    destination_name = f"{project_id}-{cluster_name}-{suffix}"
+
+    # --- PutDeliverySource ---
+    try:
+        logs_client.put_delivery_source(
+            name=source_name,
+            resourceArn=cluster_arn,
+            logType=log_type,
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConflictException":
+            logger.info(
+                "Delivery source already exists, reusing: %s",
+                source_name,
+            )
+        else:
+            logger.error(
+                "PutDeliverySource failed for '%s': %s",
+                source_name,
+                exc.response["Error"].get("Message", str(exc)),
+            )
+            raise
+
+    # --- PutDeliveryDestination ---
+    try:
+        logs_client.put_delivery_destination(
+            name=destination_name,
+            outputFormat="json",
+            deliveryDestinationConfiguration={
+                "destinationResourceArn": log_group_arn,
+            },
+        )
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConflictException":
+            logger.info(
+                "Delivery destination already exists, reusing: %s",
+                destination_name,
+            )
+        else:
+            logger.error(
+                "PutDeliveryDestination failed for '%s': %s",
+                destination_name,
+                exc.response["Error"].get("Message", str(exc)),
+            )
+            raise
+
+    # --- CreateDelivery ---
+    delivery_id = "existing"
+    try:
+        resp = logs_client.create_delivery(
+            deliverySourceName=source_name,
+            deliveryDestinationArn=log_group_arn,
+        )
+        delivery_id = resp.get("delivery", {}).get("id", "unknown")
+    except ClientError as exc:
+        if exc.response["Error"]["Code"] == "ConflictException":
+            logger.info(
+                "Delivery already exists for source '%s', reusing",
+                source_name,
+            )
+        else:
+            logger.error(
+                "CreateDelivery failed for source '%s': %s",
+                source_name,
+                exc.response["Error"].get("Message", str(exc)),
+            )
+            raise
+
+    logger.info(
+        "Configured delivery for %s: source=%s, deliveryId=%s",
+        log_type,
+        source_name,
+        delivery_id,
+    )
+    return delivery_id
+
+
+def configure_scheduler_log_delivery(
+    event: dict[str, Any],
+) -> dict[str, Any]:
+    """Configure PCS vended log delivery for all three log types.
+
+    Creates a CloudWatch Log Group and configures delivery sources,
+    destinations, and deliveries for ``PCS_SCHEDULER_LOGS``,
+    ``PCS_SCHEDULER_AUDIT_LOGS``, and ``PCS_JOBCOMP_LOGS``.
+
+    Parameters
+    ----------
+    event:
+        State machine payload containing ``projectId``,
+        ``clusterName``, ``pcsClusterId``, and ``pcsClusterArn``.
+
+    Returns
+    -------
+    dict
+        Original event merged with ``schedulerLogGroupName`` and
+        ``schedulerDeliveryIds``.
+    """
+    project_id: str = event["projectId"]
+    cluster_name: str = event["clusterName"]
+    cluster_arn: str = event["pcsClusterArn"]
+
+    log_group_name, log_group_arn = _create_scheduler_log_group(
+        project_id, cluster_name,
+    )
+
+    delivery_ids: list[str] = []
+    for log_type_cfg in _PCS_LOG_TYPES:
+        delivery_id = _configure_delivery_for_log_type(
+            cluster_name=cluster_name,
+            project_id=project_id,
+            cluster_arn=cluster_arn,
+            log_group_arn=log_group_arn,
+            log_type=log_type_cfg["logType"],
+            suffix=log_type_cfg["suffix"],
+        )
+        delivery_ids.append(delivery_id)
+
+    logger.info(
+        "Scheduler log delivery configured for cluster '%s': "
+        "%d deliveries created",
+        cluster_name,
+        len(delivery_ids),
+    )
+
+    return {
+        **event,
+        "schedulerLogGroupName": log_group_name,
+        "schedulerDeliveryIds": delivery_ids,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Populate the step dispatch table now that all functions are defined.
 # ---------------------------------------------------------------------------
 _STEP_DISPATCH.update({
@@ -2459,4 +2746,5 @@ _STEP_DISPATCH.update({
     "configure_mountpoint_s3_iam": configure_mountpoint_s3_iam,
     "consolidated_pre_parallel": consolidated_pre_parallel,
     "consolidated_post_parallel": consolidated_post_parallel,
+    "configure_scheduler_log_delivery": configure_scheduler_log_delivery,
 })
