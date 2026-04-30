@@ -38,6 +38,7 @@ from botocore.exceptions import ClientError
 
 from cluster_names import register_cluster_name, validate_cluster_name
 from errors import BudgetExceededError, InternalError, ValidationError
+from pcs_sizing import determine_controller_size
 from pcs_versions import DEFAULT_SLURM_VERSION
 from posix_provisioning import generate_user_data_script, wrap_user_data_mime
 from tagging import build_resource_tags, tags_as_dict
@@ -930,6 +931,9 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
 
     tags = tags_as_dict(project_id, cluster_name)
 
+    max_nodes = event.get("maxNodes", 10)
+    controller_size = determine_controller_size(max_nodes)
+
     last_exc: Exception | None = None
     for attempt in range(_PCS_MAX_RETRIES):
         try:
@@ -939,7 +943,7 @@ def create_pcs_cluster(event: dict[str, Any]) -> dict[str, Any]:
                     "type": "SLURM",
                     "version": event.get("schedulerVersion", DEFAULT_SLURM_VERSION),
                 },
-                size="SMALL",
+                size=controller_size,
                 networking={
                     "subnetIds": private_subnet_ids[:1],
                     "securityGroupIds": [compute_sg],
