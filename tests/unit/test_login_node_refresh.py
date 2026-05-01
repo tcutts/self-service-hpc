@@ -4,23 +4,24 @@ Validates that the handler correctly scans active clusters, detects
 changed login node instances, and updates DynamoDB accordingly.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-# Add the cluster_operations module to the path
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-sys.path.insert(0, _CLUSTER_OPS_DIR)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-_SHARED_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "shared",
-)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+login_node_refresh = load_lambda_module("cluster_operations", "login_node_refresh")
 
 
 # ---------------------------------------------------------------------------

@@ -6,24 +6,28 @@ includes the SSM command in the lifecycle notification when appropriate.
 Requirements: 2.1, 2.2, 2.3, 6.1, 6.2
 """
 
-import os
-import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch, call
 
 import pytest
 
-# Add the cluster_operations module to the path
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-sys.path.insert(0, _CLUSTER_OPS_DIR)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-# Add the shared module path (imported by cluster_creation)
-_SHARED_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "shared",
-)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
 
 
 # ---------------------------------------------------------------------------

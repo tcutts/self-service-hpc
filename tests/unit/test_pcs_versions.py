@@ -3,19 +3,18 @@
 **Validates: Requirements 2.7**
 """
 
-import os
-import sys
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
 
 # ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
-
-if _SHARED_DIR not in sys.path:
-    sys.path.insert(0, _SHARED_DIR)
-
-from pcs_versions import DEFAULT_SLURM_VERSION, SUPPORTED_SLURM_VERSIONS
+pcs_versions = load_lambda_module("shared", "pcs_versions")
+DEFAULT_SLURM_VERSION = pcs_versions.DEFAULT_SLURM_VERSION
+SUPPORTED_SLURM_VERSIONS = pcs_versions.SUPPORTED_SLURM_VERSIONS
 
 
 class TestSupportedSlurmVersions:

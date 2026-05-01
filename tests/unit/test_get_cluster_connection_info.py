@@ -7,23 +7,27 @@ Requirements: 3.1, 3.2, 3.3, 3.4
 """
 
 import json
-import os
-import sys
 from unittest.mock import patch
 
 import pytest
 
-# Add the cluster_operations module to the path
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-sys.path.insert(0, _CLUSTER_OPS_DIR)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-# Add the shared module path (imported by handler)
-_SHARED_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "shared",
-)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("shared", "api_logging")
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "auth")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "clusters")
+handler_mod = load_lambda_module("cluster_operations", "handler")
 
 
 # ---------------------------------------------------------------------------
@@ -72,9 +76,9 @@ def _active_cluster(**overrides) -> dict:
 class TestGetClusterConnectionInfo:
     """Validates: Requirements 3.1, 3.2, 3.3, 3.4"""
 
-    @patch("handler.is_project_user", return_value=True)
-    @patch("handler.check_budget_breach", return_value=False)
-    @patch("handler.get_cluster")
+    @patch.object(handler_mod, "is_project_user", return_value=True)
+    @patch.object(handler_mod, "check_budget_breach", return_value=False)
+    @patch.object(handler_mod, "get_cluster")
     def test_active_cluster_with_ip_and_instance_id(
         self, mock_get_cluster, mock_budget, mock_auth
     ):
@@ -84,9 +88,7 @@ class TestGetClusterConnectionInfo:
         """
         mock_get_cluster.return_value = _active_cluster()
 
-        from handler import handler
-
-        response = handler(_make_api_event(), None)
+        response = handler_mod.handler(_make_api_event(), None)
         body = json.loads(response["body"])
 
         assert response["statusCode"] == 200
@@ -95,9 +97,9 @@ class TestGetClusterConnectionInfo:
         assert conn["dcv"] == "https://54.123.45.67:8443"
         assert conn["ssm"] == "aws ssm start-session --target i-0abc123def456789a"
 
-    @patch("handler.is_project_user", return_value=True)
-    @patch("handler.check_budget_breach", return_value=False)
-    @patch("handler.get_cluster")
+    @patch.object(handler_mod, "is_project_user", return_value=True)
+    @patch.object(handler_mod, "check_budget_breach", return_value=False)
+    @patch.object(handler_mod, "get_cluster")
     def test_active_cluster_with_empty_ip_and_empty_instance_id(
         self, mock_get_cluster, mock_budget, mock_auth
     ):
@@ -110,9 +112,7 @@ class TestGetClusterConnectionInfo:
             loginNodeInstanceId="",
         )
 
-        from handler import handler
-
-        response = handler(_make_api_event(), None)
+        response = handler_mod.handler(_make_api_event(), None)
         body = json.loads(response["body"])
 
         assert response["statusCode"] == 200
@@ -121,9 +121,9 @@ class TestGetClusterConnectionInfo:
         assert conn["dcv"] == ""
         assert conn["ssm"] == ""
 
-    @patch("handler.is_project_user", return_value=True)
-    @patch("handler.check_budget_breach", return_value=False)
-    @patch("handler.get_cluster")
+    @patch.object(handler_mod, "is_project_user", return_value=True)
+    @patch.object(handler_mod, "check_budget_breach", return_value=False)
+    @patch.object(handler_mod, "get_cluster")
     def test_active_cluster_with_ip_but_no_instance_id(
         self, mock_get_cluster, mock_budget, mock_auth
     ):
@@ -138,9 +138,7 @@ class TestGetClusterConnectionInfo:
             dcvPort=9443,
         )
 
-        from handler import handler
-
-        response = handler(_make_api_event(), None)
+        response = handler_mod.handler(_make_api_event(), None)
         body = json.loads(response["body"])
 
         assert response["statusCode"] == 200
@@ -149,9 +147,9 @@ class TestGetClusterConnectionInfo:
         assert conn["dcv"] == "https://10.0.1.5:9443"
         assert conn["ssm"] == ""
 
-    @patch("handler.is_project_user", return_value=True)
-    @patch("handler.check_budget_breach", return_value=False)
-    @patch("handler.get_cluster")
+    @patch.object(handler_mod, "is_project_user", return_value=True)
+    @patch.object(handler_mod, "check_budget_breach", return_value=False)
+    @patch.object(handler_mod, "get_cluster")
     def test_non_active_cluster_has_no_connection_info(
         self, mock_get_cluster, mock_budget, mock_auth
     ):
@@ -161,9 +159,7 @@ class TestGetClusterConnectionInfo:
         """
         mock_get_cluster.return_value = _active_cluster(status="CREATING")
 
-        from handler import handler
-
-        response = handler(_make_api_event(), None)
+        response = handler_mod.handler(_make_api_event(), None)
         body = json.loads(response["body"])
 
         assert response["statusCode"] == 200

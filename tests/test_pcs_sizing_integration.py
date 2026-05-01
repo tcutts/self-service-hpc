@@ -6,36 +6,25 @@ the sizing function, and forwards the result to pcs_client.create_cluster().
 **Validates: Requirements 2.1, 2.2, 2.3, 2.4**
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+pcs_sizing = load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["pcs_sizing", "cluster_creation"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-from errors import ValidationError  # noqa: E402
-from pcs_sizing import determine_controller_size  # noqa: E402
-
-import cluster_creation  # noqa: E402
+ValidationError = errors.ValidationError
+determine_controller_size = pcs_sizing.determine_controller_size
 
 
 # ---------------------------------------------------------------------------

@@ -8,23 +8,18 @@ defined in ``lambda/shared/validators.py``.
 Validates: Requirements 2.1, 2.2, 2.3, 2.4
 """
 
-import os
-import sys
-
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda shared module directly.
-# ---------------------------------------------------------------------------
-_SHARED_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda", "shared")
-if _SHARED_DIR not in sys.path:
-    sys.path.insert(0, _SHARED_DIR)
+from conftest import load_lambda_module
 
-from validators import (
-    POSIX_USERNAME_MAX_LENGTH,
-    POSIX_USERNAME_REGEX,
-    validate_posix_username,
-)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+validators = load_lambda_module("shared", "validators")
+
+POSIX_USERNAME_MAX_LENGTH = validators.POSIX_USERNAME_MAX_LENGTH
+POSIX_USERNAME_REGEX = validators.POSIX_USERNAME_REGEX
+validate_posix_username = validators.validate_posix_username
 
 
 # ── Constants ──────────────────────────────────────────────────────────────

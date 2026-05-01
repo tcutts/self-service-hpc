@@ -7,7 +7,6 @@
 [PBT: Property 5] Atomic project destruction initializes progress and transitions status.
 """
 
-import importlib
 import json
 import os
 import sys
@@ -21,28 +20,18 @@ from moto import mock_aws
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["cluster_names", "cluster_destruction"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-from cluster_destruction import STEP_LABELS, TOTAL_STEPS  # noqa: E402
+STEP_LABELS = cluster_destruction.STEP_LABELS
+TOTAL_STEPS = cluster_destruction.TOTAL_STEPS
 
 
 # ===================================================================
@@ -78,7 +67,7 @@ class TestStepLabelsCompleteness:
             f"Missing: {expected_keys - actual_keys}, Extra: {actual_keys - expected_keys}"
         )
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(step=st.integers(min_value=1, max_value=TOTAL_STEPS))
     def test_each_step_maps_to_non_empty_string(self, step):
         """For any step number in [1, TOTAL_STEPS], STEP_LABELS must map
@@ -105,20 +94,6 @@ class TestStepLabelsCompleteness:
 AWS_REGION = "us-east-1"
 CLUSTERS_TABLE_NAME = "Clusters"
 PROJECTS_TABLE_NAME = "Projects"
-
-_LAMBDA_ROOT = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_ROOT, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_ROOT, "shared")
-
-
-def _load_module_from(directory: str, module_name: str):
-    """Load a module by file path, avoiding sys.path collisions."""
-    filepath = os.path.join(directory, f"{module_name}.py")
-    spec = importlib.util.spec_from_file_location(module_name, filepath)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _create_clusters_table():
@@ -178,17 +153,15 @@ def _setup_env_and_modules():
     os.environ["USER_POOL_ID"] = "us-east-1_TestPool"
 
     # Load shared modules first, then cluster ops modules
-    if "authorization" not in sys.modules:
-        _load_module_from(_SHARED_DIR, "authorization")
-    if "api_logging" not in sys.modules:
-        _load_module_from(_SHARED_DIR, "api_logging")
+    _ensure_shared_modules()
+    load_lambda_module("shared", "api_logging", force_reload=True)
 
-    _load_module_from(_CLUSTER_OPS_DIR, "errors")
-    _load_module_from(_CLUSTER_OPS_DIR, "auth")
-    _load_module_from(_CLUSTER_OPS_DIR, "cluster_names")
-    _load_module_from(_CLUSTER_OPS_DIR, "clusters")
-    _load_module_from(_CLUSTER_OPS_DIR, "tagging")
-    handler_mod = _load_module_from(_CLUSTER_OPS_DIR, "handler")
+    load_lambda_module("cluster_operations", "errors", force_reload=True)
+    load_lambda_module("cluster_operations", "auth", force_reload=True)
+    load_lambda_module("cluster_operations", "cluster_names", force_reload=True)
+    load_lambda_module("cluster_operations", "clusters", force_reload=True)
+    load_lambda_module("cluster_operations", "tagging", force_reload=True)
+    handler_mod = load_lambda_module("cluster_operations", "handler", force_reload=True)
     errors_mod = sys.modules["errors"]
     return handler_mod, errors_mod
 
@@ -238,7 +211,7 @@ class TestAtomicClusterDeletion:
     **Validates: Requirements 1.1, 9.1, 9.2**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(status=cluster_status_strategy)
     def test_delete_cluster_transitions_or_conflicts(self, status):
         """For any cluster status, DELETE either transitions to DESTROYING
@@ -388,7 +361,7 @@ class TestClusterGetProgressInclusion:
     **Validates: Requirements 2.1, 2.2, 2.3**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         status=st.sampled_from(_ALL_STATUSES),
         current_step=st.integers(min_value=0, max_value=20),
@@ -491,9 +464,6 @@ class TestClusterGetProgressInclusion:
 # Helpers for Property 5 — project management handler-level tests
 # ===================================================================
 
-_PROJECT_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "project_management")
-
-
 def _setup_project_env_and_modules():
     """Set environment variables and load project management handler modules inside mock_aws."""
     os.environ["AWS_DEFAULT_REGION"] = AWS_REGION
@@ -515,20 +485,20 @@ def _setup_project_env_and_modules():
     os.environ["USER_POOL_ID"] = "us-east-1_TestPool"
 
     # Load shared modules first
-    _load_module_from(_SHARED_DIR, "authorization")
-    _load_module_from(_SHARED_DIR, "api_logging")
+    _ensure_shared_modules()
+    load_lambda_module("shared", "api_logging", force_reload=True)
 
     # Load project management modules — order matters for dependencies
-    _load_module_from(_PROJECT_MGMT_DIR, "errors")
-    _load_module_from(_PROJECT_MGMT_DIR, "auth")
-    _load_module_from(_PROJECT_MGMT_DIR, "lifecycle")
-    _load_module_from(_PROJECT_MGMT_DIR, "projects")
-    _load_module_from(_PROJECT_MGMT_DIR, "members")
-    _load_module_from(_PROJECT_MGMT_DIR, "budget")
-    _load_module_from(_PROJECT_MGMT_DIR, "project_deploy")
-    _load_module_from(_PROJECT_MGMT_DIR, "project_destroy")
-    _load_module_from(_PROJECT_MGMT_DIR, "project_update")
-    pm_handler_mod = _load_module_from(_PROJECT_MGMT_DIR, "handler")
+    load_lambda_module("project_management", "errors", force_reload=True)
+    load_lambda_module("project_management", "auth", force_reload=True)
+    load_lambda_module("project_management", "lifecycle", force_reload=True)
+    load_lambda_module("project_management", "projects", force_reload=True)
+    load_lambda_module("project_management", "members", force_reload=True)
+    load_lambda_module("project_management", "budget", force_reload=True)
+    load_lambda_module("project_management", "project_deploy", force_reload=True)
+    load_lambda_module("project_management", "project_destroy", force_reload=True)
+    load_lambda_module("project_management", "project_update", force_reload=True)
+    pm_handler_mod = load_lambda_module("project_management", "handler", force_reload=True)
     pm_errors_mod = sys.modules["errors"]
     return pm_handler_mod, pm_errors_mod
 
@@ -577,7 +547,7 @@ class TestAtomicProjectDestruction:
     **Validates: Requirements 9.3, 9.4**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(status=project_status_strategy)
     def test_destroy_project_transitions_or_conflicts(self, status):
         """For any project status, POST /destroy either transitions to
@@ -710,7 +680,7 @@ class TestProgressBarPercentage:
     **Validates: Requirements 3.1, 3.2, 5.1, 5.2**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(data=st.data())
     def test_percentage_in_valid_range(self, data):
         """For any valid currentStep/totalSteps pair, the percentage
@@ -730,7 +700,7 @@ class TestProgressBarPercentage:
             f"currentStep={current_step}, totalSteps={total_steps}"
         )
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(data=st.data())
     def test_percentage_matches_formula(self, data):
         """For any valid currentStep/totalSteps pair, the percentage

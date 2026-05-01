@@ -9,37 +9,30 @@ Tests cover:
 - All three log types configured in a single invocation
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
-
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-for _mod in [
-    "errors",
-    "cluster_names",
-    "cluster_creation",
-]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_creation  # noqa: E402
-from cluster_creation import (  # noqa: E402
-    _STEP_DISPATCH,
-    configure_scheduler_log_delivery,
-)
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+_STEP_DISPATCH = cluster_creation._STEP_DISPATCH
+configure_scheduler_log_delivery = cluster_creation.configure_scheduler_log_delivery
 
 
 # ---------------------------------------------------------------------------

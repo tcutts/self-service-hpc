@@ -6,24 +6,29 @@ node instances, retrieves the public IP, and raises InternalError on failures.
 Requirements: 1.1, 1.2, 1.4, 1.5
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
-# Add the cluster_operations module to the path
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-sys.path.insert(0, _CLUSTER_OPS_DIR)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-# We need to add the shared module path too (imported by cluster_creation)
-_SHARED_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "shared",
-)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+InternalError = errors.InternalError
 
 
 # ---------------------------------------------------------------------------
@@ -55,8 +60,8 @@ def _client_error(code: str = "ServiceException", message: str = "fail") -> Clie
 class TestResolveLoginNodeDetails:
     """Validates: Requirements 1.1, 1.2, 1.4, 1.5"""
 
-    @patch("cluster_creation._update_step_progress")
-    @patch("cluster_creation.ec2_client")
+    @patch.object(cluster_creation, "_update_step_progress")
+    @patch.object(cluster_creation, "ec2_client")
     def test_happy_path_returns_instance_id_and_ip(
         self, mock_ec2, mock_progress
     ):
@@ -74,13 +79,10 @@ class TestResolveLoginNodeDetails:
             ]
         }
 
-        from cluster_creation import resolve_login_node_details
-
-        result = resolve_login_node_details(_base_event())
+        result = cluster_creation.resolve_login_node_details(_base_event())
 
         assert result["loginNodeInstanceId"] == "i-0abc123def456789a"
         assert result["loginNodeIp"] == "54.123.45.67"
-        # Original event keys are preserved
         assert result["projectId"] == "proj-123"
         assert result["clusterName"] == "test-cluster"
 
@@ -98,8 +100,8 @@ class TestResolveLoginNodeDetails:
         )
         mock_progress.assert_called_once_with("proj-123", "test-cluster", 10)
 
-    @patch("cluster_creation._update_step_progress")
-    @patch("cluster_creation.ec2_client")
+    @patch.object(cluster_creation, "_update_step_progress")
+    @patch.object(cluster_creation, "ec2_client")
     def test_empty_reservations_raises_internal_error(
         self, mock_ec2, mock_progress
     ):
@@ -108,14 +110,11 @@ class TestResolveLoginNodeDetails:
             "Reservations": [],
         }
 
-        from cluster_creation import resolve_login_node_details
-        from errors import InternalError
-
         with pytest.raises(InternalError, match="no running instances"):
-            resolve_login_node_details(_base_event())
+            cluster_creation.resolve_login_node_details(_base_event())
 
-    @patch("cluster_creation._update_step_progress")
-    @patch("cluster_creation.ec2_client")
+    @patch.object(cluster_creation, "_update_step_progress")
+    @patch.object(cluster_creation, "ec2_client")
     def test_ec2_client_error_raises_internal_error(
         self, mock_ec2, mock_progress
     ):
@@ -124,14 +123,11 @@ class TestResolveLoginNodeDetails:
             "InternalError", "Service unavailable"
         )
 
-        from cluster_creation import resolve_login_node_details
-        from errors import InternalError
-
         with pytest.raises(InternalError, match="Failed to describe login node group instances"):
-            resolve_login_node_details(_base_event())
+            cluster_creation.resolve_login_node_details(_base_event())
 
-    @patch("cluster_creation._update_step_progress")
-    @patch("cluster_creation.ec2_client")
+    @patch.object(cluster_creation, "_update_step_progress")
+    @patch.object(cluster_creation, "ec2_client")
     def test_no_public_ip_raises_internal_error(
         self, mock_ec2, mock_progress
     ):
@@ -142,15 +138,11 @@ class TestResolveLoginNodeDetails:
                     "Instances": [
                         {
                             "InstanceId": "i-0abc123def456789a",
-                            # No PublicIpAddress key
                         }
                     ]
                 }
             ]
         }
 
-        from cluster_creation import resolve_login_node_details
-        from errors import InternalError
-
         with pytest.raises(InternalError, match="no public IP address"):
-            resolve_login_node_details(_base_event())
+            cluster_creation.resolve_login_node_details(_base_event())

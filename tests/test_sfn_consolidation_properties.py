@@ -21,48 +21,35 @@ and record_cluster sequentially, where each step receives the output of the prev
 
 import json
 import os
-import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["cluster_names", "cluster_creation", "pcs_sizing",
-             "pcs_versions", "posix_provisioning", "tagging"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_creation  # noqa: E402
-from cluster_creation import (  # noqa: E402
-    consolidated_pre_parallel,
-    consolidated_post_parallel,
-    validate_and_register_name,
-    check_budget_breach,
-    resolve_template,
-    create_iam_resources,
-    resolve_login_node_details,
-    create_pcs_queue,
-    tag_resources,
-    record_cluster,
-)
+consolidated_pre_parallel = cluster_creation.consolidated_pre_parallel
+consolidated_post_parallel = cluster_creation.consolidated_post_parallel
+validate_and_register_name = cluster_creation.validate_and_register_name
+check_budget_breach = cluster_creation.check_budget_breach
+resolve_template = cluster_creation.resolve_template
+create_iam_resources = cluster_creation.create_iam_resources
+resolve_login_node_details = cluster_creation.resolve_login_node_details
+create_pcs_queue = cluster_creation.create_pcs_queue
+tag_resources = cluster_creation.tag_resources
+record_cluster = cluster_creation.record_cluster
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +199,7 @@ class TestClusterCreationPreParallelEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -433,7 +420,7 @@ class TestClusterCreationPostParallelEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )

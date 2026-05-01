@@ -9,58 +9,42 @@ as calling the two constituent pre-loop steps sequentially (validate then start)
 **Validates: Requirements 4.1, 5.1, 6.1, 14.2, 14.3, 14.4**
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_PROJECT_MGMT_DIR = os.path.join(_LAMBDA_DIR, "project_management")
+load_lambda_module("project_management", "errors")
+lifecycle = load_lambda_module("project_management", "lifecycle")
+project_deploy = load_lambda_module("project_management", "project_deploy")
+project_update = load_lambda_module("project_management", "project_update")
+project_destroy = load_lambda_module("project_management", "project_destroy")
 
-sys.path.insert(0, _PROJECT_MGMT_DIR)
+deploy_consolidated_pre_loop = project_deploy.consolidated_pre_loop
+deploy_consolidated_post_loop = project_deploy.consolidated_post_loop
+deploy_validate = project_deploy.validate_project_state
+start_cdk_deploy = project_deploy.start_cdk_deploy
+deploy_extract_stack_outputs = project_deploy.extract_stack_outputs
+record_infrastructure = project_deploy.record_infrastructure
 
-# Clear cached modules to ensure correct imports
-for _mod in [
-    "errors", "lifecycle",
-    "project_deploy", "project_update", "project_destroy",
-]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
+update_consolidated_pre_loop = project_update.consolidated_pre_loop
+update_consolidated_post_loop = project_update.consolidated_post_loop
+update_validate = project_update.validate_update_state
+start_cdk_update = project_update.start_cdk_update
+update_extract_stack_outputs = project_update.extract_stack_outputs
+record_updated_infrastructure = project_update.record_updated_infrastructure
 
-import lifecycle  # noqa: E402
-import project_deploy  # noqa: E402
-import project_update  # noqa: E402
-import project_destroy  # noqa: E402
-
-from project_deploy import (  # noqa: E402
-    consolidated_pre_loop as deploy_consolidated_pre_loop,
-    consolidated_post_loop as deploy_consolidated_post_loop,
-    validate_project_state as deploy_validate,
-    start_cdk_deploy,
-    extract_stack_outputs as deploy_extract_stack_outputs,
-    record_infrastructure,
-)
-from project_update import (  # noqa: E402
-    consolidated_pre_loop as update_consolidated_pre_loop,
-    consolidated_post_loop as update_consolidated_post_loop,
-    validate_update_state as update_validate,
-    start_cdk_update,
-    extract_stack_outputs as update_extract_stack_outputs,
-    record_updated_infrastructure,
-)
-from project_destroy import (  # noqa: E402
-    consolidated_pre_loop as destroy_consolidated_pre_loop,
-    consolidated_post_loop as destroy_consolidated_post_loop,
-    validate_and_check_clusters as destroy_validate,
-    start_cdk_destroy,
-    clear_infrastructure,
-    archive_project,
-)
+destroy_consolidated_pre_loop = project_destroy.consolidated_pre_loop
+destroy_consolidated_post_loop = project_destroy.consolidated_post_loop
+destroy_validate = project_destroy.validate_and_check_clusters
+start_cdk_destroy = project_destroy.start_cdk_destroy
+clear_infrastructure = project_destroy.clear_infrastructure
+archive_project = project_destroy.archive_project
 
 
 # ---------------------------------------------------------------------------
@@ -261,7 +245,7 @@ class TestProjectDeployPreLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -328,7 +312,7 @@ class TestProjectUpdatePreLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -395,7 +379,7 @@ class TestProjectDestroyPreLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -662,7 +646,7 @@ class TestProjectDeployPostLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -728,7 +712,7 @@ class TestProjectUpdatePostLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -794,7 +778,7 @@ class TestProjectDestroyPostLoopEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )

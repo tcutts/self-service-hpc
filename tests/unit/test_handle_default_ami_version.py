@@ -7,34 +7,28 @@ Tests that the /templates/default-ami endpoint correctly passes the optional
 continues to work without the parameter (backward compatibility).
 """
 
-import importlib
 import json
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
-# Import the template management handler explicitly by file path to avoid
-# collision with cluster_operations/handler.py on sys.path.
-_handler_spec = importlib.util.spec_from_file_location(
-    "template_handler",
-    os.path.join(_TEMPLATE_MGMT_DIR, "handler.py"),
-)
-template_handler = importlib.util.module_from_spec(_handler_spec)
-_handler_spec.loader.exec_module(template_handler)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("shared", "api_logging")
+load_lambda_module("template_management", "errors")
+load_lambda_module("template_management", "auth")
+load_lambda_module("template_management", "ami_lookup")
+load_lambda_module("template_management", "templates")
+template_handler = load_lambda_module("template_management", "handler")
 
 _handle_default_ami = template_handler._handle_default_ami
 

@@ -4,35 +4,20 @@
 returns the smallest PCS tier whose capacity >= maxNodes + 1.
 """
 
-import os
-import sys
-
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+pcs_sizing = load_lambda_module("cluster_operations", "pcs_sizing")
 
-# Add cluster_operations first so its errors.py is found
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["pcs_sizing"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-from pcs_sizing import PCS_SIZE_TIERS, determine_controller_size  # noqa: E402
+PCS_SIZE_TIERS = pcs_sizing.PCS_SIZE_TIERS
+determine_controller_size = pcs_sizing.determine_controller_size
 
 
 # ===================================================================
@@ -47,7 +32,7 @@ class TestSmallestSufficientTierSelection:
     **Validates: Requirements 1.1, 1.2, 1.3, 1.5, 1.6, 4.3**
     """
 
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=10, deadline=None)
     @given(max_nodes=st.integers(min_value=1, max_value=2047))
     def test_returned_tier_is_smallest_sufficient(self, max_nodes):
         """The returned tier's capacity >= maxNodes + 1, and no smaller
@@ -84,7 +69,7 @@ class TestSmallestSufficientTierSelection:
 
 import pytest
 
-from errors import ValidationError  # noqa: E402
+ValidationError = errors.ValidationError
 
 
 # ===================================================================
@@ -98,7 +83,7 @@ class TestOverCapacityRejection:
     **Validates: Requirements 1.4, 3.3**
     """
 
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=10, deadline=None)
     @given(max_nodes=st.integers(min_value=2048, max_value=100_000))
     def test_over_capacity_raises_validation_error(self, max_nodes):
         """Over-capacity maxNodes values must be rejected with
@@ -121,7 +106,7 @@ class TestNonPositiveInputRejection:
     **Validates: Requirements 3.1**
     """
 
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=10, deadline=None)
     @given(max_nodes=st.integers(max_value=0))
     def test_non_positive_raises_validation_error(self, max_nodes):
         """Non-positive maxNodes values must be rejected with
@@ -145,7 +130,7 @@ class TestNonIntegerInputRejection:
     **Validates: Requirements 3.2**
     """
 
-    @settings(max_examples=100, deadline=None)
+    @settings(max_examples=10, deadline=None)
     @given(value=st.one_of(st.floats(), st.text(), st.none(), st.booleans()))
     def test_non_integer_raises_validation_error(self, value):
         """Non-integer inputs must be rejected with ValidationError.

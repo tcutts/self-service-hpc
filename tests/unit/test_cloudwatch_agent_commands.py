@@ -11,21 +11,20 @@ Tests the ``generate_cloudwatch_agent_commands()`` function in
 Validates: Requirements 8.1, 8.2, 8.5, 8.6
 """
 
-import os
-import sys
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_SHARED_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda", "shared")
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-for _dir in (_SHARED_DIR, _CLUSTER_OPS_DIR):
-    if _dir not in sys.path:
-        sys.path.insert(0, _dir)
-
-from posix_provisioning import generate_cloudwatch_agent_commands
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+posix_provisioning = load_lambda_module("cluster_operations", "posix_provisioning")
+generate_cloudwatch_agent_commands = posix_provisioning.generate_cloudwatch_agent_commands
 
 
 # ── Backward compatibility: access log config preserved ────────────────────

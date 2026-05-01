@@ -7,24 +7,30 @@ They are written against UNFIXED code and must PASS, confirming the baseline.
 After the fix, they are re-run to confirm no regressions.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+_cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+load_lambda_module("template_management", "errors")
+_ami_lookup = load_lambda_module("template_management", "ami_lookup")
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +66,7 @@ class TestResolveTemplateFieldExtraction:
 
         **Validates: Requirements 3.2**
         """
-        from cluster_creation import resolve_template
+        resolve_template = _cluster_creation.resolve_template
 
         template_record = {
             "PK": "TEMPLATE#test-tpl",
@@ -80,7 +86,7 @@ class TestResolveTemplateFieldExtraction:
 
         event = {"templateId": "test-tpl", "projectId": "proj1", "clusterName": "c1"}
 
-        with patch("cluster_creation.dynamodb") as mock_dynamodb:
+        with patch.object(_cluster_creation, "dynamodb") as mock_dynamodb:
             mock_dynamodb.Table.return_value = mock_table
             result = resolve_template(event)
 
@@ -108,7 +114,7 @@ class TestResolveTemplateUserOverrides:
 
         **Validates: Requirements 3.5**
         """
-        from cluster_creation import resolve_template
+        resolve_template = _cluster_creation.resolve_template
 
         template_record = {
             "PK": "TEMPLATE#test-tpl",
@@ -136,7 +142,7 @@ class TestResolveTemplateUserOverrides:
             "lustreCapacityGiB": 2400,
         }
 
-        with patch("cluster_creation.dynamodb") as mock_dynamodb:
+        with patch.object(_cluster_creation, "dynamodb") as mock_dynamodb:
             mock_dynamodb.Table.return_value = mock_table
             result = resolve_template(event)
 
@@ -159,7 +165,7 @@ class TestResolveTemplateDefaults:
 
         **Validates: Requirements 3.5**
         """
-        from cluster_creation import resolve_template
+        resolve_template = _cluster_creation.resolve_template
 
         event = {"projectId": "proj1", "clusterName": "c1"}
 
@@ -186,7 +192,7 @@ class TestGetLatestPcsAmiSortOrder:
 
         **Validates: Requirements 3.3**
         """
-        from ami_lookup import get_latest_pcs_ami
+        get_latest_pcs_ami = _ami_lookup.get_latest_pcs_ami
 
         # Build images with distinct, ordered creation dates
         images = []
@@ -209,7 +215,7 @@ class TestGetLatestPcsAmiSortOrder:
         mock_ec2 = MagicMock()
         mock_ec2.describe_images.return_value = {"Images": shuffled}
 
-        with patch("ami_lookup.ec2_client", mock_ec2):
+        with patch.object(_ami_lookup, "ec2_client", mock_ec2):
             result = get_latest_pcs_ami(arch="x86_64")
 
         assert result["amiId"] == expected_ami_id

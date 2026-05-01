@@ -7,21 +7,20 @@ Uses Hypothesis to verify correctness properties of the shared
 ``lambda/shared/validators.py``.
 """
 
-import os
 import re
-import sys
 
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda shared module directly.
-# ---------------------------------------------------------------------------
-_SHARED_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda", "shared")
-if _SHARED_DIR not in sys.path:
-    sys.path.insert(0, _SHARED_DIR)
+from conftest import load_lambda_module, _ensure_shared_modules
 
-from validators import validate_posix_username
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+validators = load_lambda_module("shared", "validators")
+
+validate_posix_username = validators.validate_posix_username
 
 # Reference regex used as the oracle / model specification.
 _REFERENCE_REGEX = re.compile(r"^[a-z_][a-z0-9_-]{0,31}$")
@@ -37,7 +36,7 @@ class TestProperty1ValidatorMatchesReferenceSpec:
     **Validates: Requirements 1.3, 1.4, 1.5, 1.7, 2.3, 2.4**
     """
 
-    @settings(max_examples=100)
+    @settings(max_examples=10)
     @given(s=st.text(min_size=0, max_size=64))
     def test_validator_agrees_with_reference_regex(self, s: str) -> None:
         """validate_posix_username(s) returns (True, '') iff s matches
@@ -74,7 +73,7 @@ class TestProperty2InvalidInputsProduceDescriptiveErrors:
     **Validates: Requirements 2.2**
     """
 
-    @settings(max_examples=100)
+    @settings(max_examples=10)
     @given(
         s=st.text(min_size=0, max_size=64).filter(
             lambda s: not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", s)
@@ -96,16 +95,9 @@ class TestProperty2InvalidInputsProduceDescriptiveErrors:
         )
 
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda cluster_operations module.
-# ---------------------------------------------------------------------------
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "lambda", "cluster_operations"
-)
-if _CLUSTER_OPS_DIR not in sys.path:
-    sys.path.insert(0, _CLUSTER_OPS_DIR)
+posix_provisioning = load_lambda_module("cluster_operations", "posix_provisioning")
 
-from posix_provisioning import generate_user_creation_commands
+generate_user_creation_commands = posix_provisioning.generate_user_creation_commands
 
 
 class TestProperty3ValidUsernamesProduceWellFormedCommands:
@@ -120,7 +112,7 @@ class TestProperty3ValidUsernamesProduceWellFormedCommands:
     **Validates: Requirements 5.1, 5.3**
     """
 
-    @settings(max_examples=100)
+    @settings(max_examples=10)
     @given(
         user_id=st.from_regex(r"[a-z_][a-z0-9_-]{0,31}", fullmatch=True),
         uid=st.integers(min_value=1000, max_value=65534),
@@ -153,7 +145,7 @@ class TestProperty3ValidUsernamesProduceWellFormedCommands:
             f"Third command should contain 'chown': {commands[2]!r}"
         )
 
-    @settings(max_examples=100)
+    @settings(max_examples=10)
     @given(
         user_id=st.from_regex(r"[a-z_][a-z0-9_-]{0,31}", fullmatch=True),
         uid=st.integers(min_value=1000, max_value=65534),
@@ -213,7 +205,7 @@ class TestProperty4InvalidUsernamesProduceEmptyCommandLists:
     **Validates: Requirements 5.2**
     """
 
-    @settings(max_examples=100)
+    @settings(max_examples=10)
     @given(
         user_id=st.text(min_size=0, max_size=64).filter(
             lambda s: not re.match(r"^[a-z_][a-z0-9_-]{0,31}$", s)

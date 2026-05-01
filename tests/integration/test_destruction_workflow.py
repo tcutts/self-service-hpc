@@ -12,48 +12,41 @@ Tests cover:
        reach record_cluster_destroyed
 """
 
+import importlib.util
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Load tests/conftest.py helpers via importlib (integration/ is a sub-dir).
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["cluster_names", "cluster_destruction"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_destruction  # noqa: E402
-from cluster_destruction import (  # noqa: E402
-    check_fsx_export_status,
-    check_pcs_deletion_status,
-    create_fsx_export_task,
-    delete_fsx_filesystem,
-    delete_iam_resources,
-    delete_launch_templates,
-    delete_pcs_cluster_step,
-    delete_pcs_resources,
-    deregister_cluster_name_step,
-    record_cluster_destroyed,
-)
-from errors import InternalError  # noqa: E402
+check_fsx_export_status = cluster_destruction.check_fsx_export_status
+check_pcs_deletion_status = cluster_destruction.check_pcs_deletion_status
+create_fsx_export_task = cluster_destruction.create_fsx_export_task
+delete_fsx_filesystem = cluster_destruction.delete_fsx_filesystem
+delete_iam_resources = cluster_destruction.delete_iam_resources
+delete_launch_templates = cluster_destruction.delete_launch_templates
+delete_pcs_cluster_step = cluster_destruction.delete_pcs_cluster_step
+delete_pcs_resources = cluster_destruction.delete_pcs_resources
+deregister_cluster_name_step = cluster_destruction.deregister_cluster_name_step
+record_cluster_destroyed = cluster_destruction.record_cluster_destroyed
+InternalError = errors.InternalError
 
 
 # ---------------------------------------------------------------------------

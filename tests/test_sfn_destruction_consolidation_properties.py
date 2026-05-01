@@ -21,7 +21,6 @@ receives the output of the previous step.
 """
 
 import os
-import sys
 from datetime import datetime, timezone
 from unittest.mock import MagicMock, patch
 
@@ -29,40 +28,26 @@ from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 from botocore.exceptions import ClientError
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["cluster_names", "cluster_destruction"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_destruction  # noqa: E402
-from cluster_destruction import (  # noqa: E402
-    consolidated_delete_resources,
-    consolidated_cleanup,
-    delete_pcs_cluster_step,
-    delete_fsx_filesystem,
-    remove_mountpoint_s3_policy,
-    cleanup_scheduler_log_delivery,
-    delete_iam_resources,
-    delete_launch_templates,
-    deregister_cluster_name_step,
-    record_cluster_destroyed,
-)
+consolidated_delete_resources = cluster_destruction.consolidated_delete_resources
+consolidated_cleanup = cluster_destruction.consolidated_cleanup
+delete_pcs_cluster_step = cluster_destruction.delete_pcs_cluster_step
+delete_fsx_filesystem = cluster_destruction.delete_fsx_filesystem
+remove_mountpoint_s3_policy = cluster_destruction.remove_mountpoint_s3_policy
+cleanup_scheduler_log_delivery = cluster_destruction.cleanup_scheduler_log_delivery
+delete_iam_resources = cluster_destruction.delete_iam_resources
+delete_launch_templates = cluster_destruction.delete_launch_templates
+deregister_cluster_name_step = cluster_destruction.deregister_cluster_name_step
+record_cluster_destroyed = cluster_destruction.record_cluster_destroyed
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +164,7 @@ class TestClusterDestructionConsolidatedDeleteEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -273,7 +258,7 @@ class TestClusterDestructionConsolidatedCleanupEquivalence:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )

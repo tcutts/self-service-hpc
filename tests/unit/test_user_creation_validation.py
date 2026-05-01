@@ -9,37 +9,23 @@ Cognito or DynamoDB, and proceeds normally for valid usernames.
 Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7
 """
 
-import importlib
 import os
-import sys
 
 import boto3
 import pytest
 from moto import mock_aws
+
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 AWS_REGION = "us-east-1"
 USERS_TABLE_NAME = "PlatformUsers"
-
-_LAMBDA_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_SHARED_DIR = os.path.join(_LAMBDA_ROOT, "shared")
-_USER_MGMT_DIR = os.path.join(_LAMBDA_ROOT, "user_management")
-
-
-# ---------------------------------------------------------------------------
-# Module loading helpers
-# ---------------------------------------------------------------------------
-
-def _load_module_from(directory: str, module_name: str):
-    """Load a module by file path so boto3 clients bind to moto."""
-    filepath = os.path.join(directory, f"{module_name}.py")
-    spec = importlib.util.spec_from_file_location(module_name, filepath)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules[module_name] = mod
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def _create_users_table():
@@ -106,10 +92,10 @@ class TestCreateUserRejectsInvalidUsernames:
             self.pool_id = _create_cognito_pool()
 
             # Load shared modules first, then user_management
-            _load_module_from(_SHARED_DIR, "validators")
-            _load_module_from(_SHARED_DIR, "authorization")
-            self.errors_mod = _load_module_from(_USER_MGMT_DIR, "errors")
-            self.users_mod = _load_module_from(_USER_MGMT_DIR, "users")
+            load_lambda_module("shared", "validators")
+            load_lambda_module("shared", "authorization")
+            self.errors_mod = load_lambda_module("user_management", "errors")
+            self.users_mod = load_lambda_module("user_management", "users")
 
             # Capture references to the Cognito client and DynamoDB table
             # used by the users module so we can verify they were NOT called.
@@ -295,10 +281,10 @@ class TestCreateUserAcceptsValidUsernames:
             self.table = _create_users_table()
             self.pool_id = _create_cognito_pool()
 
-            _load_module_from(_SHARED_DIR, "validators")
-            _load_module_from(_SHARED_DIR, "authorization")
-            self.errors_mod = _load_module_from(_USER_MGMT_DIR, "errors")
-            self.users_mod = _load_module_from(_USER_MGMT_DIR, "users")
+            load_lambda_module("shared", "validators")
+            load_lambda_module("shared", "authorization")
+            self.errors_mod = load_lambda_module("user_management", "errors")
+            self.users_mod = load_lambda_module("user_management", "users")
 
             yield
 

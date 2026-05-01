@@ -10,23 +10,22 @@ return an empty list.
 Validates: Requirements 5.1, 5.2, 5.3
 """
 
-import os
-import sys
-
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# ---------------------------------------------------------------------------
-_SHARED_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda", "shared")
-_CLUSTER_OPS_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "cluster_operations",
-)
-for _dir in (_SHARED_DIR, _CLUSTER_OPS_DIR):
-    if _dir not in sys.path:
-        sys.path.insert(0, _dir)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-from posix_provisioning import generate_user_creation_commands
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+posix_provisioning = load_lambda_module("cluster_operations", "posix_provisioning")
+generate_user_creation_commands = posix_provisioning.generate_user_creation_commands
 
 
 # ── Valid usernames produce correct commands ───────────────────────────────

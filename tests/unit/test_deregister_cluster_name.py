@@ -8,39 +8,25 @@ Tests:
 - Unexpected ClientError propagates to the caller
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# cluster_operations must come FIRST so its errors.py (which has ConflictError)
-# is found before template_management's errors.py.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
-
-# Add cluster_operations first so its errors.py is found
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# If errors was already imported from template_management, clear it so
-# cluster_operations/errors.py is picked up instead.
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-# Also clear cluster_names if it was cached with the wrong errors module
-if "cluster_names" in sys.modules:
-    del sys.modules["cluster_names"]
-
-from cluster_names import deregister_cluster_name  # noqa: E402
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+cluster_names = load_lambda_module("cluster_operations", "cluster_names")
+deregister_cluster_name = cluster_names.deregister_cluster_name
 
 
 TABLE_NAME = "ClusterNameRegistry"
@@ -57,7 +43,7 @@ class TestDeregisterClusterNameSuccess:
         mock_dynamodb = MagicMock()
         mock_dynamodb.Table.return_value = mock_table
 
-        with patch("cluster_names.dynamodb", mock_dynamodb):
+        with patch.object(cluster_names, "dynamodb", mock_dynamodb):
             result = deregister_cluster_name(TABLE_NAME, "my-cluster")
 
         assert result is True
@@ -82,7 +68,7 @@ class TestDeregisterClusterNameNotFound:
         mock_dynamodb = MagicMock()
         mock_dynamodb.Table.return_value = mock_table
 
-        with patch("cluster_names.dynamodb", mock_dynamodb):
+        with patch.object(cluster_names, "dynamodb", mock_dynamodb):
             result = deregister_cluster_name(TABLE_NAME, "nonexistent-cluster")
 
         assert result is False
@@ -102,7 +88,7 @@ class TestDeregisterClusterNameClientError:
         mock_dynamodb = MagicMock()
         mock_dynamodb.Table.return_value = mock_table
 
-        with patch("cluster_names.dynamodb", mock_dynamodb):
+        with patch.object(cluster_names, "dynamodb", mock_dynamodb):
             with pytest.raises(ClientError) as exc_info:
                 deregister_cluster_name(TABLE_NAME, "my-cluster")
 

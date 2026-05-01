@@ -7,23 +7,31 @@ payload and passes it to the PCS create_cluster API call, and that it
 falls back to DEFAULT_SLURM_VERSION when schedulerVersion is absent.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
-# ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+pcs_versions = load_lambda_module("shared", "pcs_versions")
+DEFAULT_SLURM_VERSION = pcs_versions.DEFAULT_SLURM_VERSION
 
-from pcs_versions import DEFAULT_SLURM_VERSION
+# Pre-load cluster_creation and its transitive dependencies so that
+# ``from cluster_creation import create_pcs_cluster`` inside test
+# functions resolves correctly.
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "cluster_creation")
 
 
 def _make_event(scheduler_version=None):

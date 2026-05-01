@@ -7,31 +7,25 @@ field within the software_stack parameter, accepting supported versions and
 rejecting unsupported ones.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
-
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
-from templates import _validate_template_fields
-
-# Get ValidationError from the same module that templates.py actually uses.
-# Due to sys.modules caching across test files, the bare `errors` module may
-# resolve to cluster_operations/errors.py instead of template_management/errors.py.
-# We import it from templates' own globals to guarantee class identity match.
-import templates as _templates_mod
-ValidationError = _templates_mod.ValidationError
+_ensure_shared_modules()
+load_lambda_module("template_management", "errors")
+templates = load_lambda_module("template_management", "templates")
+_validate_template_fields = templates._validate_template_fields
+ValidationError = templates.ValidationError
 
 # Common valid arguments shared across all tests
 _VALID_KWARGS = {

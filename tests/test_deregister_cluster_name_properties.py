@@ -7,27 +7,20 @@
 in the item no longer existing in the table.
 """
 
-import os
-import sys
-
 import boto3
 import pytest
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 from moto import mock_aws
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+from conftest import load_lambda_module, _ensure_shared_modules
 
-for _d in [_SHARED_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
-import cluster_names  # noqa: E402
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+cluster_names = load_lambda_module("cluster_operations", "cluster_names")
 
 TABLE_NAME = "ClusterNameRegistry"
 

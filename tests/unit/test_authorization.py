@@ -6,27 +6,29 @@ various Cognito group claim formats, edge cases, and role combinations.
 Requirements: 1.3, 2.1, 2.2, 2.3, 2.4
 """
 
-import os
-import sys
-
 import pytest
 
-# Load the shared module directly from its file path.
-_SHARED_DIR = os.path.join(
-    os.path.dirname(__file__), "..", "..", "lambda", "shared",
-)
-sys.path.insert(0, _SHARED_DIR)
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-from authorization import (  # noqa: E402
-    get_caller_identity,
-    get_caller_groups,
-    is_administrator,
-    is_authenticated,
-    is_project_admin,
-    is_project_user,
-    get_admin_project_ids,
-    get_member_project_ids,
-)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+authorization = load_lambda_module("shared", "authorization")
+
+get_caller_identity = authorization.get_caller_identity
+get_caller_groups = authorization.get_caller_groups
+is_administrator = authorization.is_administrator
+is_authenticated = authorization.is_authenticated
+is_project_admin = authorization.is_project_admin
+is_project_user = authorization.is_project_user
+get_admin_project_ids = authorization.get_admin_project_ids
+get_member_project_ids = authorization.get_member_project_ids
 
 
 # ---------------------------------------------------------------------------

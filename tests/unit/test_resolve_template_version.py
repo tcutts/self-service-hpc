@@ -3,36 +3,29 @@
 **Validates: Requirements 2.1, 2.2, 3.5**
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — cluster_operations must come FIRST so its errors.py (which has
-# ConflictError) is found before template_management's errors.py.
-# We also need to evict any previously-cached 'errors' module so that
-# cluster_creation → cluster_names can import ConflictError correctly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+resolve_template = cluster_creation.resolve_template
 
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
-# Evict cached 'errors' module if it was loaded from template_management
-# (earlier test files may have imported it). cluster_creation's transitive
-# imports need the cluster_operations version which has ConflictError.
-import importlib
-if "errors" in sys.modules:
-    _errors_file = getattr(sys.modules["errors"], "__file__", "") or ""
-    if "template_management" in _errors_file:
-        del sys.modules["errors"]
-
-from cluster_creation import resolve_template
-from pcs_versions import DEFAULT_SLURM_VERSION
+pcs_versions = load_lambda_module("shared", "pcs_versions")
+DEFAULT_SLURM_VERSION = pcs_versions.DEFAULT_SLURM_VERSION
 
 
 def _make_template_record(template_id="test-tpl", software_stack=None):

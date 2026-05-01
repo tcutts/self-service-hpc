@@ -7,43 +7,41 @@ Tests cover:
 - deregister_cluster_name_step (2.9)
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from botocore.exceptions import ClientError
 
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
+MAX_EXPORT_RETRIES = cluster_destruction.MAX_EXPORT_RETRIES
+MAX_PCS_DELETION_RETRIES = cluster_destruction.MAX_PCS_DELETION_RETRIES
+_delete_pcs_node_group = cluster_destruction._delete_pcs_node_group
+_delete_pcs_queue = cluster_destruction._delete_pcs_queue
+_is_pcs_resource_deleted = cluster_destruction._is_pcs_resource_deleted
+check_fsx_export_status = cluster_destruction.check_fsx_export_status
+check_pcs_deletion_status = cluster_destruction.check_pcs_deletion_status
+delete_pcs_cluster_step = cluster_destruction.delete_pcs_cluster_step
+delete_pcs_resources = cluster_destruction.delete_pcs_resources
+deregister_cluster_name_step = cluster_destruction.deregister_cluster_name_step
+record_cluster_destruction_failed = cluster_destruction.record_cluster_destruction_failed
+cleanup_scheduler_log_delivery = cluster_destruction.cleanup_scheduler_log_delivery
+consolidated_cleanup = cluster_destruction.consolidated_cleanup
 
-# Clear cached modules to ensure correct imports
-for _mod in ["errors", "cluster_names", "cluster_destruction"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_destruction  # noqa: E402
-from cluster_destruction import (  # noqa: E402
-    MAX_EXPORT_RETRIES,
-    MAX_PCS_DELETION_RETRIES,
-    _delete_pcs_node_group,
-    _delete_pcs_queue,
-    _is_pcs_resource_deleted,
-    check_fsx_export_status,
-    check_pcs_deletion_status,
-    delete_pcs_cluster_step,
-    delete_pcs_resources,
-    deregister_cluster_name_step,
-    record_cluster_destruction_failed,
-)
-from errors import InternalError  # noqa: E402
+InternalError = errors.InternalError
 
 
 # ---------------------------------------------------------------------------

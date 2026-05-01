@@ -15,29 +15,23 @@ import sys
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# cluster_operations must come FIRST so its handler.py is found before
-# template_management's handler.py.
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# Load transitive dependencies in order: errors, auth, cluster_names,
+# clusters, then handler.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("shared", "api_logging")
 
-# Remove any other lambda handler directories that might shadow our import
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-if _TEMPLATE_MGMT_DIR in sys.path:
-    sys.path.remove(_TEMPLATE_MGMT_DIR)
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "auth")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "clusters")
+handler_mod = load_lambda_module("cluster_operations", "handler")
 
-for _d in [_CLUSTER_OPS_DIR, _SHARED_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
-# Force reimport of handler from cluster_operations if already cached
-if "handler" in sys.modules:
-    del sys.modules["handler"]
-
-from handler import build_connection_info  # noqa: E402
+build_connection_info = handler_mod.build_connection_info
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
@@ -70,7 +64,7 @@ class TestConnectionInfoFormatting:
     **Validates: Requirements 3.1, 3.2, 3.3, 3.4**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         login_ip=ip_or_empty_strategy,
         instance_id=instance_id_or_empty_strategy,

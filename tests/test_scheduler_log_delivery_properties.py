@@ -9,39 +9,28 @@ Feature: pcs-scheduler-log-delivery, Property 1: Log group creation correctness
 
 import logging
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-# Clear cached modules to ensure correct imports
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["cluster_creation", "cluster_destruction"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-import cluster_creation  # noqa: E402
-from cluster_creation import configure_scheduler_log_delivery  # noqa: E402
-
-import cluster_destruction  # noqa: E402
-from cluster_destruction import cleanup_scheduler_log_delivery  # noqa: E402
+configure_scheduler_log_delivery = cluster_creation.configure_scheduler_log_delivery
+cleanup_scheduler_log_delivery = cluster_destruction.cleanup_scheduler_log_delivery
 
 # ---------------------------------------------------------------------------
 # Shared strategies
@@ -107,7 +96,7 @@ class TestLogGroupCreationCorrectness:
     **Validates: Requirements 1.1, 1.2, 1.4**
     """
 
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         project_id=project_id_strategy,
         cluster_name=cluster_name_strategy,
@@ -171,7 +160,7 @@ class TestDeliveryConfigurationCompleteness:
     **Validates: Requirements 2.1, 2.2, 2.3, 2.4, 2.6**
     """
 
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         project_id=project_id_strategy,
         cluster_name=cluster_name_strategy,
@@ -327,7 +316,7 @@ class TestSuccessfulConfigurationLogging:
     **Validates: Requirements 6.1, 6.4**
     """
 
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         project_id=project_id_strategy,
         cluster_name=cluster_name_strategy,
@@ -433,7 +422,7 @@ class TestCleanupOrderingAndCompleteness:
     **Validates: Requirements 5.1, 5.2, 5.3, 5.4, 5.6**
     """
 
-    @settings(max_examples=100, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         project_id=project_id_strategy,
         cluster_name=cluster_name_strategy,

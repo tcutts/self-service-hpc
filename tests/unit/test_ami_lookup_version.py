@@ -7,26 +7,29 @@ to its OS prefix in the AMI name filter, rejects unsupported versions,
 and defaults to DEFAULT_SLURM_VERSION.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-# ---------------------------------------------------------------------------
-# Path setup — same pattern as test_bug_condition_slurm_version.py
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+errors = load_lambda_module("template_management", "errors")
+ValidationError = errors.ValidationError
 
-from ami_lookup import get_latest_pcs_ami
-from errors import ValidationError
-from pcs_versions import DEFAULT_SLURM_VERSION
+ami_lookup = load_lambda_module("template_management", "ami_lookup")
+get_latest_pcs_ami = ami_lookup.get_latest_pcs_ami
+
+pcs_versions = load_lambda_module("shared", "pcs_versions")
+DEFAULT_SLURM_VERSION = pcs_versions.DEFAULT_SLURM_VERSION
 
 
 def _make_ec2_mock(os_prefix: str, arch: str, version: str) -> MagicMock:

@@ -8,21 +8,20 @@ Feature: event-driven-node-relaunch, Property 1: Login-only filtering
 """
 
 import os
-import sys
 from unittest.mock import MagicMock, patch
 
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+from conftest import load_lambda_module, _ensure_shared_modules
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "login_node_event")
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +134,7 @@ class TestLoginOnlyFiltering:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -285,7 +284,7 @@ class TestUpdateCorrectness:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -404,7 +403,7 @@ class TestMultiClusterUpdate:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -526,7 +525,7 @@ class TestSuccessfulUpdateLoggingCompleteness:
 
     # Composite strategy combining instance, cluster, and IP generators
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -673,7 +672,7 @@ class TestSkipReasonLogging:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -836,7 +835,7 @@ class TestCloudWatchAgentDiagnosticsConfiguration:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )

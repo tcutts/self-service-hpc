@@ -1,32 +1,18 @@
 """Boundary value unit tests for determine_controller_size."""
 
-import os
-import sys
-
 import pytest
 
+from conftest import load_lambda_module, _ensure_shared_modules
+
 # ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+_ensure_shared_modules()
+errors = load_lambda_module("cluster_operations", "errors")
+pcs_sizing = load_lambda_module("cluster_operations", "pcs_sizing")
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-
-_cached_errors = sys.modules.get("errors")
-if _cached_errors is not None:
-    _errors_file = getattr(_cached_errors, "__file__", "") or ""
-    if "cluster_operations" not in _errors_file:
-        del sys.modules["errors"]
-
-for _mod in ["pcs_sizing"]:
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-from errors import ValidationError  # noqa: E402
-from pcs_sizing import determine_controller_size  # noqa: E402
+ValidationError = errors.ValidationError
+determine_controller_size = pcs_sizing.determine_controller_size
 
 
 class TestDetermineControllerSizeBoundaries:

@@ -12,28 +12,32 @@ create_pcs_cluster() SHALL use that version in the PCS scheduler config,
 and get_latest_pcs_ami() SHALL use the correct OS prefix for that version.
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from hypothesis import given, settings
 from hypothesis.strategies import sampled_from
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# cluster_operations must come FIRST so its errors.py (which has ConflictError)
-# is found before template_management's errors.py.
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+import importlib.util, os
+_spec = importlib.util.spec_from_file_location(
+    "tests_conftest", os.path.join(os.path.dirname(__file__), "..", "conftest.py"))
+_tc = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(_tc)
+load_lambda_module = _tc.load_lambda_module
+_ensure_shared_modules = _tc._ensure_shared_modules
 
-# Order matters: cluster_operations first (has ConflictError in errors.py)
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "tagging")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "cluster_creation")
+load_lambda_module("template_management", "errors")
+load_lambda_module("template_management", "ami_lookup")
+load_lambda_module("template_management", "templates")
 
 # Expected version-to-OS mapping (the correct behavior we want after fix)
 EXPECTED_VERSION_OS_MAP = {

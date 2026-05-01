@@ -12,23 +12,19 @@ Tests cover:
 - _validate_template_fields() skips login_ami_id validation when empty
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
-
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_TEMPLATE_MGMT_DIR = os.path.join(_LAMBDA_DIR, "template_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
-
-for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
-
 from botocore.exceptions import ClientError
 
-import templates  # noqa: E402
+from conftest import load_lambda_module, _ensure_shared_modules
+
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("template_management", "errors")
+templates = load_lambda_module("template_management", "templates")
 ValidationError = templates.ValidationError
 
 

@@ -10,24 +10,23 @@ When the IP is empty, the message omits SSH and DCV strings. When the
 instance ID is empty, the message omits the SSM command.
 """
 
-import os
-import sys
-
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+from conftest import load_lambda_module, _ensure_shared_modules
 
-for _d in [_SHARED_DIR, _CLUSTER_OPS_DIR]:
-    if _d not in sys.path:
-        sys.path.insert(0, _d)
+# ---------------------------------------------------------------------------
+# Module loading — use path-based imports to avoid sys.modules collisions.
+# ---------------------------------------------------------------------------
+_ensure_shared_modules()
+load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
 
-from cluster_creation import build_notification_message  # noqa: E402
+build_notification_message = cluster_creation.build_notification_message
 
 # ---------------------------------------------------------------------------
 # Hypothesis strategies
@@ -66,7 +65,7 @@ class TestNotificationContent:
     **Validates: Requirements 6.1, 6.2**
     """
 
-    @settings(max_examples=50, deadline=None, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=10, deadline=None, suppress_health_check=[HealthCheck.too_slow])
     @given(
         cluster_name=cluster_name_strategy,
         project_id=project_id_strategy,

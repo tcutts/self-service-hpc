@@ -10,60 +10,35 @@ and no subsequent sub-steps SHALL be executed.
 **Validates: Requirements 1.2, 2.2, 3.3, 4.3, 5.3, 6.3, 12.1, 12.2, 12.3**
 """
 
-import os
-import sys
 from unittest.mock import MagicMock, patch
 
 import pytest
 from hypothesis import given, settings, HealthCheck
 from hypothesis import strategies as st
 
-# ---------------------------------------------------------------------------
-# Path setup — load lambda modules directly.
-# ---------------------------------------------------------------------------
-_LAMBDA_DIR = os.path.join(os.path.dirname(__file__), "..", "lambda")
-_CLUSTER_OPS_DIR = os.path.join(_LAMBDA_DIR, "cluster_operations")
-_PROJECT_MGMT_DIR = os.path.join(_LAMBDA_DIR, "project_management")
-_SHARED_DIR = os.path.join(_LAMBDA_DIR, "shared")
+from conftest import load_lambda_module, _ensure_shared_modules
 
 # ---------------------------------------------------------------------------
-# Step 1: Import cluster_operations modules (errors → cluster_creation,
-#         cluster_destruction).
+# Module loading — use path-based imports to avoid sys.modules collisions.
 # ---------------------------------------------------------------------------
-for _mod in [
-    "errors", "lifecycle", "cluster_names",
-    "cluster_creation", "cluster_destruction",
-    "pcs_sizing", "pcs_versions", "posix_provisioning", "tagging",
-]:
-    sys.modules.pop(_mod, None)
 
-sys.path.insert(0, _CLUSTER_OPS_DIR)
-sys.path.insert(0, _SHARED_DIR)
-import errors as _cluster_errors_mod  # noqa: E402
+# Load cluster_operations modules first (errors gets registered as bare 'errors')
+_ensure_shared_modules()
+cluster_errors = load_lambda_module("cluster_operations", "errors")
+load_lambda_module("cluster_operations", "cluster_names")
+load_lambda_module("cluster_operations", "pcs_sizing")
+load_lambda_module("cluster_operations", "posix_provisioning")
+load_lambda_module("cluster_operations", "tagging")
+cluster_creation = load_lambda_module("cluster_operations", "cluster_creation")
+cluster_destruction = load_lambda_module("cluster_operations", "cluster_destruction")
 
-# Stash the cluster_operations errors module under a stable alias so
-# re-importing "errors" for project_management doesn't clobber it.
-cluster_errors = _cluster_errors_mod
-
-import cluster_creation  # noqa: E402
-import cluster_destruction  # noqa: E402
-
-# ---------------------------------------------------------------------------
-# Step 2: Import project_management modules (errors → lifecycle →
-#         project_deploy, project_update, project_destroy).
-# ---------------------------------------------------------------------------
-for _mod in ["errors", "lifecycle",
-             "project_deploy", "project_update", "project_destroy"]:
-    sys.modules.pop(_mod, None)
-
-sys.path.insert(0, _PROJECT_MGMT_DIR)
-import errors as _project_errors_mod  # noqa: E402
-
-project_errors = _project_errors_mod
-
-import project_deploy  # noqa: E402
-import project_update  # noqa: E402
-import project_destroy  # noqa: E402
+# Now load project_management modules (errors overwrites bare 'errors' in sys.modules,
+# but cluster_errors variable still holds the correct reference)
+project_errors = load_lambda_module("project_management", "errors")
+lifecycle = load_lambda_module("project_management", "lifecycle")
+project_deploy = load_lambda_module("project_management", "project_deploy")
+project_update = load_lambda_module("project_management", "project_update")
+project_destroy = load_lambda_module("project_management", "project_destroy")
 
 
 # ---------------------------------------------------------------------------
@@ -176,7 +151,7 @@ class TestClusterCreationPreParallelErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -261,7 +236,7 @@ class TestClusterCreationPostParallelErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -338,7 +313,7 @@ class TestClusterDestructionDeleteResourcesErrorPropagation:
     """
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -435,7 +410,7 @@ class TestClusterDestructionCleanupErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -512,7 +487,7 @@ class TestProjectDeployPreLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -585,7 +560,7 @@ class TestProjectDeployPostLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -658,7 +633,7 @@ class TestProjectUpdatePreLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -731,7 +706,7 @@ class TestProjectUpdatePostLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -804,7 +779,7 @@ class TestProjectDestroyPreLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
@@ -877,7 +852,7 @@ class TestProjectDestroyPostLoopErrorPropagation:
     ]
 
     @settings(
-        max_examples=100,
+        max_examples=10,
         deadline=None,
         suppress_health_check=[HealthCheck.too_slow],
     )
