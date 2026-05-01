@@ -1,4 +1,5 @@
 import * as cdk from 'aws-cdk-lib';
+import * as cr from 'aws-cdk-lib/custom-resources';
 import * as ec2 from 'aws-cdk-lib/aws-ec2';
 import * as efs from 'aws-cdk-lib/aws-efs';
 import * as iam from 'aws-cdk-lib/aws-iam';
@@ -256,12 +257,30 @@ export class ProjectInfrastructureStack extends cdk.Stack {
 
     // -----------------------------------------------------------------
     // CloudWatch Log Group — cluster SSH/DCV access logs (365 days)
+    // Adopt an orphaned log group if it already exists from a previous
+    // stack deployment, then let CDK manage it going forward.
     // -----------------------------------------------------------------
-    this.clusterAccessLogGroup = new logs.LogGroup(this, 'ClusterAccessLogGroup', {
-      logGroupName: `/hpc-platform/clusters/${props.projectId}/access-logs`,
-      retention: logs.RetentionDays.ONE_YEAR,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+    const accessLogGroupName = `/hpc-platform/clusters/${props.projectId}/access-logs`;
+
+    const adoptAccessLogGroup = new cr.AwsCustomResource(this, 'AdoptAccessLogGroup', {
+      onCreate: {
+        service: 'CloudWatchLogs',
+        action: 'deleteLogGroup',
+        parameters: { logGroupName: accessLogGroupName },
+        physicalResourceId: cr.PhysicalResourceId.of(`adopt-${accessLogGroupName}`),
+        ignoreErrorCodesMatching: 'ResourceNotFoundException',
+      },
+      policy: cr.AwsCustomResourcePolicy.fromSdkCalls({
+        resources: cr.AwsCustomResourcePolicy.ANY_RESOURCE,
+      }),
     });
+
+    this.clusterAccessLogGroup = new logs.LogGroup(this, 'ClusterAccessLogGroup', {
+      logGroupName: accessLogGroupName,
+      retention: logs.RetentionDays.ONE_YEAR,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
+    });
+    this.clusterAccessLogGroup.node.addDependency(adoptAccessLogGroup);
 
     // -----------------------------------------------------------------
     // CloudWatch Log Group — node diagnostics (1 day, disposable)

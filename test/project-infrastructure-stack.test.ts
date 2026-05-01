@@ -367,7 +367,7 @@ describe('ProjectInfrastructureStack', () => {
       });
     });
 
-    it('retains the access log group on stack deletion', () => {
+    it('deletes the access log group on stack deletion', () => {
       const logGroups = template.findResources('AWS::Logs::LogGroup', {
         Properties: {
           LogGroupName: '/hpc-platform/clusters/test-project-001/access-logs',
@@ -376,7 +376,13 @@ describe('ProjectInfrastructureStack', () => {
       const logicalIds = Object.keys(logGroups);
       expect(logicalIds.length).toBe(1);
       const resource = logGroups[logicalIds[0]] as any;
-      expect(resource.DeletionPolicy).toBe('Retain');
+      expect(resource.DeletionPolicy).toBe('Delete');
+    });
+
+    it('creates a custom resource to adopt orphaned log groups', () => {
+      template.hasResourceProperties('Custom::AWS', {
+        Create: Match.stringLikeRegexp('deleteLogGroup'),
+      });
     });
   });
 

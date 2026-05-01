@@ -16,7 +16,7 @@ export class CognitoAuth extends Construct {
     this.userPool = new cognito.UserPool(this, 'HpcUserPool', {
       userPoolName: 'hpc-platform-users',
       selfSignUpEnabled: false,
-      signInAliases: { email: true },
+      signInAliases: { username: true },
       autoVerify: { email: true },
       standardAttributes: {
         email: { required: true, mutable: true },

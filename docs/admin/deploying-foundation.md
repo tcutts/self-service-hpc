@@ -71,17 +71,18 @@ npx cdk bootstrap --profile $AWS_PROFILE
 
 ### 5. Deploy the Foundation Stack
 
-Use the Makefile for a single-command deployment:
+Deploy the foundation stack with the `adminEmail` context parameter to automatically provision the first administrator:
 
 ```bash
-make deploy
+npx cdk deploy HpcFoundationStack \
+  -c adminEmail=ops@company.com \
+  --require-approval never \
+  --profile $AWS_PROFILE
 ```
 
-Or deploy manually:
+The `adminEmail` parameter is **optional but recommended** on first deployment. When provided, the stack automatically creates an initial admin user with a temporary password. If omitted, the stack deploys normally without an admin user — you can create one manually afterwards (see [Manual Alternative](#manual-alternative) below).
 
-```bash
-npx cdk deploy HpcFoundationStack --require-approval never --profile $AWS_PROFILE
-```
+> **Note:** `make deploy` does not pass CDK context parameters. Use the `cdk deploy` command directly as shown above when you need to supply `adminEmail`.
 
 The deployment takes approximately 5–10 minutes. CDK outputs the following values on completion:
 
@@ -89,6 +90,8 @@ The deployment takes approximately 5–10 minutes. CDK outputs the following val
 - **Cognito User Pool ID** — used for authentication configuration
 - **Cognito User Pool Client ID** — used by the web portal
 - **CloudFront Distribution URL** — the URL for the web portal and documentation
+- **AdminUserName** — the username of the provisioned admin (only when `adminEmail` is provided and no admin exists)
+- **AdminUserPassword** — the temporary password for the admin (only when `adminEmail` is provided and no admin exists)
 
 ### 6. Verify the Deployment
 
@@ -104,32 +107,93 @@ Access the documentation at `https://<cloudfront-url>/docs/index.html`.
 
 ## Post-Deployment Configuration
 
-### Create the First Administrator
+### Admin User Provisioning
 
-After deployment, create an initial administrator user through the AWS Console:
+When the `adminEmail` CDK context parameter is provided during deployment, the Foundation stack automatically provisions an admin user via a CloudFormation custom resource. If `adminEmail` is not provided, the provisioner is not created and the stack deploys without an admin user.
 
-1. Open the **Amazon Cognito** console.
-2. Navigate to the `hpc-platform-users` User Pool.
-3. Create a user with a valid email address.
-4. Add the user to the `Administrators` group.
+**What happens when `adminEmail` is provided:**
 
-Alternatively, use the AWS CLI:
+1. The provisioner scans the PlatformUsers DynamoDB table for any existing user with the `Administrator` role.
+2. If an administrator already exists, the provisioner completes with no changes.
+3. If no administrator is found, the provisioner creates a default `admin` user in both Cognito and DynamoDB with a securely generated temporary password.
+
+**Retrieving the temporary password:**
+
+The admin username and temporary password are available in the CloudFormation stack outputs after deployment. Retrieve them with the AWS CLI:
+
+```bash
+aws cloudformation describe-stacks \
+  --stack-name HpcFoundationStack \
+  --query "Stacks[0].Outputs" \
+  --output table \
+  --profile $AWS_PROFILE
+```
+
+To retrieve only the temporary password:
+
+```bash
+QUERY="Stacks[0].Outputs"
+QUERY+="[?OutputKey=='AdminUserPassword']"
+QUERY+=".OutputValue"
+aws cloudformation describe-stacks \
+  --stack-name HpcFoundationStack \
+  --query "$QUERY" --output text \
+  --profile $AWS_PROFILE
+```
+
+**First login flow:**
+
+1. Open the web portal at the CloudFront distribution URL.
+2. Log in with username `admin` and the temporary password from the stack outputs.
+3. You will be prompted to set a new password (the account is in `FORCE_CHANGE_PASSWORD` state).
+4. After resetting the password, you have full administrator access to the platform.
+
+**Idempotent behaviour:**
+
+Redeployments are safe. If an administrator already exists in the PlatformUsers table, the provisioner skips creation entirely. Running `make deploy` or `cdk deploy` multiple times will not:
+
+- Create duplicate admin accounts
+- Regenerate or overwrite the temporary password
+- Modify any existing user records
+
+**Security considerations:**
+
+The provisioner is designed to prevent abuse through stack updates:
+
+| Concern | Mitigation |
+|---------|------------|
+| Changing `adminEmail` to create a second admin | The provisioner checks for any existing administrator by role, not by email or userId. If one exists, creation is skipped. |
+| Resetting admin credentials via stack update | The provisioner never modifies existing Cognito users or DynamoDB records. |
+| Extracting new credentials from stack outputs | When an admin already exists, the stack outputs are empty. |
+| Overwriting the `USER#admin` DynamoDB record | A `attribute_not_exists(PK)` condition on all writes prevents overwrites. |
+
+#### Manual Alternative
+
+If `adminEmail` is not provided during deployment, create the first administrator manually through the AWS Console or CLI:
+
+1. Open the **Amazon Cognito** console and navigate to the `hpc-platform-users` User Pool.
+2. Create a user with a valid email address.
+3. Add the user to the `Administrators` group.
+
+Or use the AWS CLI:
 
 ```bash
 # Create the user
 aws cognito-idp admin-create-user \
   --user-pool-id <user-pool-id> \
-  --username admin@example.com \
+  --username admin \
   --user-attributes Name=email,Value=admin@example.com \
   --profile $AWS_PROFILE
 
 # Add to Administrators group
 aws cognito-idp admin-add-user-to-group \
   --user-pool-id <user-pool-id> \
-  --username admin@example.com \
+  --username admin \
   --group-name Administrators \
   --profile $AWS_PROFILE
 ```
+
+You will also need to create the corresponding DynamoDB record in the PlatformUsers table. The automated provisioner handles this automatically — using it via `adminEmail` is the recommended approach.
 
 Once the first administrator exists, all subsequent user management can be done through the platform API.
 

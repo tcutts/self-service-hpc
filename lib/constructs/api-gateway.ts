@@ -30,7 +30,7 @@ export class ApiGateway extends Construct {
     const apiAccessLogGroup = new logs.LogGroup(this, 'ApiAccessLogGroup', {
       logGroupName: '/hpc-platform/api-gateway/access-logs',
       retention: USER_ACCESS_LOG_RETENTION_DAYS,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     this.api = new apigateway.RestApi(this, 'HpcPlatformApi', {
@@ -91,7 +91,7 @@ export class ApiGateway extends Construct {
     new logs.LogGroup(this, 'LambdaInfraLogGroup', {
       logGroupName: '/hpc-platform/lambda/infrastructure',
       retention: INFRASTRUCTURE_LOG_RETENTION_DAYS,
-      removalPolicy: cdk.RemovalPolicy.RETAIN,
+      removalPolicy: cdk.RemovalPolicy.DESTROY,
     });
 
     // Shared Lambda Layer (api_logging and common utilities)

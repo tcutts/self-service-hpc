@@ -198,10 +198,9 @@ describe('FoundationStack', () => {
   // Validates: Requirement 16.1
   // ---------------------------------------------------------------------------
   describe('Cognito', () => {
-    it('creates a User Pool with email sign-in', () => {
+    it('creates a User Pool with username sign-in', () => {
       template.hasResourceProperties('AWS::Cognito::UserPool', {
         UserPoolName: 'hpc-platform-users',
-        UsernameAttributes: ['email'],
         AutoVerifiedAttributes: ['email'],
       });
     });

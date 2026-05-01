@@ -24,6 +24,7 @@ import { ClusterOperations } from './constructs/cluster-operations';
 import { CdkDeployProject } from './constructs/cdk-deploy-project';
 import { ProjectLifecycle } from './constructs/project-lifecycle';
 import { PlatformOperations } from './constructs/platform-operations';
+import { AdminProvisioner } from './constructs/admin-provisioner';
 import { WebPortal } from './constructs/web-portal';
 
 /**
@@ -101,6 +102,16 @@ export class FoundationStack extends cdk.Stack {
 
     // 2. DatabaseTables — no dependencies
     const databaseTables = new DatabaseTables(this, 'DatabaseTables');
+
+    // 2b. AdminProvisioner — depends on CognitoAuth, DatabaseTables
+    const adminEmail = this.node.tryGetContext('adminEmail');
+    if (adminEmail) {
+      new AdminProvisioner(this, 'AdminProvisioner', {
+        platformUsersTable: databaseTables.platformUsersTable,
+        userPool: cognitoAuth.userPool,
+        adminEmail,
+      });
+    }
 
     // 3. ApiGateway — depends on CognitoAuth
     const apiGateway = new ApiGateway(this, 'ApiGateway', {

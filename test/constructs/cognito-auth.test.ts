@@ -24,9 +24,8 @@ describe('CognitoAuth', () => {
     template.resourceCountIs('AWS::Cognito::UserPoolGroup', 1);
   });
 
-  it('configures email sign-in', () => {
+  it('configures username sign-in with email auto-verified', () => {
     template.hasResourceProperties('AWS::Cognito::UserPool', {
-      UsernameAttributes: ['email'],
       AutoVerifiedAttributes: ['email'],
     });
   });

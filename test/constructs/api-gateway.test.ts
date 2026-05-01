@@ -67,11 +67,11 @@ describe('ApiGateway', () => {
     });
   });
 
-  it('sets RETAIN removal policy on log groups', () => {
+  it('sets DELETE removal policy on log groups', () => {
     const logGroups = template.findResources('AWS::Logs::LogGroup');
     for (const [, resource] of Object.entries(logGroups)) {
-      expect((resource as any).DeletionPolicy).toBe('Retain');
-      expect((resource as any).UpdateReplacePolicy).toBe('Retain');
+      expect((resource as any).DeletionPolicy).toBe('Delete');
+      expect((resource as any).UpdateReplacePolicy).toBe('Delete');
     }
   });
 
