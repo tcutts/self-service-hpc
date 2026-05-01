@@ -1787,6 +1787,8 @@ function renderClustersPage(container, params) {
   document.getElementById('btn-create-cluster').addEventListener('click', async () => {
     const pid = document.getElementById('cluster-project-id').value.trim();
     if (!pid) return showToast('Enter a project ID first', 'error');
+    const btn = document.getElementById('btn-create-cluster');
+    if (btn.disabled) return;
     document.getElementById('create-cluster-form').style.display = 'block';
     // Load templates into the dropdown
     try {
@@ -1910,7 +1912,24 @@ async function loadClusters(projectId) {
       apiCall('GET', `/projects/${encodeURIComponent(projectId)}/clusters`),
     ]);
     const budgetBreached = !!projectData.budgetBreached;
+    const projectStatus = projectData.status || '';
+    const projectNotDeployed = projectStatus !== 'ACTIVE' && projectStatus !== 'UPDATING';
     const clusters = data.clusters || [];
+
+    // Disable the Create Cluster button if the project hasn't been deployed yet
+    const createBtn = document.getElementById('btn-create-cluster');
+    if (createBtn) {
+      if (projectNotDeployed) {
+        createBtn.disabled = true;
+        createBtn.title = 'Project must be deployed before clusters can be created (current status: ' + projectStatus + ')';
+      } else if (budgetBreached) {
+        createBtn.disabled = true;
+        createBtn.title = 'Budget has been breached — cluster creation is disabled';
+      } else {
+        createBtn.disabled = false;
+        createBtn.title = '';
+      }
+    }
 
     const clustersTableConfig = {
       columns: [
