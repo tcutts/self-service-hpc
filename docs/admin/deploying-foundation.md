@@ -9,13 +9,13 @@ Before deploying, ensure the following are installed and configured:
 - **Node.js** (v18 or later) and **npm**
 - **Python 3.13** and **pip**
 - **AWS CDK CLI** (`npm install -g aws-cdk`)
-- **AWS CLI** configured with the `thecutts` profile
+- **AWS CLI** configured with your AWS profile (set in `Makefile` as `AWS_PROFILE`)
 - **Git** for cloning the repository
 
 Verify your AWS credentials:
 
 ```bash
-aws sts get-caller-identity --profile thecutts
+aws sts get-caller-identity --profile $AWS_PROFILE
 ```
 
 ## What the Foundation Stack Deploys
@@ -66,7 +66,7 @@ npm run build
 If this is the first CDK deployment in the target AWS account and region:
 
 ```bash
-npx cdk bootstrap --profile thecutts
+npx cdk bootstrap --profile $AWS_PROFILE
 ```
 
 ### 5. Deploy the Foundation Stack
@@ -80,7 +80,7 @@ make deploy
 Or deploy manually:
 
 ```bash
-npx cdk deploy HpcFoundationStack --require-approval never --profile thecutts
+npx cdk deploy HpcFoundationStack --require-approval never --profile $AWS_PROFILE
 ```
 
 The deployment takes approximately 5–10 minutes. CDK outputs the following values on completion:
@@ -121,14 +121,14 @@ aws cognito-idp admin-create-user \
   --user-pool-id <user-pool-id> \
   --username admin@example.com \
   --user-attributes Name=email,Value=admin@example.com \
-  --profile thecutts
+  --profile $AWS_PROFILE
 
 # Add to Administrators group
 aws cognito-idp admin-add-user-to-group \
   --user-pool-id <user-pool-id> \
   --username admin@example.com \
   --group-name Administrators \
-  --profile thecutts
+  --profile $AWS_PROFILE
 ```
 
 Once the first administrator exists, all subsequent user management can be done through the platform API.
@@ -173,7 +173,7 @@ Note: DynamoDB tables and the Cognito User Pool have `RemovalPolicy.RETAIN`, so 
 
 | Issue | Resolution |
 |-------|-----------|
-| `CDK bootstrap required` | Run `npx cdk bootstrap --profile thecutts` |
+| `CDK bootstrap required` | Run `npx cdk bootstrap --profile $AWS_PROFILE` |
 | `Stack is in ROLLBACK_COMPLETE` | Delete the failed stack in CloudFormation console, then redeploy |
 | API returns 403 | Verify the Cognito token is valid and the user is in the correct group |
 | CloudFront returns 403 | Check that the S3 bucket policy allows CloudFront OAI access |

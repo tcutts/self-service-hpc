@@ -13,7 +13,7 @@
 SHELL       := /bin/bash
 .DEFAULT_GOAL := help
 
-AWS_PROFILE := thecutts
+AWS_PROFILE := pcs-test
 VENV_DIR    := .venv
 PYTHON      := $(VENV_DIR)/bin/python
 PIP         := $(VENV_DIR)/bin/pip
@@ -55,6 +55,14 @@ synth: build .venv/.installed ## Synthesise CloudFormation templates
 test: build .venv/.installed ## Run CDK (jest) and Python (pytest) tests
 	npm test
 	$(PYTEST) test/lambda/ -v
+
+# ---------------------------------------------------------------------------
+# Bootstrap (first-time CDK setup)
+# ---------------------------------------------------------------------------
+
+.PHONY: bootstrap
+bootstrap: node_modules/.installed ## Bootstrap CDK in the target AWS account/region
+	npx cdk bootstrap --profile $(AWS_PROFILE)
 
 # ---------------------------------------------------------------------------
 # Deployment

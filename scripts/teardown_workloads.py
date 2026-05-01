@@ -5,7 +5,7 @@ Destroys all clusters and projects while retaining the foundation
 infrastructure (Cognito, DynamoDB tables, API Gateway, CloudFront).
 
 Usage:
-    python scripts/teardown_workloads.py --profile thecutts
+    python scripts/teardown_workloads.py --profile <your-profile>
 
 Steps:
     1. Scan Clusters table for ACTIVE/CREATING clusters and destroy them
@@ -365,8 +365,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--profile",
-        default="thecutts",
-        help="AWS CLI profile to use (default: thecutts)",
+        required=True,
+        help="AWS CLI profile to use",
     )
     args = parser.parse_args()
 

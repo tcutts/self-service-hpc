@@ -88,13 +88,13 @@ Upload data to the project S3 bucket before or after creating a cluster:
 
 ```bash
 # Upload a file
-aws s3 cp my-dataset.tar.gz s3://hpc-project-genomics-team-data/ --profile thecutts
+aws s3 cp my-dataset.tar.gz s3://hpc-project-genomics-team-data/ --profile $AWS_PROFILE
 
 # Upload a directory
-aws s3 sync ./input-data/ s3://hpc-project-genomics-team-data/input-data/ --profile thecutts
+aws s3 sync ./input-data/ s3://hpc-project-genomics-team-data/input-data/ --profile $AWS_PROFILE
 
 # List bucket contents
-aws s3 ls s3://hpc-project-genomics-team-data/ --profile thecutts
+aws s3 ls s3://hpc-project-genomics-team-data/ --profile $AWS_PROFILE
 ```
 
 ### Accessing Data on a Cluster
@@ -121,10 +121,10 @@ After a cluster is destroyed and data has been exported:
 
 ```bash
 # Download results
-aws s3 cp s3://hpc-project-genomics-team-data/output/results.dat ./results.dat --profile thecutts
+aws s3 cp s3://hpc-project-genomics-team-data/output/results.dat ./results.dat --profile $AWS_PROFILE
 
 # Download a directory
-aws s3 sync s3://hpc-project-genomics-team-data/output/ ./output/ --profile thecutts
+aws s3 sync s3://hpc-project-genomics-team-data/output/ ./output/ --profile $AWS_PROFILE
 ```
 
 ## Data Flow Diagram
