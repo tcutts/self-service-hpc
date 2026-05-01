@@ -99,8 +99,8 @@ def _seed_creating_cluster(table, project_id, cluster_name, created_at=None):
         "projectId": project_id,
         "status": "CREATING",
         "currentStep": 6,
-        "totalSteps": 12,
-        "stepDescription": "Waiting for FSx",
+        "totalSteps": 13,
+        "stepDescription": "Provisioning infrastructure",
         "createdAt": created_at,
     })
 

@@ -946,6 +946,8 @@ def record_cluster_destruction_failed(event: dict[str, Any]) -> dict[str, Any]:
     Sets:
     - ``status`` → ``DESTRUCTION_FAILED``
     - ``destructionFailedAt`` → current UTC ISO 8601 timestamp
+    - ``errorMessage`` → the destruction error cause extracted from
+      the Step Functions error payload (``$.error.Cause``).
 
     Removes:
     - ``currentStep``, ``totalSteps``, ``stepDescription`` — progress
@@ -956,6 +958,10 @@ def record_cluster_destruction_failed(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
     now = datetime.now(timezone.utc).isoformat()
 
+    # Extract the destruction error from the Step Functions catch payload.
+    error_info = event.get("error", {})
+    error_message = error_info.get("Cause", error_info.get("Error", "Unknown destruction error"))
+
     table = dynamodb.Table(CLUSTERS_TABLE_NAME)
 
     try:
@@ -965,13 +971,15 @@ def record_cluster_destruction_failed(event: dict[str, Any]) -> dict[str, Any]:
                 "SK": f"CLUSTER#{cluster_name}",
             },
             UpdateExpression=(
-                "SET #s = :status, destructionFailedAt = :ts "
+                "SET #s = :status, destructionFailedAt = :ts, "
+                "errorMessage = :err "
                 "REMOVE currentStep, totalSteps, stepDescription"
             ),
             ExpressionAttributeNames={"#s": "status"},
             ExpressionAttributeValues={
                 ":status": "DESTRUCTION_FAILED",
                 ":ts": now,
+                ":err": error_message,
             },
         )
     except ClientError as exc:

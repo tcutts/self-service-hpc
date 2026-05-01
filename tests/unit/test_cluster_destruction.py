@@ -659,6 +659,39 @@ class TestRecordClusterDestructionFailed:
         assert call_kwargs["Key"]["SK"] == "CLUSTER#my-cluster"
         assert call_kwargs["ExpressionAttributeValues"][":status"] == "DESTRUCTION_FAILED"
 
+    def test_propagates_error_message_from_catch_payload(self):
+        """The destruction error cause is written to errorMessage in DynamoDB."""
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        event = {
+            **_base_event(),
+            "error": {
+                "Error": "AccessDeniedException",
+                "Cause": "logs:DescribeDeliveries not allowed",
+            },
+        }
+        with patch.object(cluster_destruction, "dynamodb", mock_dynamodb):
+            result = record_cluster_destruction_failed(event)
+
+        assert result["status"] == "DESTRUCTION_FAILED"
+        call_kwargs = mock_table.update_item.call_args[1]
+        assert call_kwargs["ExpressionAttributeValues"][":err"] == "logs:DescribeDeliveries not allowed"
+
+    def test_default_error_message_when_no_error_payload(self):
+        """When no error payload is present, a default message is stored."""
+        mock_table = MagicMock()
+        mock_dynamodb = MagicMock()
+        mock_dynamodb.Table.return_value = mock_table
+
+        event = _base_event()
+        with patch.object(cluster_destruction, "dynamodb", mock_dynamodb):
+            record_cluster_destruction_failed(event)
+
+        call_kwargs = mock_table.update_item.call_args[1]
+        assert call_kwargs["ExpressionAttributeValues"][":err"] == "Unknown destruction error"
+
     def test_raises_on_dynamodb_error(self):
         """DynamoDB ClientError → raises InternalError."""
         mock_table = MagicMock()

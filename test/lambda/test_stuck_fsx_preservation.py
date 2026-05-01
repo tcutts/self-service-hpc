@@ -109,7 +109,7 @@ def _seed_creating_cluster(table, project_id, cluster_name, created_at=None,
         "projectId": project_id,
         "status": "CREATING",
         "currentStep": current_step,
-        "totalSteps": 12,
+        "totalSteps": 13,
         "stepDescription": step_description,
         "createdAt": created_at,
     })
@@ -335,8 +335,8 @@ def test_creating_cluster_within_window_shows_progress(project_id, cluster_name,
         assert "totalSteps" in progress, "Missing 'totalSteps' in progress"
         assert "stepDescription" in progress, "Missing 'stepDescription' in progress"
         assert progress["currentStep"] == 6
-        assert progress["totalSteps"] == 12
-        assert progress["stepDescription"] == "Waiting for FSx"
+        assert progress["totalSteps"] == 13
+        assert progress["stepDescription"] == "Provisioning infrastructure"
 
 
 # ---------------------------------------------------------------------------

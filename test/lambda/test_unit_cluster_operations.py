@@ -1464,7 +1464,7 @@ class TestClusterCreationStartsSFN:
         assert item["createdBy"] == "proj-user"
         assert "createdAt" in item
         assert item["currentStep"] == 0
-        assert item["totalSteps"] == 12
+        assert item["totalSteps"] == 13
 
     def test_creation_calls_sfn_start_execution(self, _env):
         with patch.object(_env["handler_mod"], "sfn_client") as mock_sfn:
@@ -1787,7 +1787,7 @@ class TestStepProgressTracking:
 
         item = self._get_cluster_item(_env, "proj-progress", "progress-cl")
         assert item["currentStep"] == 1
-        assert item["totalSteps"] == 12
+        assert item["totalSteps"] == 13
         assert item["stepDescription"] == "Registering cluster name"
         assert item["status"] == "CREATING"
 
@@ -1798,20 +1798,20 @@ class TestStepProgressTracking:
 
         item = self._get_cluster_item(_env, "proj-progress", "progress-cl")
         assert item["currentStep"] == 2
-        assert item["totalSteps"] == 12
+        assert item["totalSteps"] == 13
         assert item["stepDescription"] == "Checking budget"
 
     def test_step_labels_are_defined_for_all_steps(self, _env):
-        """All 12 step labels are defined in STEP_LABELS."""
-        assert len(_env["creation_mod"].STEP_LABELS) == 12
-        for step_num in range(1, 13):
+        """All 13 step labels are defined in STEP_LABELS."""
+        assert len(_env["creation_mod"].STEP_LABELS) == 13
+        for step_num in range(1, 14):
             assert step_num in _env["creation_mod"].STEP_LABELS
             assert isinstance(_env["creation_mod"].STEP_LABELS[step_num], str)
             assert len(_env["creation_mod"].STEP_LABELS[step_num]) > 0
 
-    def test_total_steps_constant_is_12(self, _env):
-        """TOTAL_STEPS constant is 12."""
-        assert _env["creation_mod"].TOTAL_STEPS == 12
+    def test_total_steps_constant_is_13(self, _env):
+        """TOTAL_STEPS constant is 13."""
+        assert _env["creation_mod"].TOTAL_STEPS == 13
 
     def test_step_labels_match_expected_values(self, _env):
         """Step labels match the specification."""
@@ -1859,8 +1859,8 @@ class TestStepProgressTracking:
             _env["clusters_table"], "proj-progress", "creating-with-progress",
             status="CREATING",
             currentStep=5,
-            totalSteps=12,
-            stepDescription="Creating FSx filesystem",
+            totalSteps=13,
+            stepDescription="Provisioning infrastructure",
         )
         _seed_project(_env["projects_table"], "proj-progress", budget_breached=False)
 
@@ -1875,8 +1875,8 @@ class TestStepProgressTracking:
         assert body["status"] == "CREATING"
         assert "progress" in body
         assert body["progress"]["currentStep"] == 5
-        assert body["progress"]["totalSteps"] == 12
-        assert body["progress"]["stepDescription"] == "Creating FSx filesystem"
+        assert body["progress"]["totalSteps"] == 13
+        assert body["progress"]["stepDescription"] == "Provisioning infrastructure"
         # CREATING clusters should NOT have connectionInfo
         assert "connectionInfo" not in body
 

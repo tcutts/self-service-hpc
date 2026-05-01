@@ -91,8 +91,9 @@ Before creating a cluster, review the available templates:
 ### What Happens
 
 1. The cluster name is validated and checked against the global name registry.
-2. The project's budget status is checked — creation is blocked if the budget is breached.
-3. A Step Functions workflow is started to orchestrate the multi-step creation process:
+2. The project's deployment status is checked — creation is blocked if the project has not been deployed yet (status is not `ACTIVE`). The **Create Cluster** button is greyed out with a tooltip explaining that the project must be deployed first.
+3. The project's budget status is checked — creation is blocked if the budget is breached.
+4. A Step Functions workflow is started to orchestrate the multi-step creation process:
    - Register the cluster name in the global registry
    - Create dedicated IAM roles and instance profiles for the cluster (`AWSPCS-{projectId}-{clusterName}-login` and `AWSPCS-{projectId}-{clusterName}-compute`)
    - Wait for instance profiles to propagate in IAM

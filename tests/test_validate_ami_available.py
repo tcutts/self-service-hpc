@@ -28,7 +28,8 @@ for _d in [_SHARED_DIR, _TEMPLATE_MGMT_DIR]:
 
 from botocore.exceptions import ClientError
 
-from errors import ValidationError
+import templates  # noqa: E402
+ValidationError = templates.ValidationError
 
 
 # ---------------------------------------------------------------------------

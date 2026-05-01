@@ -115,21 +115,22 @@ _PCS_BASE_DELAY_SECONDS = 10
 # ---------------------------------------------------------------------------
 # Step progress tracking
 # ---------------------------------------------------------------------------
-TOTAL_STEPS = 12
+TOTAL_STEPS = 13
 
 STEP_LABELS: dict[int, str] = {
     1: "Registering cluster name",
     2: "Checking budget",
     3: "Creating IAM roles",
     4: "Waiting for instance profiles",
-    5: "Creating FSx filesystem",
-    6: "Waiting for FSx",
-    7: "Creating PCS cluster",
+    5: "Provisioning infrastructure",
+    6: "Provisioning infrastructure",
+    7: "Waiting for PCS cluster",
     8: "Creating login nodes",
     9: "Creating compute nodes",
-    10: "Creating queue",
-    11: "Tagging resources",
-    12: "Finalising",
+    10: "Waiting for node groups",
+    11: "Creating queue",
+    12: "Tagging resources",
+    13: "Finalising",
 }
 
 # ---------------------------------------------------------------------------
@@ -616,6 +617,9 @@ def create_launch_templates(event: dict[str, Any]) -> dict[str, Any]:
     security_group_ids: dict[str, str] = event["securityGroupIds"]
     ami_id: str = event.get("amiId", "")
 
+    # Write progress before executing step logic
+    _update_step_progress(project_id, cluster_name, 5)
+
     # The compute AMI is required — without it PCS rejects node group creation
     if not ami_id:
         raise ValidationError(
@@ -1049,6 +1053,10 @@ def check_pcs_cluster_status(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event.get("clusterName", "")
     project_id: str = event.get("projectId", "")
 
+    # Write progress before executing step logic
+    if project_id and cluster_name:
+        _update_step_progress(project_id, cluster_name, 7)
+
     # Track poll attempts to prevent infinite wait loops
     poll_count: int = event.get("pcsPollCount", 0) + 1
 
@@ -1394,6 +1402,11 @@ def check_node_groups_status(event: dict[str, Any]) -> dict[str, Any]:
     login_group_id: str = event.get("loginNodeGroupId", "")
     compute_group_id: str = event.get("computeNodeGroupId", "")
 
+    # Write progress before executing step logic
+    project_id = event.get("projectId", "")
+    if project_id and cluster_name:
+        _update_step_progress(project_id, cluster_name, 10)
+
     poll_count: int = event.get("nodeGroupPollCount", 0) + 1
 
     all_active = True
@@ -1543,7 +1556,7 @@ def create_pcs_queue(event: dict[str, Any]) -> dict[str, Any]:
     project_id: str = event["projectId"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 10)
+    _update_step_progress(project_id, cluster_name, 11)
     compute_node_group_id: str = event["computeNodeGroupId"]
 
     tags = tags_as_dict(project_id, cluster_name)
@@ -1586,7 +1599,7 @@ def tag_resources(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 11)
+    _update_step_progress(project_id, cluster_name, 12)
 
     tags = tags_as_dict(project_id, cluster_name)
 
@@ -1681,7 +1694,7 @@ def record_cluster(event: dict[str, Any]) -> dict[str, Any]:
     cluster_name: str = event["clusterName"]
 
     # Write progress before executing step logic
-    _update_step_progress(project_id, cluster_name, 12)
+    _update_step_progress(project_id, cluster_name, 13)
 
     now = datetime.now(timezone.utc).isoformat()
 
@@ -1832,6 +1845,19 @@ def handle_creation_failure(event: dict[str, Any]) -> dict[str, Any]:
         cleanup_results.append(
             _cleanup_fsx_filesystem(fsx_id)
         )
+
+    # 6b. Clean up delivery resources (sources, destinations, deliveries)
+    if cluster_name:
+        try:
+            _cleanup_stale_delivery_resources(cluster_name, project_id)
+            cleanup_results.append("delivery_resources:cleaned")
+        except Exception:
+            logger.warning(
+                "Failed to clean up delivery resources for '%s'",
+                cluster_name,
+                exc_info=True,
+            )
+            cleanup_results.append("delivery_resources:failed")
 
     # 7. Record FAILED status in DynamoDB
     if project_id and cluster_name:
@@ -2548,6 +2574,88 @@ def _create_scheduler_log_group(
     return log_group_name, log_group_arn
 
 
+def _cleanup_stale_delivery_resources(
+    cluster_name: str,
+    project_id: str,
+) -> None:
+    """Remove any existing delivery resources for this cluster.
+
+    When a previous creation attempt fails after creating delivery
+    sources/destinations, those resources reference a now-deleted PCS
+    cluster.  ``CreateDelivery`` will reject a stale source ARN, so
+    we must clean up before retrying.
+
+    Deletes in the required order: deliveries → destinations → sources.
+    ``ResourceNotFoundException`` is treated as already deleted.
+
+    Parameters
+    ----------
+    cluster_name:
+        The cluster name used in delivery resource naming.
+    project_id:
+        The project identifier used in destination naming.
+    """
+    suffixes = [cfg["suffix"] for cfg in _PCS_LOG_TYPES]
+    source_names = [f"{cluster_name}-{s}" for s in suffixes]
+    destination_names = [
+        f"{project_id}-{cluster_name}-{s}" for s in suffixes
+    ]
+
+    # 1. Delete deliveries that reference these sources
+    try:
+        next_token: str | None = None
+        while True:
+            kwargs: dict[str, Any] = {}
+            if next_token:
+                kwargs["nextToken"] = next_token
+            response = logs_client.describe_deliveries(**kwargs)
+            for delivery in response.get("deliveries", []):
+                if delivery.get("deliverySourceName") in source_names:
+                    try:
+                        logs_client.delete_delivery(id=delivery["id"])
+                        logger.info(
+                            "Cleaned up stale delivery '%s'",
+                            delivery["id"],
+                        )
+                    except ClientError as exc:
+                        if exc.response["Error"]["Code"] != "ResourceNotFoundException":
+                            raise
+            next_token = response.get("nextToken")
+            if not next_token:
+                break
+    except ClientError as exc:
+        logger.warning(
+            "Failed to list/delete stale deliveries: %s",
+            exc.response["Error"].get("Message", str(exc)),
+        )
+
+    # 2. Delete delivery destinations
+    for name in destination_names:
+        try:
+            logs_client.delete_delivery_destination(name=name)
+            logger.info("Cleaned up stale delivery destination '%s'", name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ResourceNotFoundException":
+                logger.warning(
+                    "Failed to delete delivery destination '%s': %s",
+                    name,
+                    exc.response["Error"].get("Message", str(exc)),
+                )
+
+    # 3. Delete delivery sources
+    for name in source_names:
+        try:
+            logs_client.delete_delivery_source(name=name)
+            logger.info("Cleaned up stale delivery source '%s'", name)
+        except ClientError as exc:
+            if exc.response["Error"]["Code"] != "ResourceNotFoundException":
+                logger.warning(
+                    "Failed to delete delivery source '%s': %s",
+                    name,
+                    exc.response["Error"].get("Message", str(exc)),
+                )
+
+
 def _configure_delivery_for_log_type(
     cluster_name: str,
     project_id: str,
@@ -2612,20 +2720,25 @@ def _configure_delivery_for_log_type(
             raise
 
     # --- PutDeliveryDestination ---
+    destination_arn = ""
     try:
-        logs_client.put_delivery_destination(
+        dest_resp = logs_client.put_delivery_destination(
             name=destination_name,
             outputFormat="json",
             deliveryDestinationConfiguration={
                 "destinationResourceArn": log_group_arn,
             },
         )
+        destination_arn = dest_resp.get("deliveryDestination", {}).get("arn", "")
     except ClientError as exc:
         if exc.response["Error"]["Code"] == "ConflictException":
             logger.info(
                 "Delivery destination already exists, reusing: %s",
                 destination_name,
             )
+            # Retrieve the existing destination ARN
+            get_resp = logs_client.get_delivery_destination(name=destination_name)
+            destination_arn = get_resp.get("deliveryDestination", {}).get("arn", "")
         else:
             logger.error(
                 "PutDeliveryDestination failed for '%s': %s",
@@ -2639,7 +2752,7 @@ def _configure_delivery_for_log_type(
     try:
         resp = logs_client.create_delivery(
             deliverySourceName=source_name,
-            deliveryDestinationArn=log_group_arn,
+            deliveryDestinationArn=destination_arn,
         )
         delivery_id = resp.get("delivery", {}).get("id", "unknown")
     except ClientError as exc:
@@ -2693,6 +2806,12 @@ def configure_scheduler_log_delivery(
     log_group_name, log_group_arn = _create_scheduler_log_group(
         project_id, cluster_name,
     )
+
+    # Clean up any stale delivery resources from a previous failed attempt.
+    # A prior creation may have registered delivery sources pointing to a
+    # PCS cluster that no longer exists, which causes CreateDelivery to
+    # reject the stale resource ARN.
+    _cleanup_stale_delivery_resources(cluster_name, project_id)
 
     delivery_ids: list[str] = []
     for log_type_cfg in _PCS_LOG_TYPES:

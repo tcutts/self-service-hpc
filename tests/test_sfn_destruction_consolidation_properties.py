@@ -57,6 +57,7 @@ from cluster_destruction import (  # noqa: E402
     delete_pcs_cluster_step,
     delete_fsx_filesystem,
     remove_mountpoint_s3_policy,
+    cleanup_scheduler_log_delivery,
     delete_iam_resources,
     delete_launch_templates,
     deregister_cluster_name_step,
@@ -149,6 +150,17 @@ def _build_mock_ec2():
     }
     mock_ec2.delete_launch_template.return_value = {}
     return mock_ec2
+
+
+def _build_mock_logs():
+    """Build a mock CloudWatch Logs client for delivery cleanup."""
+    mock_logs = MagicMock()
+    mock_logs.describe_deliveries.return_value = {"deliveries": []}
+    mock_logs.delete_delivery.return_value = {}
+    mock_logs.delete_delivery_destination.return_value = {}
+    mock_logs.delete_delivery_source.return_value = {}
+    mock_logs.delete_log_group.return_value = {}
+    return mock_logs
 
 
 # ===================================================================
@@ -276,6 +288,7 @@ class TestClusterDestructionConsolidatedCleanupEquivalence:
         mock_iam = _build_mock_iam()
         mock_ec2 = _build_mock_ec2()
         mock_dynamodb = _build_mock_dynamodb()
+        mock_logs = _build_mock_logs()
 
         # Fix datetime.now so both runs produce the same timestamp
         fixed_now = datetime(2025, 1, 15, 12, 0, 0, tzinfo=timezone.utc)
@@ -284,6 +297,7 @@ class TestClusterDestructionConsolidatedCleanupEquivalence:
             patch.object(cluster_destruction, "iam_client", mock_iam),
             patch.object(cluster_destruction, "ec2_client", mock_ec2),
             patch.object(cluster_destruction, "dynamodb", mock_dynamodb),
+            patch.object(cluster_destruction, "logs_client", mock_logs),
             patch.object(
                 cluster_destruction, "cluster_names",
                 MagicMock(**{"deregister_cluster_name.return_value": True}),
@@ -302,16 +316,17 @@ class TestClusterDestructionConsolidatedCleanupEquivalence:
 
             try:
                 # --- Sequential execution ---
-                r1 = delete_iam_resources(event)
-                r2 = delete_launch_templates({**event, **r1})
+                r0 = cleanup_scheduler_log_delivery(event)
+                r1 = delete_iam_resources({**event, **r0})
+                r2 = delete_launch_templates({**event, **r0, **r1})
                 r3 = deregister_cluster_name_step(
-                    {**event, **r1, **r2},
+                    {**event, **r0, **r1, **r2},
                 )
                 r4 = record_cluster_destroyed(
-                    {**event, **r1, **r2, **r3},
+                    {**event, **r0, **r1, **r2, **r3},
                 )
                 sequential_result = {}
-                for r in [r1, r2, r3, r4]:
+                for r in [r0, r1, r2, r3, r4]:
                     sequential_result = {**sequential_result, **r}
 
                 # --- Consolidated execution ---

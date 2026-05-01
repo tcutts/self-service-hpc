@@ -297,6 +297,10 @@ export class ClusterOperations extends Construct {
         'logs:PutRetentionPolicy',
         'logs:TagLogGroup',
         'logs:DescribeLogGroups',
+        'logs:DescribeDeliveries',
+        'logs:DeleteDelivery',
+        'logs:DeleteDeliverySource',
+        'logs:DeleteDeliveryDestination',
       ],
       resources: ['*'],
     }));
@@ -392,9 +396,9 @@ export class ClusterOperations extends Construct {
         'logs:DeleteDeliverySource',
         'logs:DeleteDeliveryDestination',
         'logs:DeleteLogGroup',
-        'logs:ListDeliveries',
-        'logs:ListDeliverySources',
-        'logs:ListDeliveryDestinations',
+        'logs:DescribeDeliveries',
+        'logs:DescribeDeliverySources',
+        'logs:DescribeDeliveryDestinations',
       ],
       resources: ['*'],
     }));

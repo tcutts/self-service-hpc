@@ -32,7 +32,11 @@ for _d in [_SHARED_DIR, _CLUSTER_OPS_DIR]:
 
 
 from botocore.exceptions import ClientError
-from errors import ValidationError
+
+# Import ValidationError via cluster_creation to avoid class identity
+# mismatches when other test files clear 'errors' from sys.modules.
+import cluster_creation  # noqa: E402
+ValidationError = cluster_creation.ValidationError
 
 
 # ---------------------------------------------------------------------------

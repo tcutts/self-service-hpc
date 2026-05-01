@@ -107,10 +107,22 @@ def _build_mock_logs_client(log_group_name=_LOG_GROUP_NAME):
         ],
     }
     mock_logs.put_delivery_source.return_value = {}
-    mock_logs.put_delivery_destination.return_value = {}
+    mock_logs.put_delivery_destination.return_value = {
+        "deliveryDestination": {
+            "arn": (
+                "arn:aws:logs:us-east-1:123456789012"
+                ":delivery-destination:mock-destination"
+            ),
+            "name": "mock-destination",
+        },
+    }
     mock_logs.create_delivery.return_value = {
         "delivery": {"id": "delivery-xxx"},
     }
+    mock_logs.describe_deliveries.return_value = {"deliveries": []}
+    mock_logs.delete_delivery.return_value = {}
+    mock_logs.delete_delivery_destination.return_value = {}
+    mock_logs.delete_delivery_source.return_value = {}
     return mock_logs
 
 

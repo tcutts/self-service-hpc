@@ -279,7 +279,7 @@ def _start_cluster_creation(
             "createdBy": caller,
             "status": "CREATING",
             "currentStep": 0,
-            "totalSteps": 12,
+            "totalSteps": 13,
             "stepDescription": "Starting cluster creation",
             "createdAt": now,
         },

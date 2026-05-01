@@ -30,7 +30,13 @@ sys.path.insert(0, _CLUSTER_OPS_DIR)
 sys.path.insert(0, _SHARED_DIR)
 
 # Clear cached modules to ensure correct imports
-for _mod in ["errors", "cluster_names", "cluster_destruction"]:
+_cached_errors = sys.modules.get("errors")
+if _cached_errors is not None:
+    _errors_file = getattr(_cached_errors, "__file__", "") or ""
+    if "cluster_operations" not in _errors_file:
+        del sys.modules["errors"]
+
+for _mod in ["cluster_names", "cluster_destruction"]:
     if _mod in sys.modules:
         del sys.modules[_mod]
 

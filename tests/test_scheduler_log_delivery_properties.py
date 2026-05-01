@@ -65,10 +65,22 @@ def _build_mock_logs_client(log_group_name: str) -> MagicMock:
         ]
     }
     mock_logs.put_delivery_source.return_value = {}
-    mock_logs.put_delivery_destination.return_value = {}
+    mock_logs.put_delivery_destination.return_value = {
+        "deliveryDestination": {
+            "arn": (
+                "arn:aws:logs:us-east-1:123456789012"
+                ":delivery-destination:mock-destination"
+            ),
+            "name": "mock-destination",
+        },
+    }
     mock_logs.create_delivery.return_value = {
         "delivery": {"id": "delivery-xxx"}
     }
+    mock_logs.describe_deliveries.return_value = {"deliveries": []}
+    mock_logs.delete_delivery.return_value = {}
+    mock_logs.delete_delivery_destination.return_value = {}
+    mock_logs.delete_delivery_source.return_value = {}
     return mock_logs
 
 
@@ -261,6 +273,10 @@ class TestDeliveryConfigurationCompleteness:
 
         # Verify each CreateDelivery links the correct source to destination
         delivery_calls = mock_logs.create_delivery.call_args_list
+        expected_dest_arn = (
+            "arn:aws:logs:us-east-1:123456789012"
+            ":delivery-destination:mock-destination"
+        )
         for i, expected in enumerate(_EXPECTED_LOG_TYPES):
             call_kwargs = delivery_calls[i][1] if delivery_calls[i][1] else {}
             if not call_kwargs:
@@ -277,9 +293,9 @@ class TestDeliveryConfigurationCompleteness:
                 f"'{expected_source_name}', "
                 f"got '{call_kwargs['deliverySourceName']}'"
             )
-            assert call_kwargs["deliveryDestinationArn"] == log_group_arn, (
+            assert call_kwargs["deliveryDestinationArn"] == expected_dest_arn, (
                 f"CreateDelivery call {i}: expected deliveryDestinationArn "
-                f"'{log_group_arn}', "
+                f"'{expected_dest_arn}', "
                 f"got '{call_kwargs['deliveryDestinationArn']}'"
             )
 
